@@ -1,0 +1,27 @@
+# Ingestion Service Configuration
+spring:
+  application:
+    name: ingestion-service
+  datasource:
+    url: jdbc:postgresql://localhost:5432/moodride
+    username: ${DB_USER:moodride}
+    password: ${DB_PASSWORD:moodride123}
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    properties:
+      hibernate:
+        dialect: org.hibernate.spatial.dialect.postgis.PostGISDialect
+  batch:
+    job:
+      enabled: false
+    initialize-schema: always
+
+server:
+  port: 8083
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus

@@ -1,0 +1,21 @@
+{
+  "name": "moodride-postgres-connector",
+  "config": {
+    "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
+    "tasks.max": "1",
+    "database.hostname": "postgres",
+    "database.port": "5432",
+    "database.user": "moodride",
+    "database.password": "moodride_dev_password",
+    "database.dbname": "moodride",
+    "database.server.name": "moodride-db",
+    "table.include.list": "public.scenic_score_tile,public.road_segment",
+    "plugin.name": "pgoutput",
+    "publication.autocreate.mode": "filtered",
+    "slot.name": "moodride_debezium_slot",
+    "transforms": "route",
+    "transforms.route.type": "org.apache.kafka.connect.transforms.RegexRouter",
+    "transforms.route.regex": "([^.]+)\\.([^.]+)\\.([^.]+)",
+    "transforms.route.replacement": "moodride.cdc.$3"
+  }
+}

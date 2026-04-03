@@ -1,0 +1,106 @@
+# Java / Maven
+target/
+*.class
+*.jar
+*.war
+*.ear
+*.log
+*.ctxt
+.mtj.tmp/
+*.swp
+*~.nib
+.classpath
+.settings/
+.loadpath
+.recommenders
+
+# Maven
+pom.xml.tag
+pom.xml.releaseBackup
+pom.xml.versionsBackup
+pom.xml.next
+release.properties
+dependency-reduced-pom.xml
+buildNumber.properties
+.mvn/timing.properties
+.mvn/wrapper/maven-wrapper.jar
+
+# IDEs
+.idea/
+*.iml
+*.iws
+*.ipr
+.vscode/
+*.code-workspace
+.metals/
+.bsp/
+
+# Node / Frontend
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.npm
+.eslintcache
+.next/
+out/
+build/
+dist/
+.env*.local
+.vercel
+.turbo
+
+# Data files (large datasets not committed)
+data/osm-samples/*.osm.pbf
+data/nlcd/*.tif
+data/elevation/*.hgt
+data/scoring-snapshots/*.sql
+*.osm
+*.pbf
+*.tif
+*.hgt
+*.shp
+*.shx
+*.dbf
+*.prj
+
+# Docker volumes
+infrastructure/docker/volumes/
+
+# Environment variables
+.env
+.env.local
+.env.production
+*.env
+!.env.example
+
+# OS
+.DS_Store
+Thumbs.db
+*.bak
+*.swp
+*.swo
+
+# Logs
+logs/
+*.log
+*.out
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# Coverage
+coverage/
+*.lcov
+.nyc_output/
+
+# Generated files
+generated/
+**/generated/

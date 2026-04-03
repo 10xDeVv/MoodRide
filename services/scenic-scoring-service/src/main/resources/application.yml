@@ -1,0 +1,34 @@
+# Scenic Scoring Service Configuration
+spring:
+  application:
+    name: scenic-scoring-service
+  datasource:
+    url: jdbc:postgresql://localhost:5432/moodride
+    username: ${DB_USER:moodride}
+    password: ${DB_PASSWORD:moodride123}
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    properties:
+      hibernate:
+        dialect: org.hibernate.spatial.dialect.postgis.PostGISDialect
+  batch:
+    job:
+      enabled: false
+    initialize-schema: always
+
+server:
+  port: 8085
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+
+# Scheduling configuration
+moodride:
+  scoring:
+    schedule: "0 0 1 * * *"  # Weekly on Mondays at 1 AM UTC
+    timeout-minutes: 120
+    batch-size: 1000

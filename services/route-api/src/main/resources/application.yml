@@ -1,0 +1,70 @@
+# Route API Service Configuration
+
+spring:
+  application:
+    name: route-api
+  
+  # Database Configuration
+  datasource:
+    url: jdbc:postgresql://localhost:5432/moodride
+    username: ${DB_USER:moodride}
+    password: ${DB_PASSWORD:moodride123}
+    driver-class-name: org.postgresql.Driver
+  
+  jpa:
+    hibernate:
+      ddl-auto: validate  # Use Flyway for schema management
+    show-sql: false
+    properties:
+      hibernate:
+        dialect: org.hibernate.spatial.dialect.postgis.PostGISDialect
+        format_sql: true
+  
+  # Flyway Configuration
+  flyway:
+    locations: classpath:db/migration
+    baseline-on-migrate: true
+  
+  # Kafka Configuration
+  kafka:
+    bootstrap-servers: localhost:9092
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+  
+  # Redis Configuration
+  redis:
+    host: localhost
+    port: 6379
+    timeout: 2000ms
+    lettuce:
+      pool:
+        max-active: 20
+        max-idle: 10
+
+# Server Configuration
+server:
+  port: 8080
+
+# Management (Actuator) Configuration
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      show-details: when-authorized
+  metrics:
+    export:
+      prometheus:
+        enabled: true
+
+# Logging Configuration
+logging:
+  level:
+    com.moodride: DEBUG
+    org.springframework.kafka: INFO
+    org.hibernate.SQL: INFO
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss} - %msg%n"
