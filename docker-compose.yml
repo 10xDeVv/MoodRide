@@ -1,0 +1,158 @@
+version: '3.8'
+
+services:
+  # =====================================================================
+  # ZOOKEEPER
+  # =====================================================================
+  # Zookeeper is required for Kafka coordination and cluster management.
+  # It maintains broker metadata and coordinates distributed operations.
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.1
+    container_name: moodride-zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+      ZOOKEEPER_SYNC_LIMIT: 5
+      ZOOKEEPER_INIT_LIMIT: 10
+    ports:
+      - "2181:2181"
+    volumes:
+      - zookeeper_data:/var/lib/zookeeper/data
+      - zookeeper_logs:/var/lib/zookeeper/log
+    healthcheck:
+      test: [ "CMD", "echo", "ruok", "|", "nc", "-w", "1", "localhost", "2181" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - moodride-network
+    restart: unless-stopped
+
+  # =====================================================================
+  # KAFKA
+  # =====================================================================
+  # Apache Kafka is used for event streaming and asynchronous communication
+  # between microservices. It handles ride requests, driver events, etc.
+  kafka:
+    image: confluentinc/cp-kafka:7.5.1
+    container_name: moodride-kafka
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://kafka:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'true'
+      KAFKA_NUM_NETWORK_THREADS: 8
+      KAFKA_NUM_IO_THREADS: 8
+      KAFKA_LOG_RETENTION_HOURS: 168
+      KAFKA_LOG_SEGMENT_BYTES: 1073741824
+    ports:
+      - "9092:9092"
+      - "29092:29092"
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    healthcheck:
+      test: [ "CMD", "kafka-broker-api-versions.sh", "--bootstrap-server", "kafka:9092" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - moodride-network
+    restart: unless-stopped
+
+  # =====================================================================
+  # POSTGRESQL
+  # =====================================================================
+  # PostgreSQL 15 with PostGIS extension for geospatial queries.
+  # Stores all persistent application data including users, rides, drivers,
+  # locations, and route information. PostGIS enables geographic data types
+  # and distance calculations for ride matching and location services.
+  postgres:
+    image: postgis/postgis:15-3.3
+    container_name: moodride-postgres
+    environment:
+      POSTGRES_DB: moodride
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8"
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./docker-entrypoint-initdb.d:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U postgres" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - moodride-network
+    restart: unless-stopped
+    command:
+      - "postgres"
+      - "-c"
+      - "max_connections=200"
+      - "-c"
+      - "shared_buffers=256MB"
+      - "-c"
+      - "effective_cache_size=1GB"
+      - "-c"
+      - "work_mem=4MB"
+      - "-c"
+      - "password_encryption=md5"
+
+  # =====================================================================
+  # REDIS
+  # =====================================================================
+  # Redis is used for distributed caching, session management, and rate limiting.
+  # It provides fast in-memory data access for frequently used data like
+  # driver availability, ride cache, and user sessions.
+  redis:
+    image: redis:7.0-alpine
+    container_name: moodride-redis
+    command: redis-server --requirepass redis_password --maxmemory 512mb --maxmemory-policy allkeys-lru
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: [ "CMD", "redis-cli", "--raw", "incr", "ping" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - moodride-network
+    restart: unless-stopped
+
+# =====================================================================
+# NAMED VOLUMES
+# =====================================================================
+# Named volumes are persisted across container restarts and removals.
+# They survive `docker-compose down` operations for data persistence.
+volumes:
+  postgres_data:
+    driver: local
+  zookeeper_data:
+    driver: local
+  zookeeper_logs:
+    driver: local
+  kafka_data:
+    driver: local
+  redis_data:
+    driver: local
+
+# =====================================================================
+# NETWORKS
+# =====================================================================
+# Custom bridge network allows services to communicate by hostname.
+# For example, the app can connect to postgres at hostname "postgres"
+# and kafka at hostname "kafka" instead of IP addresses.
+networks:
+  moodride-network:
+    driver: bridge
+    name: moodride-network

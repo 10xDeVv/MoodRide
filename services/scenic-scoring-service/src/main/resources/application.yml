@@ -3,19 +3,54 @@ spring:
   application:
     name: scenic-scoring-service
   datasource:
-    url: jdbc:postgresql://localhost:5432/moodride
-    username: ${DB_USER:moodride}
-    password: ${DB_PASSWORD:moodride123}
+    url: jdbc:postgresql://localhost:5432/moodride?sslmode=disable
+    username: postgres
+    password: postgres
+    driver-class-name: org.postgresql.Driver
   jpa:
     hibernate:
       ddl-auto: validate
+    show-sql: false
+    
     properties:
       hibernate:
-        dialect: org.hibernate.spatial.dialect.postgis.PostGISDialect
+        # PostGIS enabled in database
+        jdbc:
+          batch_size: 20
   batch:
     job:
       enabled: false
     initialize-schema: always
+  
+  # Kafka Configuration
+  kafka:
+    bootstrap-servers: localhost:9092
+    producer:
+      acks: all
+      retries: 3
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+    admin:
+      properties:
+        bootstrap.servers: localhost:9092
+    consumer:
+      bootstrap-servers: localhost:9092
+      group-id: scenic-scoring-group
+      auto-offset-reset: earliest
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+  
+  # Redis Configuration
+  redis:
+    host: localhost
+    port: 6379
+    password: redis_password
+    timeout: 2000ms
+  
+  # Flyway Configuration
+  flyway:
+    locations: classpath:db/migration
+    out-of-order: false
 
 server:
   port: 8085
@@ -32,3 +67,9 @@ moodride:
     schedule: "0 0 1 * * *"  # Weekly on Mondays at 1 AM UTC
     timeout-minutes: 120
     batch-size: 1000
+
+# Logging Configuration
+logging:
+  level:
+    root: INFO
+    org.springframework.kafka: DEBUG

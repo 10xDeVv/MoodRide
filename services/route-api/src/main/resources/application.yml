@@ -6,36 +6,50 @@ spring:
   
   # Database Configuration
   datasource:
-    url: jdbc:postgresql://localhost:5432/moodride
-    username: ${DB_USER:moodride}
-    password: ${DB_PASSWORD:moodride123}
+    url: jdbc:postgresql://localhost:5432/moodride?sslmode=disable
+    username: postgres
+    password: postgres
     driver-class-name: org.postgresql.Driver
   
   jpa:
     hibernate:
       ddl-auto: validate  # Use Flyway for schema management
     show-sql: false
+    
     properties:
       hibernate:
-        dialect: org.hibernate.spatial.dialect.postgis.PostGISDialect
+        # PostGIS enabled in database
         format_sql: true
+        jdbc:
+          batch_size: 20
   
   # Flyway Configuration
   flyway:
     locations: classpath:db/migration
-    baseline-on-migrate: true
+    out-of-order: false
   
   # Kafka Configuration
   kafka:
     bootstrap-servers: localhost:9092
     producer:
+      acks: all
+      retries: 3
       key-serializer: org.apache.kafka.common.serialization.StringSerializer
       value-serializer: org.apache.kafka.common.serialization.StringSerializer
+    admin:
+      properties:
+        bootstrap.servers: localhost:9092
+    consumer:
+      bootstrap-servers: localhost:9092
+      auto-offset-reset: earliest
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
   
   # Redis Configuration
   redis:
     host: localhost
     port: 6379
+    password: redis_password
     timeout: 2000ms
     lettuce:
       pool:
@@ -63,8 +77,5 @@ management:
 # Logging Configuration
 logging:
   level:
-    com.moodride: DEBUG
-    org.springframework.kafka: INFO
-    org.hibernate.SQL: INFO
-  pattern:
-    console: "%d{yyyy-MM-dd HH:mm:ss} - %msg%n"
+    root: INFO
+    org.springframework.kafka: DEBUG

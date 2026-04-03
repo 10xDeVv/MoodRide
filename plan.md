@@ -137,7 +137,7 @@ Build a production-ready scenic route generation platform that maximizes scenic 
 ---
 
 ### Phase 3: PostGIS Integration & Road Graph
-**Status:** Not started  
+**Status:** ✅ COMPLETE
 **Estimated Time:** 1 week  
 **Dependencies:** Phase 1, Phase 2
 
@@ -155,25 +155,28 @@ Build a production-ready scenic route generation platform that maximizes scenic 
 
 ---
 
-### Phase 4: Route Generation Worker
-**Status:** Not started  
-**Estimated Time:** 1-2 weeks  
+### Phase 4: Docker Infrastructure & End-to-End Testing
+**Status:** In Progress
+**Estimated Time:** 1-2 days
 **Dependencies:** Phase 3
 
 **Scope:**
-- Beam search algorithm (K=10, time-budget pruning)
-- Circular loop enforcement (A* return leg)
-- Route quality scoring
-- Scenic highlight extraction
-- Kafka consumer worker
-- Unit tests for all time budgets (30/60/90/120 min)
-- Integration tests
+- Docker Compose file for PostgreSQL + PostGIS, Kafka, Redis
+- Update application.yml for all services to connect to Docker containers
+- Run Flyway migrations to set up schema
+- Load sample road segments and scenic tiles
+- Manual end-to-end test: POST /generate → Kafka → Algorithm → Database → Response
+- Verify job state transitions (SUBMITTED → PROCESSING → COMPLETED)
+- Verify sample routes are valid loops and within time budget
 
 **Success Criteria:**
+- All containers healthy and inter-connected
+- Migrations run successfully, schema created
+- Sample data loads without errors
+- POST /generate returns 202 with jobId
+- Route appears in database after worker processes
 - Routes are valid loops (start ≈ end within 500m)
 - Duration within ±10% of budget
-- Scenic score > 60 for Portland "coastal" vibe
-- Generation time: 2-5 seconds
 
 ---
 
