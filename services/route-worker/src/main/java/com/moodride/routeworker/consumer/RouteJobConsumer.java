@@ -3,6 +3,7 @@ package com.moodride.routeworker.consumer;
 import com.moodride.datamodels.RouteJob;
 import com.moodride.eventmodels.RouteJobEvent;
 import com.moodride.routeworker.repository.RouteJobRepository;
+import com.moodride.routeworker.service.RouteGenerationService;
 import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -13,9 +14,12 @@ import java.util.UUID;
 public class RouteJobConsumer {
     
     private final RouteJobRepository jobRepository;
+    private final RouteGenerationService routeGenerationService;
     
-    public RouteJobConsumer(RouteJobRepository jobRepository) {
+    public RouteJobConsumer(RouteJobRepository jobRepository,
+                           RouteGenerationService routeGenerationService) {
         this.jobRepository = jobRepository;
+        this.routeGenerationService = routeGenerationService;
     }
     
     @KafkaListener(topics = "route-jobs", groupId = "route-workers")
@@ -40,9 +44,6 @@ public class RouteJobConsumer {
     }
     
     private void processRoute(RouteJob job) {
-        // Placeholder for beam search algorithm
-        // Will be implemented in Phase 3
-        job.markCompleted();
-        jobRepository.save(job);
+        routeGenerationService.processRoute(job);
     }
 }
