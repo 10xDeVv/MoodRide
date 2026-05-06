@@ -1,0 +1,25 @@
+spring:
+  config:
+    activate:
+      on-profile: prod
+
+  datasource:
+    url: ${SPRING_DATASOURCE_URL}
+    username: ${SPRING_DATASOURCE_USERNAME}
+    password: ${SPRING_DATASOURCE_PASSWORD}
+
+  kafka:
+    bootstrap-servers: ${SPRING_KAFKA_BOOTSTRAP_SERVERS}
+
+  redis:
+    host: ${SPRING_REDIS_HOST}
+    port: ${SPRING_REDIS_PORT:6379}
+    password: ${SPRING_REDIS_PASSWORD}
+
+moodride:
+  elevation:
+    opentopodata:
+      enabled: ${MOODRIDE_OPENTOPO_ENABLED:true}
+      base-url: ${MOODRIDE_OPENTOPO_BASE_URL:https://api.opentopodata.org}
+      dataset: ${MOODRIDE_OPENTOPO_DATASET:srtm30m}
+

@@ -1,0 +1,25 @@
+spring:
+  config:
+    activate:
+      on-profile: docker
+
+  datasource:
+    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://postgres:5432/moodride?sslmode=disable}
+    username: ${SPRING_DATASOURCE_USERNAME:postgres}
+    password: ${SPRING_DATASOURCE_PASSWORD:postgres}
+
+  kafka:
+    bootstrap-servers: ${SPRING_KAFKA_BOOTSTRAP_SERVERS:kafka:9092}
+
+  redis:
+    host: ${SPRING_REDIS_HOST:redis}
+    port: ${SPRING_REDIS_PORT:6379}
+    password: ${SPRING_REDIS_PASSWORD:redis_password}
+
+moodride:
+  elevation:
+    opentopodata:
+      enabled: true
+      base-url: ${MOODRIDE_OPENTOPO_BASE_URL:https://api.opentopodata.org}
+      dataset: ${MOODRIDE_OPENTOPO_DATASET:srtm30m}
+
