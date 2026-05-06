@@ -82,10 +82,21 @@ mkdir -p "$extract_dir"
 echo "Extracting data release: $ASSET_PATH"
 tar -xzf "$ASSET_PATH" -C "$extract_dir"
 
-if [ ! -f "$extract_dir/${DATASET_BASENAME}.osrm" ]; then
-  echo "Missing required file in asset: ${DATASET_BASENAME}.osrm" >&2
-  exit 1
-fi
+# Validate MLD dataset outputs (base .osrm file itself may not be present).
+required_files=(
+  "${DATASET_BASENAME}.osrm.partition"
+  "${DATASET_BASENAME}.osrm.cells"
+  "${DATASET_BASENAME}.osrm.cell_metrics"
+  "${DATASET_BASENAME}.osrm.mldgr"
+  "${DATASET_BASENAME}.osrm.fileIndex"
+  "${DATASET_BASENAME}.osrm.properties"
+)
+for req in "${required_files[@]}"; do
+  if [ ! -f "$extract_dir/$req" ]; then
+    echo "Missing required file in asset: $req" >&2
+    exit 1
+  fi
+done
 
 echo "Copying dataset files into /opt/moodride/data/osrm"
 cp "$extract_dir/${DATASET_BASENAME}.osrm"* data/osrm/
