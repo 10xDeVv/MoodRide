@@ -172,10 +172,12 @@ jobs:
           scp scripts/deploy/deploy_prod.sh scripts/deploy/rollback_prod.sh scripts/deploy/deploy_data_release.sh "${{ secrets.PROD_SSH_USER }}@${{ secrets.PROD_SSH_HOST }}:/opt/moodride/scripts/deploy/"
 
       - name: Upload .env.prod when secret is configured
-        if: ${{ secrets.PROD_ENV_FILE != '' }}
+        env:
+          PROD_ENV_FILE: ${{ secrets.PROD_ENV_FILE }}
+        if: env.PROD_ENV_FILE != ''
         shell: bash
         run: |
-          printf '%s' "${{ secrets.PROD_ENV_FILE }}" > /tmp/moodride.env.prod
+          printf '%s' "$PROD_ENV_FILE" > /tmp/moodride.env.prod
           scp /tmp/moodride.env.prod "${{ secrets.PROD_SSH_USER }}@${{ secrets.PROD_SSH_HOST }}:/tmp/moodride.env.prod"
           rm -f /tmp/moodride.env.prod
           ssh "${{ secrets.PROD_SSH_USER }}@${{ secrets.PROD_SSH_HOST }}" "if [ ! -f /opt/moodride/.env.prod ]; then install -m 600 /tmp/moodride.env.prod /opt/moodride/.env.prod; fi; rm -f /tmp/moodride.env.prod"
