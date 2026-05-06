@@ -1,0 +1,23 @@
+package com.moodride.routeapi.dto;
+
+import java.time.Instant;
+import java.util.List;
+import java.util.UUID;
+
+public record RouteJobStatusResponse(
+        UUID jobId,
+        String status,
+        UUID routeId,
+        String routeUrl,
+        List<RouteOptionResponse> routeOptions,
+        String reason,
+        Instant queuedAt,
+        Instant startedAt,
+        Instant completedAt,
+        Instant failedAt,
+        Integer estimatedRemainingSeconds,
+        int retryCount,
+        int maxRetries
+) {
+}
+

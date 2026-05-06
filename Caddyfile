@@ -1,0 +1,13 @@
+app.moodrides.com {
+    handle /api/* {
+        reverse_proxy route-api:8080
+    }
+
+    handle /ws/* {
+        reverse_proxy notification-service:8084
+    }
+
+    handle {
+        reverse_proxy frontend:3000
+    }
+}

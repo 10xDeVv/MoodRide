@@ -1,0 +1,190 @@
+name: Deploy Production Stack
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "services/**"
+      - "frontend/**"
+      - "docker-compose.prod.yml"
+      - "Caddyfile"
+      - "scripts/deploy/**"
+      - ".github/workflows/deploy-prod.yml"
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Image tag to deploy (defaults to sha-<commit>)"
+        required: false
+        type: string
+      skip_build:
+        description: "Skip image build/push and deploy an existing tag"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  deploy:
+    name: Build and Deploy
+    runs-on: ubuntu-latest
+    environment: production
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: false
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve release values
+        id: release
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          namespace="${{ vars.GHCR_NAMESPACE }}"
+          if [ -z "$namespace" ]; then
+            namespace="${{ github.repository_owner }}"
+          fi
+          namespace="$(echo "$namespace" | tr '[:upper:]' '[:lower:]')"
+
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.skip_build }}" = "true" ] && [ -z "${{ inputs.image_tag }}" ]; then
+            echo "image_tag is required when skip_build=true." >&2
+            exit 1
+          fi
+
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ inputs.image_tag }}" ]; then
+            image_tag="${{ inputs.image_tag }}"
+          else
+            short_sha="${GITHUB_SHA::12}"
+            image_tag="sha-${short_sha}"
+          fi
+
+          should_build="true"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.skip_build }}" = "true" ]; then
+            should_build="false"
+          fi
+
+          api_base_url="${{ vars.NEXT_PUBLIC_API_BASE_URL }}"
+          if [ -z "$api_base_url" ]; then
+            api_base_url="https://app.moodrides.com"
+          fi
+
+          ws_base_url="${{ vars.NEXT_PUBLIC_WS_BASE_URL }}"
+          if [ -z "$ws_base_url" ]; then
+            ws_base_url="wss://app.moodrides.com/ws"
+          fi
+
+          echo "ghcr_namespace=$namespace" >> "$GITHUB_OUTPUT"
+          echo "image_tag=$image_tag" >> "$GITHUB_OUTPUT"
+          echo "should_build=$should_build" >> "$GITHUB_OUTPUT"
+          echo "api_base_url=$api_base_url" >> "$GITHUB_OUTPUT"
+          echo "ws_base_url=$ws_base_url" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Java 25
+        if: steps.release.outputs.should_build == 'true'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+          cache: maven
+
+      - name: Package services
+        if: steps.release.outputs.should_build == 'true'
+        shell: bash
+        run: |
+          mvn -pl services/route-api,services/route-worker,services/notification-service -am package -DskipTests
+
+      - name: Set up Docker Buildx
+        if: steps.release.outputs.should_build == 'true'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: steps.release.outputs.should_build == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push route-api
+        if: steps.release.outputs.should_build == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: services/route-api
+          file: services/route-api/Dockerfile
+          push: true
+          tags: ghcr.io/${{ steps.release.outputs.ghcr_namespace }}/moodride-route-api:${{ steps.release.outputs.image_tag }}
+
+      - name: Build and push route-worker
+        if: steps.release.outputs.should_build == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: services/route-worker
+          file: services/route-worker/Dockerfile
+          push: true
+          tags: ghcr.io/${{ steps.release.outputs.ghcr_namespace }}/moodride-route-worker:${{ steps.release.outputs.image_tag }}
+
+      - name: Build and push notification-service
+        if: steps.release.outputs.should_build == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: services/notification-service
+          file: services/notification-service/Dockerfile
+          push: true
+          tags: ghcr.io/${{ steps.release.outputs.ghcr_namespace }}/moodride-notification-service:${{ steps.release.outputs.image_tag }}
+
+      - name: Build and push frontend
+        if: steps.release.outputs.should_build == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: frontend/moodride-web
+          file: frontend/moodride-web/Dockerfile
+          push: true
+          build-args: |
+            NEXT_PUBLIC_API_BASE_URL=${{ steps.release.outputs.api_base_url }}
+            NEXT_PUBLIC_WS_BASE_URL=${{ steps.release.outputs.ws_base_url }}
+            NEXT_PUBLIC_MAPBOX_ACCESS_TOKEN=${{ secrets.NEXT_PUBLIC_MAPBOX_ACCESS_TOKEN }}
+          tags: ghcr.io/${{ steps.release.outputs.ghcr_namespace }}/moodride-frontend:${{ steps.release.outputs.image_tag }}
+
+      - name: Configure SSH key
+        shell: bash
+        run: |
+          set -euo pipefail
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "${{ secrets.PROD_SSH_PRIVATE_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H "${{ secrets.PROD_SSH_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Ensure server directories
+        shell: bash
+        run: |
+          ssh "${{ secrets.PROD_SSH_USER }}@${{ secrets.PROD_SSH_HOST }}" "mkdir -p /opt/moodride/scripts/deploy /opt/moodride/data/osrm"
+
+      - name: Upload deployment files
+        shell: bash
+        run: |
+          scp docker-compose.prod.yml Caddyfile "${{ secrets.PROD_SSH_USER }}@${{ secrets.PROD_SSH_HOST }}:/opt/moodride/"
+          scp scripts/deploy/deploy_prod.sh scripts/deploy/rollback_prod.sh scripts/deploy/deploy_data_release.sh "${{ secrets.PROD_SSH_USER }}@${{ secrets.PROD_SSH_HOST }}:/opt/moodride/scripts/deploy/"
+
+      - name: Upload .env.prod when secret is configured
+        if: ${{ secrets.PROD_ENV_FILE != '' }}
+        shell: bash
+        run: |
+          printf '%s' "${{ secrets.PROD_ENV_FILE }}" > /tmp/moodride.env.prod
+          scp /tmp/moodride.env.prod "${{ secrets.PROD_SSH_USER }}@${{ secrets.PROD_SSH_HOST }}:/tmp/moodride.env.prod"
+          rm -f /tmp/moodride.env.prod
+          ssh "${{ secrets.PROD_SSH_USER }}@${{ secrets.PROD_SSH_HOST }}" "if [ ! -f /opt/moodride/.env.prod ]; then install -m 600 /tmp/moodride.env.prod /opt/moodride/.env.prod; fi; rm -f /tmp/moodride.env.prod"
+
+      - name: Run remote deploy
+        shell: bash
+        run: |
+          ssh "${{ secrets.PROD_SSH_USER }}@${{ secrets.PROD_SSH_HOST }}" "\
+            chmod +x /opt/moodride/scripts/deploy/*.sh && \
+            /opt/moodride/scripts/deploy/deploy_prod.sh \
+              --tag '${{ steps.release.outputs.image_tag }}' \
+              --namespace '${{ steps.release.outputs.ghcr_namespace }}'"

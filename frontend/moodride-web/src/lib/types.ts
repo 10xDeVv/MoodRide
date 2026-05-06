@@ -1,0 +1,116 @@
+export type Vibe = "coastal" | "mountain" | "forest" | "countryside" | "riverside" | "open_roads";
+
+export interface RouteRequest {
+  userId: string;
+  lat: number;
+  lng: number;
+  timeBudgetMinutes: number;
+  vibes: string[];
+  preferenceVector: Record<string, unknown>;
+}
+
+export interface RouteSubmissionResponse {
+  jobId: string;
+  status: string;
+  estimatedCompletionSeconds: number;
+  statusUrl: string;
+  wsChannel: string;
+  queuedAt: string;
+  retryCount: number;
+  maxRetries: number;
+}
+
+export interface RouteOptionResponse {
+  profile: string;
+  routeId: string;
+  routeUrl: string;
+  scenicScore: number;
+  totalDistanceKm: number;
+  estimatedDurationMinutes: number;
+}
+
+export interface RouteJobStatusResponse {
+  jobId: string;
+  status: string;
+  routeId: string | null;
+  routeUrl: string | null;
+  routeOptions: RouteOptionResponse[];
+  reason: string | null;
+  queuedAt: string;
+  startedAt: string | null;
+  completedAt: string | null;
+  failedAt: string | null;
+  estimatedRemainingSeconds: number | null;
+  retryCount: number;
+  maxRetries: number;
+}
+
+export interface RouteDetailResponse {
+  routeId: string;
+  jobId: string;
+  routeUrl: string;
+  scenicScore: number;
+  qualityTier: string;
+  totalDistanceKm: number;
+  estimatedDurationMinutes: number;
+  timeBudgetMinutes: number | null;
+  startLat: number;
+  startLng: number;
+  vibes: string[];
+  geometry: {
+    type: "Feature";
+    geometry: {
+      type: "LineString";
+      coordinates: [number, number][];
+    };
+    properties: {
+      segmentScores: number[];
+      segmentColors: string[];
+    };
+  };
+  scenicHighlights: Record<string, unknown>[];
+  routeOptions: RouteOptionResponse[];
+  algorithmVersion: string;
+  beamCandidates: number | null;
+  computationTimeMs: number | null;
+  userRating: number | null;
+  ratedAt: string | null;
+  createdAt: string;
+  expiresAt: string | null;
+}
+
+export interface ScenicRegion {
+  h3Index: string;
+  scenicScore: number;
+  centerLat: number;
+  centerLng: number;
+  dominantFeature: string;
+  confidence: number;
+}
+
+export interface ScenicRegionsResponse {
+  regions: ScenicRegion[];
+  totalRegions: number;
+  boundingBox: {
+    north: number;
+    south: number;
+    east: number;
+    west: number;
+  };
+}
+
+export interface JobSocketEvent {
+  jobId: string;
+  routeId?: string;
+  scenicScore?: number;
+  reason?: string;
+  retryable?: boolean;
+  timestamp?: string;
+}
+
+export interface RouteRatingResponse {
+  routeId: string;
+  rating: number;
+  ratedAt: string;
+}
+

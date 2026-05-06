@@ -1,0 +1,174 @@
+services:
+  postgres:
+    image: postgis/postgis:15-3.3
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    command:
+      - "postgres"
+      - "-c"
+      - "wal_level=logical"
+      - "-c"
+      - "max_replication_slots=8"
+      - "-c"
+      - "max_wal_senders=8"
+    networks:
+      - internal
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.1
+    restart: unless-stopped
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+      KAFKA_HEAP_OPTS: "-Xmx256m"
+    volumes:
+      - zookeeper_data:/var/lib/zookeeper/data
+    networks:
+      - internal
+
+  kafka:
+    image: confluentinc/cp-kafka:7.5.1
+    restart: unless-stopped
+    depends_on:
+      - zookeeper
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_LOG_RETENTION_HOURS: 24
+      KAFKA_LOG_RETENTION_BYTES: 1073741824
+      KAFKA_HEAP_OPTS: "-Xmx512m"
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    networks:
+      - internal
+
+  redis:
+    image: redis:7.0-alpine
+    restart: unless-stopped
+    command: >
+      redis-server
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+      --requirepass ${REDIS_PASSWORD}
+    volumes:
+      - redis_data:/data
+    networks:
+      - internal
+
+  osrm:
+    image: ghcr.io/project-osrm/osrm-backend:v5.27.1
+    restart: unless-stopped
+    command: osrm-routed --algorithm mld /data/${OSRM_DATASET_BASENAME}.osrm
+    volumes:
+      - ./data/osrm:/data:ro
+    networks:
+      - internal
+
+  route-api:
+    image: ghcr.io/${GHCR_NAMESPACE}/moodride-route-api:${IMAGE_TAG}
+    restart: unless-stopped
+    depends_on:
+      - postgres
+      - kafka
+      - redis
+    environment:
+      SPRING_PROFILES_ACTIVE: prod
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB}
+      SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER}
+      SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD}
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      SPRING_KAFKA_CONSUMER_BOOTSTRAP_SERVERS: kafka:29092
+      SPRING_KAFKA_PRODUCER_BOOTSTRAP_SERVERS: kafka:29092
+      SPRING_KAFKA_ADMIN_PROPERTIES_BOOTSTRAP_SERVERS: kafka:29092
+      SPRING_DATA_REDIS_HOST: redis
+      SPRING_DATA_REDIS_PASSWORD: ${REDIS_PASSWORD}
+      MOODRIDE_CORS_ALLOWED_ORIGINS: ${MOODRIDE_CORS_ALLOWED_ORIGINS}
+    networks:
+      - internal
+
+  route-worker:
+    image: ghcr.io/${GHCR_NAMESPACE}/moodride-route-worker:${IMAGE_TAG}
+    restart: unless-stopped
+    depends_on:
+      - postgres
+      - kafka
+      - redis
+      - osrm
+    environment:
+      SPRING_PROFILES_ACTIVE: prod
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB}
+      SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER}
+      SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD}
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      SPRING_KAFKA_CONSUMER_BOOTSTRAP_SERVERS: kafka:29092
+      SPRING_KAFKA_PRODUCER_BOOTSTRAP_SERVERS: kafka:29092
+      SPRING_KAFKA_ADMIN_PROPERTIES_BOOTSTRAP_SERVERS: kafka:29092
+      SPRING_DATA_REDIS_HOST: redis
+      SPRING_DATA_REDIS_PASSWORD: ${REDIS_PASSWORD}
+      MOODRIDE_OSRM_BASE_URL: http://osrm:5000
+      MOODRIDE_CACHE_GRAPH_WARMUP_ENABLED: "false"
+    networks:
+      - internal
+
+  notification-service:
+    image: ghcr.io/${GHCR_NAMESPACE}/moodride-notification-service:${IMAGE_TAG}
+    restart: unless-stopped
+    depends_on:
+      - kafka
+      - redis
+    environment:
+      SPRING_PROFILES_ACTIVE: prod
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      SPRING_KAFKA_CONSUMER_BOOTSTRAP_SERVERS: kafka:29092
+      SPRING_KAFKA_PRODUCER_BOOTSTRAP_SERVERS: kafka:29092
+      SPRING_KAFKA_ADMIN_PROPERTIES_BOOTSTRAP_SERVERS: kafka:29092
+      SPRING_DATA_REDIS_HOST: redis
+      SPRING_DATA_REDIS_PASSWORD: ${REDIS_PASSWORD}
+    networks:
+      - internal
+
+  frontend:
+    image: ghcr.io/${GHCR_NAMESPACE}/moodride-frontend:${IMAGE_TAG}
+    restart: unless-stopped
+    networks:
+      - internal
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - route-api
+      - notification-service
+      - frontend
+    networks:
+      - internal
+      - external
+
+networks:
+  internal:
+    driver: bridge
+  external:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  kafka_data:
+  zookeeper_data:
+  redis_data:
+  caddy_data:
+  caddy_config:

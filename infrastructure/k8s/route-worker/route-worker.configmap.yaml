@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: route-worker-config
+  namespace: moodride
+data:
+  SPRING_DATASOURCE_URL: jdbc:postgresql://postgres.moodride.svc.cluster.local:5432/moodride?sslmode=disable
+  SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka.moodride.svc.cluster.local:9092
+  SPRING_REDIS_HOST: redis.moodride.svc.cluster.local
+  SPRING_REDIS_PORT: "6379"
+  MANAGEMENT_ENDPOINTS_WEB_EXPOSURE_INCLUDE: health,info,metrics,prometheus
+

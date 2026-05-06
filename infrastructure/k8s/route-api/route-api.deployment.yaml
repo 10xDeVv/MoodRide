@@ -1,0 +1,49 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: route-api
+  namespace: moodride
+  labels:
+    app: route-api
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: route-api
+  template:
+    metadata:
+      labels:
+        app: route-api
+    spec:
+      containers:
+        - name: route-api
+          image: moodride/route-api:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: route-api-config
+            - secretRef:
+                name: route-api-secret
+          readinessProbe:
+            httpGet:
+              path: /actuator/health
+              port: 8080
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /actuator/health
+              port: 8080
+            initialDelaySeconds: 45
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: "200m"
+              memory: "512Mi"
+            limits:
+              cpu: "1000m"
+              memory: "1Gi"
+

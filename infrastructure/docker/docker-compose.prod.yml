@@ -1,0 +1,17 @@
+services:
+  postgres:
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+
+  redis:
+    restart: unless-stopped
+    command: sh -c 'redis-server /usr/local/etc/redis/redis.conf --requirepass "$${REDIS_PASSWORD}"'
+
+  kafka:
+    restart: unless-stopped
+
+  osrm:
+    restart: unless-stopped

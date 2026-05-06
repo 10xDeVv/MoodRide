@@ -1,0 +1,86 @@
+name: Deploy Data Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "GitHub release tag that contains the OSRM data asset"
+        required: true
+        type: string
+      dataset_basename:
+        description: "Dataset basename (example: canada-latest)"
+        required: true
+        type: string
+      asset_name:
+        description: "Asset name in release"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  deploy-data:
+    name: Pull Release Asset and Deploy
+    runs-on: ubuntu-latest
+    environment: production
+    concurrency:
+      group: deploy-data-production
+      cancel-in-progress: false
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve asset name
+        id: asset
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -n "${{ inputs.asset_name }}" ]; then
+            asset_name="${{ inputs.asset_name }}"
+          else
+            asset_name="osrm-${{ inputs.dataset_basename }}.tar.gz"
+          fi
+          echo "asset_name=$asset_name" >> "$GITHUB_OUTPUT"
+
+      - name: Download release asset
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/moodride-data-release
+          gh release download "${{ inputs.release_tag }}" \
+            --repo "${{ github.repository }}" \
+            --pattern "${{ steps.asset.outputs.asset_name }}" \
+            --dir /tmp/moodride-data-release
+
+      - name: Configure SSH key
+        shell: bash
+        run: |
+          set -euo pipefail
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "${{ secrets.PROD_SSH_PRIVATE_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H "${{ secrets.PROD_SSH_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Ensure server directories
+        shell: bash
+        run: |
+          ssh "${{ secrets.PROD_SSH_USER }}@${{ secrets.PROD_SSH_HOST }}" "mkdir -p /opt/moodride/scripts/deploy /opt/moodride/data/releases"
+
+      - name: Upload deploy script and asset
+        shell: bash
+        run: |
+          scp scripts/deploy/deploy_data_release.sh "${{ secrets.PROD_SSH_USER }}@${{ secrets.PROD_SSH_HOST }}:/opt/moodride/scripts/deploy/"
+          scp "/tmp/moodride-data-release/${{ steps.asset.outputs.asset_name }}" "${{ secrets.PROD_SSH_USER }}@${{ secrets.PROD_SSH_HOST }}:/opt/moodride/data/releases/"
+
+      - name: Run remote data deploy
+        shell: bash
+        run: |
+          ssh "${{ secrets.PROD_SSH_USER }}@${{ secrets.PROD_SSH_HOST }}" "\
+            chmod +x /opt/moodride/scripts/deploy/deploy_data_release.sh && \
+            /opt/moodride/scripts/deploy/deploy_data_release.sh \
+              --asset '/opt/moodride/data/releases/${{ steps.asset.outputs.asset_name }}' \
+              --dataset '${{ inputs.dataset_basename }}'"
