@@ -14,6 +14,8 @@ const PROFILE_COLORS: Record<string, string> = {
   shorter: "#1E5AA6"
 };
 
+type LngLat = [number, number];
+
 function buildRouteFeature(route: RouteDetailResponse): GeoJSON.FeatureCollection<GeoJSON.LineString> {
   return {
     type: "FeatureCollection",
@@ -33,6 +35,31 @@ function buildRouteFeature(route: RouteDetailResponse): GeoJSON.FeatureCollectio
 function resolveRouteColor(route: RouteDetailResponse): string {
   const activeProfile = route.routeOptions.find((option) => option.routeId === route.routeId)?.profile ?? "most_scenic";
   return PROFILE_COLORS[activeProfile] ?? PROFILE_COLORS.most_scenic;
+}
+
+function buildSchematicPoints(coordinates: LngLat[], width: number, height: number, padding: number): string {
+  if (coordinates.length === 0) {
+    return "";
+  }
+
+  const lngValues = coordinates.map((point) => point[0]);
+  const latValues = coordinates.map((point) => point[1]);
+  const minLng = Math.min(...lngValues);
+  const maxLng = Math.max(...lngValues);
+  const minLat = Math.min(...latValues);
+  const maxLat = Math.max(...latValues);
+  const deltaLng = Math.max(maxLng - minLng, 0.0001);
+  const deltaLat = Math.max(maxLat - minLat, 0.0001);
+  const renderWidth = width - padding * 2;
+  const renderHeight = height - padding * 2;
+
+  return coordinates
+    .map(([lng, lat]) => {
+      const x = padding + ((lng - minLng) / deltaLng) * renderWidth;
+      const y = padding + (1 - (lat - minLat) / deltaLat) * renderHeight;
+      return `${x.toFixed(1)},${y.toFixed(1)}`;
+    })
+    .join(" ");
 }
 
 export function RouteMap({ route }: Props) {
@@ -171,11 +198,29 @@ export function RouteMap({ route }: Props) {
   }
 
   if (!process.env.NEXT_PUBLIC_MAPBOX_ACCESS_TOKEN) {
+    const coordinates = route.geometry.geometry.coordinates as LngLat[];
+    const routeColor = resolveRouteColor(route);
+    const pathPoints = buildSchematicPoints(coordinates, 880, 520, 34);
+    const startPoint = pathPoints.split(" ")[0];
+    const endPoint = pathPoints.split(" ").at(-1);
     return (
-      <div className="map map-placeholder">
-        <p className="small">
-          No NEXT_PUBLIC_MAPBOX_ACCESS_TOKEN is set. Route geometry loaded with {route.geometry.geometry.coordinates.length} points.
-        </p>
+      <div className="map map-fallback" role="img" aria-label="Route preview map">
+        <svg viewBox="0 0 880 520" className="map-fallback-svg">
+          <defs>
+            <linearGradient id="routeGlowGradient" x1="0%" y1="0%" x2="100%" y2="0%">
+              <stop offset="0%" stopColor="#9ed0ff" />
+              <stop offset="100%" stopColor={routeColor} />
+            </linearGradient>
+          </defs>
+          <rect x="0" y="0" width="880" height="520" className="map-fallback-bg" />
+          <polyline points={pathPoints} className="map-fallback-shadow" />
+          <polyline points={pathPoints} className="map-fallback-route" style={{ stroke: "url(#routeGlowGradient)" }} />
+          {startPoint && <circle cx={startPoint.split(",")[0]} cy={startPoint.split(",")[1]} r="7.5" className="map-fallback-start" />}
+          {endPoint && <circle cx={endPoint.split(",")[0]} cy={endPoint.split(",")[1]} r="6.5" className="map-fallback-end" />}
+        </svg>
+        <div className="map-fallback-caption small">
+          Live route preview ({coordinates.length} points). Set `NEXT_PUBLIC_MAPBOX_ACCESS_TOKEN` for full basemap tiles.
+        </div>
       </div>
     );
   }

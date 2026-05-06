@@ -114,3 +114,10 @@ export interface RouteRatingResponse {
   ratedAt: string;
 }
 
+export interface LocationSuggestion {
+  placeId: string;
+  displayName: string;
+  lat: number;
+  lng: number;
+}
+

@@ -1,4 +1,5 @@
 import {
+  LocationSuggestion,
   RouteDetailResponse,
   RouteJobStatusResponse,
   RouteRatingResponse,
@@ -104,5 +105,39 @@ export async function submitRouteRating(routeId: string, rating: number): Promis
     body: JSON.stringify({ rating })
   });
   return handleJson<RouteRatingResponse>(response);
+}
+
+type NominatimSearchResult = {
+  place_id: number;
+  display_name: string;
+  lat: string;
+  lon: string;
+};
+
+export async function searchLocations(query: string, limit = 6): Promise<LocationSuggestion[]> {
+  const trimmed = query.trim();
+  if (trimmed.length < 2) {
+    return [];
+  }
+
+  const params = new URLSearchParams({
+    format: "jsonv2",
+    q: trimmed,
+    limit: String(Math.max(1, Math.min(limit, 10))),
+    "accept-language": "en"
+  });
+  const response = await fetch(`https://nominatim.openstreetmap.org/search?${params.toString()}`, {
+    headers: { Accept: "application/json" },
+    cache: "no-store"
+  });
+  const payload = await handleJson<NominatimSearchResult[]>(response);
+  return payload
+    .map((candidate) => ({
+      placeId: String(candidate.place_id),
+      displayName: candidate.display_name,
+      lat: Number(candidate.lat),
+      lng: Number(candidate.lon)
+    }))
+    .filter((candidate) => Number.isFinite(candidate.lat) && Number.isFinite(candidate.lng));
 }
 

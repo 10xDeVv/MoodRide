@@ -1,10 +1,11 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
-import { getJobStatus, getRoute, getScenicRegions, submitRoute, submitRouteRating } from "@/lib/api";
+import { getJobStatus, getRoute, getScenicRegions, searchLocations, submitRoute, submitRouteRating } from "@/lib/api";
 import { connectJobChannel } from "@/lib/ws";
 import type {
   JobSocketEvent,
+  LocationSuggestion,
   RouteDetailResponse,
   RouteJobStatusResponse,
   RouteOptionResponse,
@@ -166,6 +167,11 @@ function staggerStyle(index: number): CSSProperties {
 export function RoutePlanner() {
   const [lat, setLat] = useState(45.52);
   const [lng, setLng] = useState(-122.68);
+  const [locationQuery, setLocationQuery] = useState("");
+  const [locationSuggestions, setLocationSuggestions] = useState<LocationSuggestion[]>([]);
+  const [locationLookupPending, setLocationLookupPending] = useState(false);
+  const [locationLookupError, setLocationLookupError] = useState<string | null>(null);
+  const [locationDropdownVisible, setLocationDropdownVisible] = useState(false);
   const [timeBudgetMinutes, setTimeBudgetMinutes] = useState(60);
   const [vibes, setVibes] = useState<string[]>(["countryside"]);
   const [submission, setSubmission] = useState<RouteSubmissionResponse | null>(null);
@@ -182,6 +188,7 @@ export function RoutePlanner() {
   const stopWsRef = useRef<null | (() => void)>(null);
   const pollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const routeDetailsRef = useRef<Record<string, RouteDetailResponse>>({});
+  const locationLookupSequenceRef = useRef(0);
 
   const formatNumber = (value: number | null | undefined, digits = 2) =>
     typeof value === "number" && Number.isFinite(value) ? value.toFixed(digits) : "N/A";
@@ -263,6 +270,7 @@ export function RoutePlanner() {
       (latitude, longitude) => {
         setLat(latitude);
         setLng(longitude);
+        setLocationQuery((current) => current || `Current location (${latitude.toFixed(5)}, ${longitude.toFixed(5)})`);
         setMessage("Location acquired from browser geolocation.");
       },
       (locationMessage) => {
@@ -279,6 +287,41 @@ export function RoutePlanner() {
       }
     };
   }, []);
+
+  useEffect(() => {
+    const query = locationQuery.trim();
+    if (!locationDropdownVisible || query.length < 2) {
+      setLocationSuggestions([]);
+      setLocationLookupPending(false);
+      setLocationLookupError(null);
+      return;
+    }
+
+    const currentSequence = ++locationLookupSequenceRef.current;
+    const timer = setTimeout(async () => {
+      setLocationLookupPending(true);
+      setLocationLookupError(null);
+      try {
+        const suggestions = await searchLocations(query);
+        if (currentSequence !== locationLookupSequenceRef.current) {
+          return;
+        }
+        setLocationSuggestions(suggestions);
+      } catch {
+        if (currentSequence !== locationLookupSequenceRef.current) {
+          return;
+        }
+        setLocationLookupError("Location lookup unavailable right now.");
+        setLocationSuggestions([]);
+      } finally {
+        if (currentSequence === locationLookupSequenceRef.current) {
+          setLocationLookupPending(false);
+        }
+      }
+    }, 320);
+
+    return () => clearTimeout(timer);
+  }, [locationQuery, locationDropdownVisible]);
 
   const toggleVibe = (vibe: Vibe) => {
     setVibes((current) => {
@@ -297,12 +340,27 @@ export function RoutePlanner() {
       (latitude, longitude) => {
         setLat(latitude);
         setLng(longitude);
+        setLocationQuery(`Current location (${latitude.toFixed(5)}, ${longitude.toFixed(5)})`);
+        setLocationDropdownVisible(false);
+        setLocationSuggestions([]);
         setMessage("Location acquired from browser geolocation.");
       },
       (locationMessage) => {
         setMessage(locationMessage);
       }
     );
+  };
+
+  const applyLocationSuggestion = (suggestion: LocationSuggestion) => {
+    const nextLat = Number(suggestion.lat.toFixed(5));
+    const nextLng = Number(suggestion.lng.toFixed(5));
+    setLat(nextLat);
+    setLng(nextLng);
+    setLocationQuery(suggestion.displayName);
+    setLocationDropdownVisible(false);
+    setLocationSuggestions([]);
+    setLocationLookupError(null);
+    setMessage(`Location set to ${suggestion.displayName}.`);
   };
 
   const refreshScenicRegions = async () => {
@@ -527,6 +585,50 @@ export function RoutePlanner() {
           <div className="panel-title-row">
             <h2>Route Request</h2>
             <span className="small">Choose point, budget, and vibe blend.</span>
+          </div>
+
+          <label htmlFor="location-search">Search Place</label>
+          <div className="location-search-shell">
+            <input
+              id="location-search"
+              type="text"
+              value={locationQuery}
+              onChange={(e) => {
+                setLocationQuery(e.target.value);
+                setLocationDropdownVisible(true);
+              }}
+              onFocus={() => setLocationDropdownVisible(true)}
+              onBlur={() => {
+                setTimeout(() => setLocationDropdownVisible(false), 120);
+              }}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" && locationSuggestions.length > 0) {
+                  event.preventDefault();
+                  applyLocationSuggestion(locationSuggestions[0]);
+                }
+              }}
+              placeholder="Search city, address, or landmark"
+              autoComplete="off"
+            />
+            {locationDropdownVisible && (locationLookupPending || locationSuggestions.length > 0 || locationLookupError) && (
+              <div className="location-search-results">
+                {locationLookupPending && <p className="small">Searching locations...</p>}
+                {!locationLookupPending && locationLookupError && <p className="small error">{locationLookupError}</p>}
+                {!locationLookupPending && !locationLookupError && locationSuggestions.length === 0 && (
+                  <p className="small">No matches yet. Keep typing.</p>
+                )}
+                {locationSuggestions.map((suggestion) => (
+                  <button
+                    key={suggestion.placeId}
+                    type="button"
+                    className="location-suggestion-btn"
+                    onClick={() => applyLocationSuggestion(suggestion)}
+                  >
+                    {suggestion.displayName}
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
 
           <label htmlFor="lat">Latitude</label>

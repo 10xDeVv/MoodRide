@@ -236,6 +236,45 @@ button:disabled {
   margin-bottom: 0.85rem;
 }
 
+.location-search-shell {
+  position: relative;
+  margin-bottom: 0.75rem;
+}
+
+.location-search-shell input {
+  margin-bottom: 0;
+}
+
+.location-search-results {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: calc(100% + 0.36rem);
+  z-index: 15;
+  border: 1px solid #bdd0ee;
+  border-radius: 11px;
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: 0 16px 32px -26px rgba(23, 54, 108, 0.58);
+  padding: 0.45rem;
+  display: grid;
+  gap: 0.32rem;
+}
+
+.location-suggestion-btn {
+  text-align: left;
+  background: #f8fbff;
+  color: #1f467b;
+  border: 1px solid #c8d8f0;
+  border-radius: 9px;
+  padding: 0.48rem 0.58rem;
+  font-weight: 600;
+}
+
+.location-suggestion-btn:hover {
+  background: #ebf3ff;
+  border-color: #9fc0ef;
+}
+
 .tag-list {
   display: flex;
   flex-wrap: wrap;
@@ -496,6 +535,55 @@ button:disabled {
   text-align: center;
   color: #486588;
   padding: 1rem;
+}
+
+.map-fallback {
+  display: grid;
+  grid-template-rows: 1fr auto;
+}
+
+.map-fallback-svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.map-fallback-bg {
+  fill: #dceeff;
+}
+
+.map-fallback-shadow {
+  fill: none;
+  stroke: #153257;
+  stroke-width: 13;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  opacity: 0.52;
+}
+
+.map-fallback-route {
+  fill: none;
+  stroke-width: 7.2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.map-fallback-start {
+  fill: #0b203a;
+  stroke: #eaf4ff;
+  stroke-width: 2.2;
+}
+
+.map-fallback-end {
+  fill: #0f63ff;
+  stroke: #eaf4ff;
+  stroke-width: 2.2;
+}
+
+.map-fallback-caption {
+  border-top: 1px solid #bfd2ec;
+  background: rgba(249, 252, 255, 0.88);
+  padding: 0.52rem 0.66rem;
 }
 
 .highlights {

@@ -351,6 +351,19 @@ curl -I https://app.moodrides.com
 curl https://app.moodrides.com/api/scenic-regions?lat=45.94&lng=-66.63&radius=50
 # Should return scenic region data
 
+# Route submission contract check (current schema)
+curl -X POST https://app.moodrides.com/api/routes \
+  -H "Content-Type: application/json" \
+  -d '{
+    "userId": "00000000-0000-0000-0000-000000000001",
+    "lat": 45.4215,
+    "lng": -75.6972,
+    "timeBudgetMinutes": 90,
+    "vibes": ["countryside"],
+    "preferenceVector": { "avoidTolls": false }
+  }'
+# Should return accepted job payload with jobId/status
+
 # Frontend loading?
 # Open https://app.moodrides.com in browser
 # Should see the MoodRide UI

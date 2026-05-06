@@ -4,11 +4,11 @@ Production-oriented Next.js frontend for route generation, async job tracking, a
 
 ## Features
 
-- Location picker (geolocation + manual coordinates)
+- Location picker (geolocation + place search + manual coordinates)
 - Time budget slider and vibe multi-select (max 3)
 - Route submission via Kong (`/api/routes`)
 - Job tracking via STOMP-over-SockJS + polling fallback
-- Route rendering map (Mapbox) + scenic highlights panel
+- Route rendering map (Mapbox with no-key fallback preview) + scenic highlights panel
 - Responsive layout for mobile and desktop
 
 ## Environment
