@@ -1,0 +1,90 @@
+name: Deploy Scenic Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "GitHub release tag that contains the scenic data asset"
+        required: true
+        type: string
+      scoring_version:
+        description: "Expected scoring version in the scenic release (optional but recommended)"
+        required: false
+        type: string
+      asset_name:
+        description: "Asset name in release"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  deploy-scenic:
+    name: Pull Scenic Asset and Deploy
+    runs-on: ubuntu-latest
+    environment: production
+    concurrency:
+      group: deploy-scenic-production
+      cancel-in-progress: false
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve asset name
+        id: asset
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -n "${{ inputs.asset_name }}" ]; then
+            asset_name="${{ inputs.asset_name }}"
+          elif [ -n "${{ inputs.scoring_version }}" ]; then
+            sanitized_version="$(echo "${{ inputs.scoring_version }}" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9._-]+/-/g')"
+            asset_name="scenic-tiles-${sanitized_version}.tar.gz"
+          else
+            echo "asset_name is required when scoring_version is not provided." >&2
+            exit 1
+          fi
+          echo "asset_name=$asset_name" >> "$GITHUB_OUTPUT"
+
+      - name: Download release asset
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/moodride-scenic-release
+          gh release download "${{ inputs.release_tag }}" \
+            --repo "${{ github.repository }}" \
+            --pattern "${{ steps.asset.outputs.asset_name }}" \
+            --dir /tmp/moodride-scenic-release
+
+      - name: Configure SSH key
+        shell: bash
+        run: |
+          set -euo pipefail
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "${{ secrets.PROD_SSH_PRIVATE_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H "${{ secrets.PROD_SSH_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Ensure server directories
+        shell: bash
+        run: |
+          ssh "${{ secrets.PROD_SSH_USER }}@${{ secrets.PROD_SSH_HOST }}" "mkdir -p /opt/moodride/scripts/deploy /opt/moodride/data/releases"
+
+      - name: Upload deploy script and asset
+        shell: bash
+        run: |
+          scp scripts/deploy/deploy_scenic_release.sh "${{ secrets.PROD_SSH_USER }}@${{ secrets.PROD_SSH_HOST }}:/opt/moodride/scripts/deploy/"
+          scp "/tmp/moodride-scenic-release/${{ steps.asset.outputs.asset_name }}" "${{ secrets.PROD_SSH_USER }}@${{ secrets.PROD_SSH_HOST }}:/opt/moodride/data/releases/"
+
+      - name: Run remote scenic deploy
+        shell: bash
+        run: |
+          ssh "${{ secrets.PROD_SSH_USER }}@${{ secrets.PROD_SSH_HOST }}" "\
+            chmod +x /opt/moodride/scripts/deploy/deploy_scenic_release.sh && \
+            /opt/moodride/scripts/deploy/deploy_scenic_release.sh \
+              --asset '/opt/moodride/data/releases/${{ steps.asset.outputs.asset_name }}' \
+              --scoring-version '${{ inputs.scoring_version }}'"

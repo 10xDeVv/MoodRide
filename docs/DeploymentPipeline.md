@@ -100,7 +100,44 @@ Run workflow `.github/workflows/deploy-data-release.yml` with:
 
 The workflow downloads the release asset, copies it to VM, updates `OSRM_DATASET_BASENAME`, and restarts `osrm` + `route-worker`.
 
-## 5. Required `.env.prod` keys
+## 5. Scenic recompute + release flow (local machine -> GitHub Release -> VM)
+
+### 5A. Run nationwide scenic recompute locally
+
+```powershell
+./scripts/deploy/run_nationwide_scenic_recompute.ps1 `
+  -SqlScriptPath "scripts/setup/data-quality-upgrade-batched.sql" `
+  -ChunkSize 500 `
+  -ExpectedScoringVersion "2.6-raster-data-quality-upgrade-national-batched"
+```
+
+This executes the batched raster/DEM scoring SQL over your local `moodride` database.
+
+### 5B. Publish scenic tile release from your local machine
+
+```powershell
+./scripts/deploy/publish_scenic_release.ps1 `
+  -ScoringVersion "2.6-raster-data-quality-upgrade-national-batched" `
+  -ReleaseTag "scenic-2.6-raster-data-quality-upgrade-national-batched-20260506" `
+  -Repo "10xDeVv/MoodRide"
+```
+
+This uploads:
+
+- `scenic-tiles-<scoring-version>.tar.gz`
+- `scenic-tiles-<scoring-version>.tar.gz.sha256`
+
+### 5C. Deploy scenic release to production
+
+Run workflow `.github/workflows/deploy-scenic-release.yml` with:
+
+- `release_tag`: example `scenic-2.6-raster-data-quality-upgrade-national-batched-20260506`
+- `scoring_version`: example `2.6-raster-data-quality-upgrade-national-batched`
+- `asset_name`: optional (defaults from `scoring_version`)
+
+The workflow downloads the scenic asset, uploads it to VM, applies score updates into `scenic_score_tiles`, and restarts `route-api` + `route-worker`.
+
+## 6. Required `.env.prod` keys
 
 Make sure `.env.prod` contains at least:
 
@@ -113,7 +150,7 @@ Make sure `.env.prod` contains at least:
 - `MOODRIDE_CORS_ALLOWED_ORIGINS=https://app.moodrides.com`
 - `OSRM_DATASET_BASENAME`
 
-## 6. Backup locations
+## 7. Backup locations
 
 - Runtime deployment dump used for restore:
   - `backups/moodride_runtime_backup.dump`
