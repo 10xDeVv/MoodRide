@@ -108,8 +108,8 @@ jobs:
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          username: ${{ secrets.GHCR_USERNAME != '' && secrets.GHCR_USERNAME || github.repository_owner }}
+          password: ${{ secrets.GHCR_PAT != '' && secrets.GHCR_PAT || secrets.GITHUB_TOKEN }}
 
       - name: Build and push route-api
         if: steps.release.outputs.should_build == 'true'
@@ -118,6 +118,9 @@ jobs:
           context: services/route-api
           file: services/route-api/Dockerfile
           push: true
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
           tags: ghcr.io/${{ steps.release.outputs.ghcr_namespace }}/moodride-route-api:${{ steps.release.outputs.image_tag }}
 
       - name: Build and push route-worker
@@ -127,6 +130,9 @@ jobs:
           context: services/route-worker
           file: services/route-worker/Dockerfile
           push: true
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
           tags: ghcr.io/${{ steps.release.outputs.ghcr_namespace }}/moodride-route-worker:${{ steps.release.outputs.image_tag }}
 
       - name: Build and push notification-service
@@ -136,6 +142,9 @@ jobs:
           context: services/notification-service
           file: services/notification-service/Dockerfile
           push: true
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
           tags: ghcr.io/${{ steps.release.outputs.ghcr_namespace }}/moodride-notification-service:${{ steps.release.outputs.image_tag }}
 
       - name: Build and push frontend
@@ -145,6 +154,9 @@ jobs:
           context: frontend/moodride-web
           file: frontend/moodride-web/Dockerfile
           push: true
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
           build-args: |
             NEXT_PUBLIC_API_BASE_URL=${{ steps.release.outputs.api_base_url }}
             NEXT_PUBLIC_WS_BASE_URL=${{ steps.release.outputs.ws_base_url }}
