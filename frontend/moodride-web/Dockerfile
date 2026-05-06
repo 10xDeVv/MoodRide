@@ -6,6 +6,7 @@ COPY . .
 ARG NEXT_PUBLIC_API_BASE_URL
 ARG NEXT_PUBLIC_WS_BASE_URL
 ARG NEXT_PUBLIC_MAPBOX_ACCESS_TOKEN
+RUN mkdir -p public
 RUN npm run build
 
 FROM node:20-alpine AS runner
