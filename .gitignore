@@ -107,4 +107,5 @@ coverage/
 generated/
 **/generated/
 
-.m2\
+# Local tool caches
+.m2/
