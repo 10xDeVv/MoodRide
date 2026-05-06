@@ -6,7 +6,7 @@ spring:
   
   # Database Configuration
   datasource:
-    url: jdbc:postgresql://localhost:5432/moodride?sslmode=disable
+    url: jdbc:postgresql://127.0.0.1:5433/moodride?sslmode=disable
     username: postgres
     password: postgres
     driver-class-name: org.postgresql.Driver
@@ -72,9 +72,41 @@ moodride:
     beam-width: 10
     max-iterations: 1000
     timeout-minutes: 5
-  
+    h3-resolution: 7
+    tile-selection-ring-min: 4
+    tile-selection-ring-max: 22
+    tile-selection-limit: 120
+    sector-count: 8
+    corridor-sample-meters: 500
+    max-duration-overrun-ratio: 1.25
+  osrm:
+    base-url: ${MOODRIDE_OSRM_BASE_URL:http://localhost:5002}
+    request-timeout-ms: 7000
+  route:
+    retry:
+      max-attempts: 3
+  kafka:
+    listener:
+      group-id: route-workers
+      concurrency: 1
+    consumer:
+      retry:
+        max-attempts: 4
+        initial-interval-ms: 500
+        multiplier: 2.0
+        max-interval-ms: 5000
+  cache:
+    graph-warmup:
+      enabled: true
+      interval-ms: 900000
+      initial-delay-ms: 20000
+
+route:
+  generation:
+    timeout:
+      seconds: 30
+
 # Logging Configuration
 logging:
   level:
     root: INFO
-    org.springframework.kafka: DEBUG

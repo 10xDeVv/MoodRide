@@ -17,4 +17,5 @@ public record RouteJobEvent(
     Instant submittedAt
 ) {
     public static final String TOPIC = "route-jobs";
+    public static final String DLQ_TOPIC = "route.jobs.dlq";
 }

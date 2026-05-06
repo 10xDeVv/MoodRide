@@ -2,6 +2,7 @@ package com.moodride.eventmodels;
 
 import java.time.Instant;
 import java.util.List;
+import java.util.Locale;
 import java.util.UUID;
 
 /**
@@ -10,16 +11,26 @@ import java.util.UUID;
  */
 public record RouteCompletionEvent(
     UUID jobId,
+    UUID routeId,
     UUID userId,
-    String status,  // "SUCCESS", "FAILED", "TIMEOUT"
+    String status,  // "COMPLETED", "SUCCESS", "FAILED", "TIMEOUT"
     List<RouteWaypoint> waypoints,
     double totalDistanceKm,
     int estimatedDurationMinutes,
     double scenicScore,
-    String failureReason,  // null if status is SUCCESS
+    String errorMessage,  // null if status is COMPLETED/SUCCESS
     Instant completedAt
 ) {
     public static final String TOPIC = "route-completions";
+
+    public boolean success() {
+        if (status == null) {
+            return false;
+        }
+
+        String normalizedStatus = status.trim().toUpperCase(Locale.ROOT);
+        return "COMPLETED".equals(normalizedStatus) || "SUCCESS".equals(normalizedStatus);
+    }
 
     /**
      * Individual waypoint in the generated route

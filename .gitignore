@@ -71,6 +71,8 @@ infrastructure/docker/volumes/
 .env
 .env.local
 .env.production
+.env.prod
+infrastructure/docker/.env.prod
 *.env
 !.env.example
 
@@ -104,3 +106,5 @@ coverage/
 # Generated files
 generated/
 **/generated/
+
+.m2\

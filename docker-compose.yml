@@ -1,4 +1,3 @@
-version: '3.8'
 
 services:
   # =====================================================================
@@ -42,7 +41,8 @@ services:
     environment:
       KAFKA_BROKER_ID: 1
       KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://kafka:9092
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:29092,PLAINTEXT_HOST://0.0.0.0:9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
@@ -57,10 +57,11 @@ services:
     volumes:
       - kafka_data:/var/lib/kafka/data
     healthcheck:
-      test: [ "CMD", "kafka-broker-api-versions.sh", "--bootstrap-server", "kafka:9092" ]
+      test: [ "CMD-SHELL", "kafka-broker-api-versions --bootstrap-server localhost:9092 || exit 1" ]
       interval: 10s
-      timeout: 5s
+      timeout: 10s
       retries: 5
+      start_period: 40s
     networks:
       - moodride-network
     restart: unless-stopped
@@ -81,7 +82,7 @@ services:
       POSTGRES_PASSWORD: postgres
       POSTGRES_INITDB_ARGS: "--encoding=UTF8"
     ports:
-      - "5432:5432"
+      - "5433:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./docker-entrypoint-initdb.d:/docker-entrypoint-initdb.d
@@ -105,6 +106,12 @@ services:
       - "work_mem=4MB"
       - "-c"
       - "password_encryption=md5"
+      - "-c"
+      - "wal_level=logical"
+      - "-c"
+      - "max_replication_slots=8"
+      - "-c"
+      - "max_wal_senders=8"
 
   # =====================================================================
   # REDIS
@@ -115,7 +122,7 @@ services:
   redis:
     image: redis:7.0-alpine
     container_name: moodride-redis
-    command: redis-server --requirepass redis_password --maxmemory 512mb --maxmemory-policy allkeys-lru
+    command: redis-server --requirepass ${REDIS_PASSWORD:-redis_password} --maxmemory 512mb --maxmemory-policy allkeys-lru
     ports:
       - "6379:6379"
     volumes:
@@ -125,6 +132,65 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    networks:
+      - moodride-network
+    restart: unless-stopped
+
+  # =====================================================================
+  # OSRM (OPEN SOURCE ROUTING MACHINE)
+  # =====================================================================
+  # Prepares an OSRM graph from the configured OSM extract on first run.
+  osrm-prepare:
+    image: ghcr.io/project-osrm/osrm-backend:v5.27.1
+    container_name: moodride-osrm-prepare
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        PBF_PATH="/data/osm/${OSRM_PBF_FILE:-new-brunswick-latest.osm.pbf}"
+        DATASET_BASENAME="${OSRM_DATASET_BASENAME:-new-brunswick-latest}"
+        TARGET_PBF="/data/$${DATASET_BASENAME}.osm.pbf"
+        TARGET_OSRM="/data/$${DATASET_BASENAME}.osrm"
+        if [ ! -f "$$PBF_PATH" ]; then
+          echo "OSRM extract not found: $$PBF_PATH"
+          exit 1
+        fi
+        if [ -f "$$TARGET_OSRM" ]; then
+          echo "OSRM dataset already prepared: $$TARGET_OSRM"
+          exit 0
+        fi
+        cp "$$PBF_PATH" "$$TARGET_PBF"
+        osrm-extract -p /opt/car.lua "$$TARGET_PBF"
+        osrm-partition "$$TARGET_OSRM"
+        osrm-customize "$$TARGET_OSRM"
+    volumes:
+      - ./data/osrm:/data
+      - ./data/osm-samples:/data/osm:ro
+    networks:
+      - moodride-network
+    restart: "no"
+
+  osrm:
+    image: ghcr.io/project-osrm/osrm-backend:v5.27.1
+    container_name: moodride-osrm
+    depends_on:
+      - osrm-prepare
+    command:
+      - sh
+      - -c
+      - |
+        DATASET_BASENAME="${OSRM_DATASET_BASENAME:-new-brunswick-latest}"
+        TARGET_OSRM="/data/$${DATASET_BASENAME}.osrm"
+        until [ -f "$$TARGET_OSRM" ]; do
+          echo "Waiting for OSRM dataset at $$TARGET_OSRM"
+          sleep 2
+        done
+        exec osrm-routed --algorithm mld "$$TARGET_OSRM"
+    ports:
+      - "5002:5000"
+    volumes:
+      - ./data/osrm:/data
     networks:
       - moodride-network
     restart: unless-stopped

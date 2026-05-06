@@ -41,4 +41,13 @@ management:
 logging:
   level:
     root: INFO
-    org.springframework.kafka: DEBUG
+
+moodride:
+  cdc:
+    topics:
+      scenic-tile: moodride.cdc.scenic_score_tiles
+      road-segment: moodride.cdc.road_segments
+      recompute-request: scenic.recompute.requests
+      forwarded-tile-update: scenic-tile-updates
+    idempotency-ttl-seconds: 86400
+

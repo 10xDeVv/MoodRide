@@ -1,8 +1,17 @@
 package com.moodride.datamodels;
 
-import jakarta.persistence.*;
-import org.locationtech.jts.geom.LineString;
 import java.time.Instant;
+
+import org.locationtech.jts.geom.LineString;
+
+import jakarta.persistence.Column;
+import jakarta.persistence.Entity;
+import jakarta.persistence.GeneratedValue;
+import jakarta.persistence.GenerationType;
+import jakarta.persistence.Id;
+import jakarta.persistence.Index;
+import jakarta.persistence.Table;
+import jakarta.persistence.Transient;
 
 /**
  * JPA entity representing a road segment in the road network.
@@ -24,6 +33,9 @@ public class RoadSegment {
 
     @Column(name = "geometry", columnDefinition = "geometry(LINESTRING, 4326)", nullable = false)
     private LineString geometry;  // PostGIS geometry
+
+    @Transient
+    private byte[] geometryWkb;
 
     @Column(nullable = false, length = 15)
     private String h3TileIndex;  // H3 hex index (resolution 9)
@@ -71,6 +83,9 @@ public class RoadSegment {
 
     public LineString getGeometry() { return geometry; }
     public void setGeometry(LineString geometry) { this.geometry = geometry; }
+
+    public byte[] getGeometryWkb() { return geometryWkb; }
+    public void setGeometryWkb(byte[] geometryWkb) { this.geometryWkb = geometryWkb; }
 
     public String getH3TileIndex() { return h3TileIndex; }
     public void setH3TileIndex(String h3TileIndex) { this.h3TileIndex = h3TileIndex; }

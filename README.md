@@ -149,9 +149,13 @@ This starts:
 - Redis 7
 - Apache Kafka + Zookeeper
 - Debezium Connect
+- OSRM (route engine for `/trip` loop routing)
 - OpenTopoData (elevation API)
 - Prometheus + Grafana
 - Jaeger (tracing)
+
+On first startup, `osrm-prepare` preprocesses `data/osm-samples/new-brunswick-latest.osm.pbf` into `data/osrm/*.osrm*`.
+This one-time step can take a few minutes depending on machine performance.
 
 **3. Build all services**
 ```bash
@@ -177,6 +181,7 @@ npm install && npm run dev
 **5. Access the application**
 - Frontend: http://localhost:3000
 - API: http://localhost:8080
+- OSRM: http://localhost:5002
 - Grafana: http://localhost:3001 (admin/admin)
 - Jaeger: http://localhost:16686
 
@@ -211,16 +216,20 @@ See [PROJECT_STRUCTURE.md](PROJECT_STRUCTURE.md) for detailed breakdown.
 
 ## 🧪 Development Workflow
 
-### Phase 0: Infrastructure Setup ✅
-- [x] Create microservices structure
-- [x] Set up Docker Compose
-- [x] Configure parent POM
-- [ ] Initialize Spring Boot applications
+### Completed Through Phase 4
+- [x] Microservices structure and parent Maven build
+- [x] Docker Compose infrastructure for PostgreSQL/PostGIS, Kafka, and Redis
+- [x] Flyway schema and sample data for route generation
+- [x] PostGIS-backed graph extraction and scenic route worker
+- [x] End-to-end route generation via Kafka worker and database persistence
 
-### Phase 1: Data Ingestion (1-2 weeks)
-- [ ] PostgreSQL + PostGIS schema
-- [ ] OSM PBF parser
-- [ ] Load Portland, OR data (~500K road segments)
+### Current Focus: Phase 5
+- [x] Route submission endpoint
+- [x] Job polling endpoint
+- [x] Route retrieval endpoint
+- [ ] Scenic region preview endpoint
+- [ ] WebSocket notification service
+- [ ] Timeout watchdog and retry logic
 
 ### Phase 2-8: See [implementation-plan.md](docs/implementation-plan.md)
 
@@ -290,18 +299,9 @@ docker-compose logs -f kafka
 
 ## 🎯 Project Status
 
-**Current Phase**: Phase 0 - Infrastructure Setup ✅ **COMPLETED**  
-**Progress**: All Spring Boot microservices initialized ✅  
-**Next Steps**: Begin Phase 1 - Data Ingestion (PostgreSQL + PostGIS schema, OSM data loading)
-
-**Phase 0 Achievements:**
-- ✅ **Maven Build System** - Multi-module project with proper dependency management
-- ✅ **Event Models** - Kafka schemas for inter-service communication
-- ✅ **Data Models** - JPA entities with PostGIS spatial support  
-- ✅ **Spring Boot Applications** - All 6 microservices with main classes and configuration
-- ✅ **Java 25 Support** - Virtual threads and modern JDK features enabled
-
-**Ready for Phase 1!** 🚀
+**Current Phase**: Phase 5 - Async Job Queue & API In Progress  
+**Progress**: Phases 3 and 4 are complete in the local environment, including successful end-to-end route generation.  
+**Next Steps**: Finish the remaining phase-5 contract items: scenic region previews, notification delivery, and job timeout/retry behavior.
 
 ---
 

@@ -21,13 +21,16 @@ public class BeamSearchSolver {
     
     public RouteCandidate solveOrienteering(RoadNetworkGraph graph, double startLat, 
                                             double startLon, int timeBudgetMinutes) {
-        RoadNode startNode = new RoadNode(startLat, startLon);
+        RoadNode startNode = graph.getNearestNode(startLat, startLon);
+        if (startNode == null) {
+            throw new IllegalStateException("Road network graph is empty");
+        }
         DefaultDirectedWeightedGraph<RoadNode, RoadSegmentEdge> g = graph.getGraph();
         
         // Initialize with starting node
         PriorityQueue<RouteCandidate> candidates = new PriorityQueue<>();
         candidates.offer(new RouteCandidate(
-            List.of(startNode), 0.0, 0.0, 0
+            List.of(startNode), 0.0, 0.0, 0, "beam_v1", config.getBeamWidth()
         ));
         
         // Beam search iterations
@@ -58,7 +61,7 @@ public class BeamSearchSolver {
                         newPath.add(next);
                         
                         RouteCandidate newCandidate = new RouteCandidate(
-                            newPath, newScore, newDistance, newTime
+                            newPath, newScore, newDistance, newTime, "beam_v1", config.getBeamWidth()
                         );
                         nextCandidates.offer(newCandidate);
                     }
@@ -71,6 +74,6 @@ public class BeamSearchSolver {
         
         // Return best candidate (highest scenic score)
         return candidates.peek() != null ? candidates.peek() : 
-            new RouteCandidate(List.of(startNode), 0.0, 0.0, 0);
+            new RouteCandidate(List.of(startNode), 0.0, 0.0, 0, "beam_v1", config.getBeamWidth());
     }
 }

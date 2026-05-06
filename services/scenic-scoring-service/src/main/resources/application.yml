@@ -3,7 +3,7 @@ spring:
   application:
     name: scenic-scoring-service
   datasource:
-    url: jdbc:postgresql://localhost:5432/moodride?sslmode=disable
+    url: jdbc:postgresql://127.0.0.1:5433/moodride?sslmode=disable
     username: postgres
     password: postgres
     driver-class-name: org.postgresql.Driver
@@ -63,6 +63,20 @@ management:
 
 # Scheduling configuration
 moodride:
+  elevation:
+    opentopodata:
+      enabled: true
+      base-url: https://api.opentopodata.org
+      dataset: srtm30m
+      request-batch-size: 64
+      segment-batch-size: 500
+      connect-timeout-ms: 3000
+      read-timeout-ms: 8000
+  traffic:
+    refresh:
+      debounce-seconds: 30
+      batch-size: 200
+      scheduler-delay-ms: 10000
   scoring:
     schedule: "0 0 1 * * *"  # Weekly on Mondays at 1 AM UTC
     timeout-minutes: 120
@@ -72,4 +86,3 @@ moodride:
 logging:
   level:
     root: INFO
-    org.springframework.kafka: DEBUG

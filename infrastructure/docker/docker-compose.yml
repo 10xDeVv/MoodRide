@@ -6,9 +6,9 @@ services:
     image: postgis/postgis:16-3.4
     container_name: moodride-postgres
     environment:
-      POSTGRES_DB: moodride
-      POSTGRES_USER: moodride
-      POSTGRES_PASSWORD: moodride_dev_password
+      POSTGRES_DB: ${POSTGRES_DB:-moodride}
+      POSTGRES_USER: ${POSTGRES_USER:-moodride}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-moodride_dev_password}
       POSTGRES_INITDB_ARGS: "--encoding=UTF8"
     ports:
       - "5432:5432"
@@ -18,7 +18,7 @@ services:
     networks:
       - moodride-network
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U moodride"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-moodride}"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -32,11 +32,11 @@ services:
     volumes:
       - redis_data:/data
       - ./redis/redis.conf:/usr/local/etc/redis/redis.conf
-    command: redis-server /usr/local/etc/redis/redis.conf
+    command: sh -c 'redis-server /usr/local/etc/redis/redis.conf --requirepass "$${REDIS_PASSWORD:-redis_password}"'
     networks:
       - moodride-network
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-redis_password}", "ping"]
       interval: 10s
       timeout: 3s
       retries: 5
@@ -64,11 +64,12 @@ services:
       - zookeeper
     ports:
       - "9092:9092"
-      - "9093:9093"
+      - "29092:29092"
     environment:
       KAFKA_BROKER_ID: 1
       KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:9093
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:29092,PLAINTEXT_HOST://0.0.0.0:9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
@@ -84,29 +85,6 @@ services:
       interval: 10s
       timeout: 10s
       retries: 5
-
-  # Debezium Connect (CDC)
-  debezium:
-    image: debezium/connect:2.7
-    container_name: moodride-debezium
-    depends_on:
-      - kafka
-      - postgres
-    ports:
-      - "8083:8083"
-    environment:
-      BOOTSTRAP_SERVERS: kafka:9092
-      GROUP_ID: debezium-connect
-      CONFIG_STORAGE_TOPIC: debezium_configs
-      OFFSET_STORAGE_TOPIC: debezium_offsets
-      STATUS_STORAGE_TOPIC: debezium_status
-      CONFIG_STORAGE_REPLICATION_FACTOR: 1
-      OFFSET_STORAGE_REPLICATION_FACTOR: 1
-      STATUS_STORAGE_REPLICATION_FACTOR: 1
-    volumes:
-      - ./debezium/connector-config.json:/kafka/config/connector-config.json
-    networks:
-      - moodride-network
 
   # OpenTopoData (self-hosted elevation service)
   opentopodata:
@@ -125,6 +103,62 @@ services:
         path = "data/srtm30m/"
         filename_epsg = 4326
         filename_tile_size = 1
+
+  # OSRM preprocessing (one-shot) and routing service
+  osrm-prepare:
+    image: ghcr.io/project-osrm/osrm-backend:v5.27.1
+    container_name: moodride-osrm-prepare
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        PBF_PATH="/data/osm/${OSRM_PBF_FILE:-new-brunswick-latest.osm.pbf}"
+        DATASET_BASENAME="${OSRM_DATASET_BASENAME:-new-brunswick-latest}"
+        TARGET_PBF="/data/$${DATASET_BASENAME}.osm.pbf"
+        TARGET_OSRM="/data/$${DATASET_BASENAME}.osrm"
+        if [ ! -f "$$PBF_PATH" ]; then
+          echo "OSRM extract not found: $$PBF_PATH"
+          exit 1
+        fi
+        if [ -f "$$TARGET_OSRM" ]; then
+          echo "OSRM dataset already prepared: $$TARGET_OSRM"
+          exit 0
+        fi
+        cp "$$PBF_PATH" "$$TARGET_PBF"
+        osrm-extract -p /opt/car.lua "$$TARGET_PBF"
+        osrm-partition "$$TARGET_OSRM"
+        osrm-customize "$$TARGET_OSRM"
+    volumes:
+      - ../../data/osrm:/data
+      - ../../data/osm-samples:/data/osm:ro
+    networks:
+      - moodride-network
+    restart: "no"
+
+  osrm:
+    image: ghcr.io/project-osrm/osrm-backend:v5.27.1
+    container_name: moodride-osrm
+    depends_on:
+      - osrm-prepare
+    command:
+      - sh
+      - -c
+      - |
+        DATASET_BASENAME="${OSRM_DATASET_BASENAME:-new-brunswick-latest}"
+        TARGET_OSRM="/data/$${DATASET_BASENAME}.osrm"
+        until [ -f "$$TARGET_OSRM" ]; do
+          echo "Waiting for OSRM dataset at $$TARGET_OSRM"
+          sleep 2
+        done
+        exec osrm-routed --algorithm mld "$$TARGET_OSRM"
+    ports:
+      - "5002:5000"
+    volumes:
+      - ../../data/osrm:/data
+    networks:
+      - moodride-network
+    restart: unless-stopped
 
   # Prometheus (metrics)
   prometheus:
@@ -158,24 +192,6 @@ services:
     volumes:
       - grafana_data:/var/lib/grafana
       - ./grafana/dashboards:/etc/grafana/provisioning/dashboards
-    networks:
-      - moodride-network
-
-  # Jaeger (distributed tracing)
-  jaeger:
-    image: jaegertracing/all-in-one:1.56
-    container_name: moodride-jaeger
-    ports:
-      - "5775:5775/udp"
-      - "6831:6831/udp"
-      - "6832:6832/udp"
-      - "5778:5778"
-      - "16686:16686"  # Jaeger UI
-      - "14268:14268"
-      - "14250:14250"
-      - "9411:9411"
-    environment:
-      COLLECTOR_ZIPKIN_HOST_PORT: ":9411"
     networks:
       - moodride-network
 

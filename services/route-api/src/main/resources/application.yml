@@ -6,7 +6,7 @@ spring:
   
   # Database Configuration
   datasource:
-    url: jdbc:postgresql://localhost:5432/moodride?sslmode=disable
+    url: jdbc:postgresql://127.0.0.1:5433/moodride?sslmode=disable
     username: postgres
     password: postgres
     driver-class-name: org.postgresql.Driver
@@ -15,6 +15,7 @@ spring:
     hibernate:
       ddl-auto: validate  # Use Flyway for schema management
     show-sql: false
+    packages-to-scan: com.moodride.datamodels,com.moodride.routeapi
     
     properties:
       hibernate:
@@ -69,6 +70,9 @@ management:
   endpoint:
     health:
       show-details: when-authorized
+  health:
+    redis:
+      enabled: false
   metrics:
     export:
       prometheus:
@@ -78,4 +82,14 @@ management:
 logging:
   level:
     root: INFO
-    org.springframework.kafka: DEBUG
+
+moodride:
+  cors:
+    allowed-origins: http://localhost:3000,http://localhost:3001
+  cache:
+    warmup:
+      enabled: true
+      limit: 200
+      interval-ms: 3600000
+      initial-delay-ms: 30000
+

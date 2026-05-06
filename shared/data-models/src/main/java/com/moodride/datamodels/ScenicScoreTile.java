@@ -40,10 +40,32 @@ public class ScenicScoreTile {
     private double roadDensity;  // Road network complexity
 
     @Column(nullable = false)
-    private double poiDensity;  // Points of interest
+    private double trafficSignalScore = 0.5;  // Lower congestion -> higher scenic quality
 
     @Column(nullable = false)
-    private double visualComplexity;  // Landscape visual appeal
+    private double poiDensity;
+
+    @Column(nullable = false)
+    private double visualComplexity;
+
+    // Explicit component scores for preference-driven routing (Execution Plan Week 1).
+    @Column(name = "water_score", nullable = false)
+    private double waterScore;
+
+    @Column(name = "green_score", nullable = false)
+    private double greenScore;
+
+    @Column(name = "elevation_score", nullable = false)
+    private double elevationScore;
+
+    @Column(name = "solitude_score", nullable = false)
+    private double solitudeScore;
+
+    @Column(name = "curve_score", nullable = false)
+    private double curveScore;
+
+    @Column(name = "poi_score", nullable = false)
+    private double poiScore;
 
     @Column(nullable = false)
     private Instant lastScored;
@@ -65,24 +87,42 @@ public class ScenicScoreTile {
      * Weights are based on user preference research and can be tuned.
      */
     public void calculateScenicScore() {
-        this.scenicScore = (
-            waterProximity * 0.25 +
-            elevationVariance * 0.20 +
-            naturalLandUse * 0.20 +
-            roadDensity * 0.10 +
-            poiDensity * 0.15 +
-            visualComplexity * 0.10
+        double water = clamp(waterScore);
+        double green = clamp(greenScore);
+        double elevation = clamp(elevationScore);
+        double solitude = clamp(solitudeScore);
+        double curves = clamp(curveScore);
+        double poi = clamp(poiScore);
+
+        // Backward compatibility if component-score columns have not been populated yet.
+        if (water == 0.0 && green == 0.0 && elevation == 0.0 && solitude == 0.0 && curves == 0.0 && poi == 0.0) {
+            water = clamp(waterProximity);
+            green = clamp(naturalLandUse);
+            elevation = clamp(elevationVariance);
+            solitude = clamp((1.0 - clamp(roadDensity) + clamp(trafficSignalScore)) / 2.0);
+            curves = clamp(visualComplexity);
+            poi = clamp(poiDensity);
+        }
+
+        this.scenicScore = clamp(
+            water * 0.25 +
+            elevation * 0.20 +
+            green * 0.20 +
+            solitude * 0.10 +
+            poi * 0.15 +
+            curves * 0.10
         );
     }
 
-    // Getters and setters
-    public String getH3Index() { return h3Index; }
-    public void setH3Index(String h3Index) { this.h3Index = h3Index; }
+    public void syncComponentScoresFromLegacySignals() {
+        this.waterScore = clamp(waterProximity);
+        this.greenScore = clamp(naturalLandUse);
+        this.elevationScore = clamp(elevationVariance);
+        this.solitudeScore = clamp((1.0 - clamp(roadDensity) + clamp(trafficSignalScore)) / 2.0);
+        this.curveScore = clamp(visualComplexity);
+        this.poiScore = clamp(poiDensity);
+    }
 
-    public Polygon getGeometry() { return geometry; }
-    public void setGeometry(Polygon geometry) { this.geometry = geometry; }
-
-    public double getScenicScore() { return scenicScore; }
     public void setScenicScore(double scenicScore) { this.scenicScore = scenicScore; }
 
     public double getWaterProximity() { return waterProximity; }
@@ -103,9 +143,42 @@ public class ScenicScoreTile {
     public double getVisualComplexity() { return visualComplexity; }
     public void setVisualComplexity(double visualComplexity) { this.visualComplexity = visualComplexity; }
 
+    public double getWaterScore() { return waterScore; }
+    public void setWaterScore(double waterScore) { this.waterScore = waterScore; }
+
+    public double getGreenScore() { return greenScore; }
+    public void setGreenScore(double greenScore) { this.greenScore = greenScore; }
+
+    public double getElevationScore() { return elevationScore; }
+    public void setElevationScore(double elevationScore) { this.elevationScore = elevationScore; }
+
+    public double getSolitudeScore() { return solitudeScore; }
+    public void setSolitudeScore(double solitudeScore) { this.solitudeScore = solitudeScore; }
+
+    public double getCurveScore() { return curveScore; }
+    public void setCurveScore(double curveScore) { this.curveScore = curveScore; }
+
+    public double getPoiScore() { return poiScore; }
+    public void setPoiScore(double poiScore) { this.poiScore = poiScore; }
+
+    public double getTrafficSignalScore() { return trafficSignalScore; }
+    public void setTrafficSignalScore(double trafficSignalScore) { this.trafficSignalScore = trafficSignalScore; }
+
+    public String getH3Index() { return h3Index; }
+    public void setH3Index(String h3Index) { this.h3Index = h3Index; }
+
+    public Polygon getGeometry() { return geometry; }
+    public void setGeometry(Polygon geometry) { this.geometry = geometry; }
+
+    public double getScenicScore() { return scenicScore; }
+
     public Instant getLastScored() { return lastScored; }
     public void setLastScored(Instant lastScored) { this.lastScored = lastScored; }
 
     public String getScoringVersion() { return scoringVersion; }
     public void setScoringVersion(String scoringVersion) { this.scoringVersion = scoringVersion; }
+
+    private double clamp(double value) {
+        return Math.max(0.0, Math.min(1.0, value));
+    }
 }

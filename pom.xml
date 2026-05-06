@@ -33,7 +33,6 @@
         <redis.version>3.2.6</redis.version>
         <debezium.version>2.7.0.Final</debezium.version>
         <mapbox.version>6.8.1</mapbox.version>
-        <osm4j.version>0.47.4</osm4j.version>
         <geotools.version>31.0</geotools.version>
         <resilience4j.version>2.2.0</resilience4j.version>
         <micrometer.version>1.14.0</micrometer.version>
@@ -54,6 +53,25 @@
         <module>shared/event-models</module>
         <module>shared/data-models</module>
     </modules>
+
+    <repositories>
+        <repository>
+            <id>osgeo</id>
+            <name>OSGeo Release Repository</name>
+            <url>https://repo.osgeo.org/repository/release/</url>
+            <releases>
+                <enabled>true</enabled>
+            </releases>
+            <snapshots>
+                <enabled>false</enabled>
+            </snapshots>
+        </repository>
+        <repository>
+            <id>topobyte</id>
+            <name>Topobyte Repository</name>
+            <url>https://mvn.topobyte.de</url>
+        </repository>
+    </repositories>
 
     <dependencyManagement>
         <dependencies>
@@ -84,30 +102,11 @@
             </dependency>
 
 
-            <!-- Redis -->
-            <dependency>
-                <groupId>io.lettuce</groupId>
-                <artifactId>lettuce-core</artifactId>
-                <version>6.3.2.RELEASE</version>
-            </dependency>
-
             <!-- Debezium -->
             <dependency>
                 <groupId>io.debezium</groupId>
                 <artifactId>debezium-embedded</artifactId>
                 <version>${debezium.version}</version>
-            </dependency>
-
-            <!-- OSM parsing -->
-            <dependency>
-                <groupId>de.topobyte</groupId>
-                <artifactId>osm4j-core</artifactId>
-                <version>${osm4j.version}</version>
-            </dependency>
-            <dependency>
-                <groupId>de.topobyte</groupId>
-                <artifactId>osm4j-pbf</artifactId>
-                <version>${osm4j.version}</version>
             </dependency>
 
             <!-- GeoTools for raster processing -->
@@ -178,19 +177,4 @@
             </plugins>
         </pluginManagement>
     </build>
-
-    <repositories>
-        <!-- GeoTools repository -->
-        <repository>
-            <id>osgeo</id>
-            <name>OSGeo Release Repository</name>
-            <url>https://repo.osgeo.org/repository/release/</url>
-            <snapshots>
-                <enabled>false</enabled>
-            </snapshots>
-            <releases>
-                <enabled>true</enabled>
-            </releases>
-        </repository>
-    </repositories>
 </project>

@@ -43,6 +43,9 @@ public class Route {
     @Column(nullable = false)
     private String vibe;  // "coastal", "mountain", "forest", "mixed"
 
+    @Column
+    private String routeProfile; // "most_scenic", "balanced", "shorter"
+
     @OneToMany(mappedBy = "route", cascade = CascadeType.ALL, fetch = FetchType.LAZY)
     private List<RouteWaypoint> waypoints;
 
@@ -51,6 +54,12 @@ public class Route {
 
     @Column(nullable = false)
     private Instant expiresAt;  // Routes expire after 24 hours
+
+    @Column(columnDefinition = "SMALLINT")
+    private Short userRating;
+
+    @Column
+    private Instant ratedAt;
 
     // Constructors
     public Route() {}
@@ -89,6 +98,9 @@ public class Route {
     public String getVibe() { return vibe; }
     public void setVibe(String vibe) { this.vibe = vibe; }
 
+    public String getRouteProfile() { return routeProfile; }
+    public void setRouteProfile(String routeProfile) { this.routeProfile = routeProfile; }
+
     public List<RouteWaypoint> getWaypoints() { return waypoints; }
     public void setWaypoints(List<RouteWaypoint> waypoints) { this.waypoints = waypoints; }
 
@@ -97,4 +109,15 @@ public class Route {
 
     public Instant getExpiresAt() { return expiresAt; }
     public void setExpiresAt(Instant expiresAt) { this.expiresAt = expiresAt; }
+
+    public Integer getUserRating() {
+        return userRating == null ? null : userRating.intValue();
+    }
+
+    public void setUserRating(Integer userRating) {
+        this.userRating = userRating == null ? null : userRating.shortValue();
+    }
+
+    public Instant getRatedAt() { return ratedAt; }
+    public void setRatedAt(Instant ratedAt) { this.ratedAt = ratedAt; }
 }

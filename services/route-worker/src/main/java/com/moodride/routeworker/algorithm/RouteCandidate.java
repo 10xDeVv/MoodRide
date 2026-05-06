@@ -8,13 +8,23 @@ public class RouteCandidate implements Comparable<RouteCandidate> {
     private final double totalScenicScore;
     private final double totalDistanceKm;
     private final int estimatedMinutes;
+    private final String algorithmVersion;
+    private final Integer beamCandidates;
     
     public RouteCandidate(List<RoadNode> waypoints, double scenicScore, 
                          double distanceKm, int minutes) {
+        this(waypoints, scenicScore, distanceKm, minutes, "unknown", null);
+    }
+
+    public RouteCandidate(List<RoadNode> waypoints, double scenicScore,
+                         double distanceKm, int minutes,
+                         String algorithmVersion, Integer beamCandidates) {
         this.waypoints = new ArrayList<>(waypoints);
         this.totalScenicScore = scenicScore;
         this.totalDistanceKm = distanceKm;
         this.estimatedMinutes = minutes;
+        this.algorithmVersion = algorithmVersion;
+        this.beamCandidates = beamCandidates;
     }
     
     public List<RoadNode> getWaypoints() {
@@ -31,6 +41,14 @@ public class RouteCandidate implements Comparable<RouteCandidate> {
     
     public int getEstimatedMinutes() {
         return estimatedMinutes;
+    }
+
+    public String getAlgorithmVersion() {
+        return algorithmVersion;
+    }
+
+    public Integer getBeamCandidates() {
+        return beamCandidates;
     }
     
     @Override

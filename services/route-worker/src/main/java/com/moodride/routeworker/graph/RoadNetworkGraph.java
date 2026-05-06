@@ -18,6 +18,10 @@ public class RoadNetworkGraph {
     }
     
     public void addRoadSegment(RoadSegment segment) {
+        addRoadSegment(segment, 0.5);
+    }
+
+    public void addRoadSegment(RoadSegment segment, double scenicScore) {
         LineString geometry = segment.getGeometry();
         Coordinate[] coords = geometry.getCoordinates();
         
@@ -29,7 +33,7 @@ public class RoadNetworkGraph {
         RoadSegmentEdge edge = new RoadSegmentEdge(
             segment.getId(),
             segment.getLengthMeters(),
-            0.5,  // Placeholder scenic score (will be updated from scenic_score_tiles)
+            scenicScore,
             segment.getRoadType()
         );
         
@@ -42,7 +46,15 @@ public class RoadNetworkGraph {
     public void addRoadSegments(Collection<RoadSegment> segments) {
         segments.forEach(this::addRoadSegment);
     }
-    
+
+    public void addRoadSegments(Collection<RoadSegment> segments, Map<String, Double> scenicScoresByTile) {
+        segments.forEach(segment -> {
+            String h3TileIndex = segment.getH3TileIndex();
+            double scenicScore = scenicScoresByTile.getOrDefault(h3TileIndex, 0.5);
+            addRoadSegment(segment, scenicScore);
+        });
+    }
+
     private RoadNode getOrCreateNode(Coordinate coord) {
         RoadNode node = new RoadNode(coord.y, coord.x);
         return nodeCache.computeIfAbsent(node, k -> {
@@ -65,5 +77,23 @@ public class RoadNetworkGraph {
     
     public RoadNode getNodeAt(double latitude, double longitude) {
         return nodeCache.get(new RoadNode(latitude, longitude));
+    }
+
+    public RoadNode getNearestNode(double latitude, double longitude) {
+        RoadNode nearest = null;
+        double bestDistanceSquared = Double.MAX_VALUE;
+
+        for (RoadNode node : nodeCache.keySet()) {
+            double latDiff = node.getLatitude() - latitude;
+            double lonDiff = node.getLongitude() - longitude;
+            double distanceSquared = latDiff * latDiff + lonDiff * lonDiff;
+
+            if (distanceSquared < bestDistanceSquared) {
+                bestDistanceSquared = distanceSquared;
+                nearest = node;
+            }
+        }
+
+        return nearest;
     }
 }
