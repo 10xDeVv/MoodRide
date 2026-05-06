@@ -51,6 +51,11 @@ dist/
 .turbo
 
 # Data files (large datasets not committed)
+backups/
+data/
+tmp-verify/
+docker-entrypoint/
+docker-entrypoint-initdb.d/
 data/osm-samples/*.osm.pbf
 data/nlcd/*.tif
 data/elevation/*.hgt
