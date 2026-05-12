@@ -1,0 +1,257 @@
+param(
+    [string]$BaseUrl = "https://app.moodrides.com",
+    [int]$TimeBudgetMinutes = 90,
+    [int]$PollIntervalSeconds = 4,
+    [int]$JobTimeoutSeconds = 300,
+    [string]$OutputDir = "artifacts/release-qa"
+)
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = "Stop"
+
+function Invoke-ApiJson {
+    param(
+        [Parameter(Mandatory = $true)][string]$Method,
+        [Parameter(Mandatory = $true)][string]$Uri,
+        [Parameter()][object]$Body
+    )
+
+    $statusCode = 0
+    $args = @{
+        Method = $Method
+        Uri = $Uri
+        StatusCodeVariable = "statusCode"
+        SkipHttpErrorCheck = $true
+        Headers = @{ "Accept" = "application/json" }
+    }
+
+    if ($null -ne $Body) {
+        $args.ContentType = "application/json"
+        $args.Body = ($Body | ConvertTo-Json -Depth 10 -Compress)
+    }
+
+    $raw = Invoke-RestMethod @args
+    if ($statusCode -lt 200 -or $statusCode -ge 300) {
+        $payload = try { $raw | ConvertTo-Json -Depth 10 -Compress } catch { [string]$raw }
+        throw "HTTP $statusCode for $Method $Uri :: $payload"
+    }
+    return $raw
+}
+
+function Get-PrimaryRouteId {
+    param([Parameter(Mandatory = $true)][object]$JobStatus)
+
+    if ($JobStatus.routeId) {
+        return [string]$JobStatus.routeId
+    }
+    if (-not $JobStatus.routeOptions) {
+        return $null
+    }
+
+    $mostScenic = $JobStatus.routeOptions | Where-Object { $_.profile -eq "most_scenic" } | Select-Object -First 1
+    if ($mostScenic) {
+        return [string]$mostScenic.routeId
+    }
+    $first = $JobStatus.routeOptions | Select-Object -First 1
+    if ($first) {
+        return [string]$first.routeId
+    }
+    return $null
+}
+
+function Try-GetNumericProperty {
+    param(
+        [Parameter(Mandatory = $true)][object]$Object,
+        [Parameter(Mandatory = $true)][string]$PropertyName
+    )
+    if ($null -eq $Object) {
+        return $null
+    }
+    $prop = $Object.PSObject.Properties[$PropertyName]
+    if ($null -eq $prop -or $null -eq $prop.Value) {
+        return $null
+    }
+    try {
+        return [double]$prop.Value
+    } catch {
+        return $null
+    }
+}
+
+$regions = @(
+    @{
+        id = "ontario-toronto"
+        label = "Ontario (Toronto)"
+        lat = 43.6532
+        lng = -79.3832
+    },
+    @{
+        id = "bc-vancouver"
+        label = "British Columbia (Vancouver)"
+        lat = 49.2827
+        lng = -123.1207
+    },
+    @{
+        id = "maritimes-fredericton"
+        label = "Maritimes (Fredericton)"
+        lat = 45.9636
+        lng = -66.6431
+    }
+)
+
+$vibeProfiles = @(
+    @("countryside"),
+    @("coastal"),
+    @("mountain")
+)
+
+$startedAt = Get-Date
+$runId = $startedAt.ToString("yyyyMMdd-HHmmss")
+$resolvedOutputDir = (Join-Path (Resolve-Path ".").Path $OutputDir)
+New-Item -ItemType Directory -Force -Path $resolvedOutputDir | Out-Null
+
+$results = @()
+
+foreach ($region in $regions) {
+    Write-Host ""
+    Write-Host "==> Scenic regions check: $($region.label)"
+
+    $scenicUri = "$BaseUrl/api/scenic-regions?lat=$($region.lat)&lng=$($region.lng)&radiusKm=50&limit=10"
+    $scenic = Invoke-ApiJson -Method "GET" -Uri $scenicUri
+
+    $regionScores = @($scenic.regions | ForEach-Object {
+        $scenicScore = Try-GetNumericProperty -Object $_ -PropertyName "scenicScore"
+        if ($null -ne $scenicScore) {
+            $scenicScore
+        } else {
+            Try-GetNumericProperty -Object $_ -PropertyName "compositeScore"
+        }
+    } | Where-Object { $null -ne $_ })
+    $scenicSummary = @{
+        count = $regionScores.Count
+        min = if ($regionScores.Count -gt 0) { ($regionScores | Measure-Object -Minimum).Minimum } else { $null }
+        max = if ($regionScores.Count -gt 0) { ($regionScores | Measure-Object -Maximum).Maximum } else { $null }
+        avg = if ($regionScores.Count -gt 0) { ($regionScores | Measure-Object -Average).Average } else { $null }
+    }
+
+    foreach ($profile in $vibeProfiles) {
+        $profileId = ($profile -join "+")
+        Write-Host "==> Route job: $($region.id) [$profileId]"
+
+        $submitBody = @{
+            userId = [guid]::NewGuid()
+            lat = $region.lat
+            lng = $region.lng
+            timeBudgetMinutes = $TimeBudgetMinutes
+            vibes = $profile
+            preferenceVector = @{ avoidTolls = $false }
+        }
+        $submission = Invoke-ApiJson -Method "POST" -Uri "$BaseUrl/api/routes" -Body $submitBody
+
+        $jobId = [string]$submission.jobId
+        $deadline = (Get-Date).AddSeconds($JobTimeoutSeconds)
+        $jobStatus = $null
+        do {
+            Start-Sleep -Seconds $PollIntervalSeconds
+            $jobStatus = Invoke-ApiJson -Method "GET" -Uri "$BaseUrl/api/routes/$jobId"
+            $status = [string]$jobStatus.status
+            if ($status -in @("COMPLETED", "FAILED", "TIMEOUT")) {
+                break
+            }
+        } while ((Get-Date) -lt $deadline)
+
+        $finalStatus = if ($jobStatus) { [string]$jobStatus.status } else { "UNKNOWN" }
+        if ((Get-Date) -ge $deadline -and $finalStatus -notin @("COMPLETED", "FAILED", "TIMEOUT")) {
+            $finalStatus = "TIMEOUT"
+        }
+
+        $routeId = $null
+        $routeDetail = $null
+        $routeOptions = @()
+        if ($finalStatus -eq "COMPLETED") {
+            $routeId = Get-PrimaryRouteId -JobStatus $jobStatus
+            if ($routeId) {
+                $routeDetail = Invoke-ApiJson -Method "GET" -Uri "$BaseUrl/api/routes/route/$routeId"
+                if ($routeDetail.routeOptions) {
+                    $routeOptions = @($routeDetail.routeOptions)
+                } elseif ($jobStatus.routeOptions) {
+                    $routeOptions = @($jobStatus.routeOptions)
+                }
+            }
+        }
+
+        $optionScores = @($routeOptions | ForEach-Object { [double]$_.scenicScore })
+        $scoreSpread = if ($optionScores.Count -ge 2) {
+            ($optionScores | Measure-Object -Maximum).Maximum - ($optionScores | Measure-Object -Minimum).Minimum
+        } else {
+            $null
+        }
+
+        $results += [ordered]@{
+            regionId = $region.id
+            regionLabel = $region.label
+            lat = $region.lat
+            lng = $region.lng
+            vibes = $profile
+            scenicTop10 = $scenicSummary
+            jobId = $jobId
+            status = $finalStatus
+            routeId = $routeId
+            routeOptions = $routeOptions
+            scoreSpread = $scoreSpread
+            failureReason = if ($jobStatus -and $jobStatus.reason) { [string]$jobStatus.reason } else { $null }
+            checkedAtUtc = (Get-Date).ToUniversalTime().ToString("o")
+        }
+    }
+}
+
+$completed = @($results | Where-Object { $_.status -eq "COMPLETED" })
+$failed = @($results | Where-Object { $_.status -ne "COMPLETED" })
+
+$summary = [ordered]@{
+    runId = $runId
+    startedAtUtc = $startedAt.ToUniversalTime().ToString("o")
+    finishedAtUtc = (Get-Date).ToUniversalTime().ToString("o")
+    baseUrl = $BaseUrl
+    scenarioCount = $results.Count
+    completedCount = $completed.Count
+    nonCompletedCount = $failed.Count
+    results = $results
+}
+
+$jsonPath = Join-Path $resolvedOutputDir "release-qa-$runId.json"
+$mdPath = Join-Path $resolvedOutputDir "release-qa-$runId.md"
+
+$summary | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $jsonPath -Encoding UTF8
+
+$lines = @()
+$lines += "# Release QA Baseline - $runId"
+$lines += ""
+$lines += "- Base URL: $BaseUrl"
+$lines += "- Scenarios: $($results.Count)"
+$lines += "- Completed: $($completed.Count)"
+$lines += "- Non-completed: $($failed.Count)"
+$lines += ""
+$lines += "| Region | Vibes | Status | Job ID | Route Options | Score Spread |"
+$lines += "|---|---|---|---|---:|---:|"
+foreach ($item in $results) {
+    $vibesLabel = ($item.vibes -join ",")
+    $optionCount = if ($item.routeOptions) { @($item.routeOptions).Count } else { 0 }
+    $spreadLabel = if ($null -ne $item.scoreSpread) { "{0:N4}" -f [double]$item.scoreSpread } else { "n/a" }
+    $lines += "| $($item.regionLabel) | $vibesLabel | $($item.status) | $($item.jobId) | $optionCount | $spreadLabel |"
+}
+$lines += ""
+
+if ($failed.Count -gt 0) {
+    $lines += "## Failures"
+    foreach ($item in $failed) {
+        $lines += "- $($item.regionLabel) [$($item.vibes -join ',')]: status=$($item.status) reason=$($item.failureReason)"
+    }
+}
+
+$lines | Set-Content -LiteralPath $mdPath -Encoding UTF8
+
+Write-Host ""
+Write-Host "QA baseline complete."
+Write-Host "JSON: $jsonPath"
+Write-Host "Markdown: $mdPath"
