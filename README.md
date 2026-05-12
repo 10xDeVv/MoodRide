@@ -172,6 +172,8 @@ mvn spring-boot:run
 # Terminal 2 - Worker
 cd services/route-worker
 mvn spring-boot:run
+# (low-memory alternative on this machine)
+powershell -ExecutionPolicy Bypass -File scripts/start-route-worker-lowmem.ps1
 
 # Terminal 3 - Frontend
 cd frontend/moodride-web
@@ -251,6 +253,9 @@ mvn test
 
 # Run specific service
 cd services/route-api && mvn spring-boot:run
+
+# Run route-worker with bounded heap (avoids local paging-file crashes)
+powershell -ExecutionPolicy Bypass -File scripts/start-route-worker-lowmem.ps1
 
 # Stop all containers
 docker-compose down
