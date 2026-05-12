@@ -113,6 +113,11 @@ The workflow downloads the release asset, copies it to VM, updates `OSRM_DATASET
 
 This executes the batched raster/DEM scoring SQL over your local `moodride` database.
 
+Important behavior:
+
+- `scripts/setup/data-quality-upgrade-batched.sql` is now a single-pass target to `2.6-raster-data-quality-upgrade-national-batched`.
+- The run is resumable. Re-running after interruption continues from remaining tiles not already at `2.6`.
+
 ### 5B. Publish scenic tile release from your local machine
 
 ```powershell
@@ -137,7 +142,23 @@ Run workflow `.github/workflows/deploy-scenic-release.yml` with:
 
 The workflow downloads the scenic asset, uploads it to VM, applies score updates into `scenic_score_tiles`, and restarts `route-api` + `route-worker`.
 
-## 6. Required `.env.prod` keys
+## 6. Post-deploy release QA baseline
+
+Run a production QA sweep after app/data deploys:
+
+```powershell
+./scripts/deploy/run_release_qa_baseline.ps1 `
+  -BaseUrl "https://app.moodrides.com" `
+  -TimeBudgetMinutes 90 `
+  -OutputDir "artifacts/release-qa"
+```
+
+Outputs:
+
+- `artifacts/release-qa/release-qa-<timestamp>.json`
+- `artifacts/release-qa/release-qa-<timestamp>.md`
+
+## 7. Required `.env.prod` keys
 
 Make sure `.env.prod` contains at least:
 
@@ -150,7 +171,7 @@ Make sure `.env.prod` contains at least:
 - `MOODRIDE_CORS_ALLOWED_ORIGINS=https://app.moodrides.com`
 - `OSRM_DATASET_BASENAME`
 
-## 7. Backup locations
+## 8. Backup locations
 
 - Runtime deployment dump used for restore:
   - `backups/moodride_runtime_backup.dump`

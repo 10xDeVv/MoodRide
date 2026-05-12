@@ -1,6 +1,6 @@
 # MoodRide Implementation Plan (Living)
 
-Last reconciled: 2026-05-01
+Last reconciled: 2026-05-11
 
 ## 1) Purpose
 This is the active execution plan. It replaces the older audit-heavy plan text and tracks what is done, what is in flight, and what is next.
@@ -28,50 +28,38 @@ This is the active execution plan. It replaces the older audit-heavy plan text a
 - route-api, route-worker, notification-service, frontend, caddy
 
 ### 2.3 Current data scope
-- OSRM runtime dataset currently limited to New Brunswick baseline (as deployed).
-- Canada-wide source data is available locally and planned for rollout via versioned data pipeline.
+- OSRM runtime dataset is nationwide (`canada-latest`) in production.
+- Scenic tile data is deployed at `2.6-raster-data-quality-upgrade-national-batched` for all 211,510 tiles.
+- Versioned release/deploy workflows exist for both OSRM and scenic tiles.
 
 ## 3) Priority Plan (Now)
 
-### P0: Nationwide data rollout (Canada)
-Goal: move from provincial scope to nationwide routing while preserving production stability.
-
-Steps:
-1. Complete nationwide OSRM preprocessing on local machine.
-2. Publish release artifact with `publish_data_release.ps1`.
-3. Deploy artifact through `deploy-data-release` workflow.
-4. Validate route generation and memory/disk headroom on VM.
-
-Acceptance criteria:
-- `OSRM_DATASET_BASENAME` switched to national dataset in prod.
-- `/api/scenic-regions` and route generation endpoints remain healthy.
-- no sustained OOM/restart loops in worker/osrm.
-
-### P0: Data-quality upgrade completion
-Goal: land-cover + DEM + solitude refinements become production-default scoring inputs.
-
-Steps:
-1. Finish long-running DEM enrichment pipeline locally.
-2. Complete tile recompute / validation queries.
-3. Publish refreshed scenic tile data release package.
-4. Deploy with rollback-ready checkpoint.
-
-Acceptance criteria:
-- component score distributions show meaningful variance.
-- slider behavior differences are observable and consistent.
-- route-option differentiation remains stable after refresh.
-
-### P1: Deployment hardening
+### P0: Deployment hardening
 Goal: reduce manual steps and release risk.
 
 Steps:
 1. Add protected `production` environment rules in GitHub.
 2. Add post-deploy smoke checks in workflow run summary.
-3. Document operational rollback drills.
+3. Keep CORS/runtime env parity enforced during deploy (`MOODRIDE_CORS_ALLOWED_ORIGINS` and frontend API/WS base URLs).
+4. Document operational rollback drills.
 
 Acceptance criteria:
 - deploy path is GitHub-run driven (not ad hoc SSH edits).
 - rollback to previous `IMAGE_TAG` tested and documented.
+- API smoke checks and route submission checks pass after each deploy.
+
+### P0: Release QA baseline gate
+Goal: treat release validation as a standard gate, not ad hoc manual checks.
+
+Steps:
+1. Run `scripts/deploy/run_release_qa_baseline.ps1` after app/data deploy.
+2. Store JSON/Markdown artifacts per run.
+3. Track regressions (status failures, option count, score spread drift) across releases.
+
+Acceptance criteria:
+- all scenarios complete (`COMPLETED`)
+- route options present for each scenario
+- no unexplained regional regressions between releases
 
 ## 4) Secondary Plan (Next)
 
@@ -114,9 +102,7 @@ Outcome required:
 1. What SLO do you want to enforce for async route completion (for example p95 under N seconds) once nationwide data is deployed?
 
 ## 8) Immediate Next Action
-Begin Canada-wide OSRM release path with the existing pipeline:
-1. finalize local preprocessing
-2. publish tagged data release
-3. deploy through `deploy-data-release` workflow
-4. run smoke + resource checks
+1. Run/record release QA baseline after each production release.
+2. Add deploy smoke checks directly into workflow summaries.
+3. Plan first scheduled recompute cadence (monthly OSM + scenic release train).
 

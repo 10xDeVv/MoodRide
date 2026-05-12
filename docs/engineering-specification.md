@@ -1,6 +1,6 @@
 # MoodRide Engineering Specification (As-Built)
 
-Last reconciled: 2026-05-01
+Last reconciled: 2026-05-11
 
 ## 1) Document Intent
 This file is the current, code-aligned engineering specification for MoodRide. It replaces the previous oversized historical spec and focuses on the system that actually runs today.
@@ -178,6 +178,7 @@ Behavioral contract:
 GitHub Actions workflows now present:
 - app deploy workflow (image build/push + remote deploy script)
 - data release deploy workflow (versioned OSRM artifact rollout)
+- scenic release deploy workflow (versioned scenic tile rollout into Postgres)
 
 Compose now parameterizes image source/tag via:
 - `GHCR_NAMESPACE`
@@ -187,6 +188,22 @@ Compose now parameterizes image source/tag via:
 - preprocess heavy datasets off-VM (local machine)
 - publish versioned data artifact
 - deploy artifact to VM and switch `OSRM_DATASET_BASENAME`
+
+Current production state:
+- `OSRM_DATASET_BASENAME=canada-latest` is deployed for nationwide routing.
+
+### 11.4 Scenic data lifecycle
+- run nationwide recompute locally using `scripts/setup/data-quality-upgrade-batched.sql` (single-pass target: `2.6-raster-data-quality-upgrade-national-batched`)
+- publish versioned scenic release artifact (`publish_scenic_release.ps1`)
+- deploy scenic release via `.github/workflows/deploy-scenic-release.yml`
+- restart `route-api` + `route-worker` to refresh runtime caches
+
+Current production state:
+- `scenic_score_tiles` is fully on `2.6-raster-data-quality-upgrade-national-batched` (211,510 tiles)
+
+### 11.5 Release QA baseline
+- run `scripts/deploy/run_release_qa_baseline.ps1` after release
+- baseline currently validates 3 regions (Ontario, BC, Maritimes) × 3 vibe profiles and persists JSON/Markdown artifacts under `artifacts/release-qa`
 
 ## 12) Non-Functional Targets (Current Practical)
 These are practical targets for current architecture, not theoretical long-term goals:
