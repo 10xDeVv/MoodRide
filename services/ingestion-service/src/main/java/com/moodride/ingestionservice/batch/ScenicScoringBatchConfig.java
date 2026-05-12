@@ -22,13 +22,16 @@ import org.springframework.batch.infrastructure.item.database.JdbcCursorItemRead
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.core.task.SimpleAsyncTaskExecutor;
+import org.springframework.orm.jpa.JpaTransactionManager;
 import org.springframework.transaction.PlatformTransactionManager;
 
+import jakarta.persistence.EntityManagerFactory;
 import javax.sql.DataSource;
 import java.sql.Timestamp;
 import java.time.Instant;
@@ -150,6 +153,13 @@ public class ScenicScoringBatchConfig {
     @Bean(name = "batchDataSourceTransactionManager")
     public PlatformTransactionManager batchDataSourceTransactionManager() {
         return new DataSourceTransactionManager(dataSource);
+    }
+
+    @Bean(name = "transactionManager")
+    @ConditionalOnMissingBean(name = "transactionManager")
+    public PlatformTransactionManager transactionManagerAlias(
+            EntityManagerFactory entityManagerFactory) {
+        return new JpaTransactionManager(entityManagerFactory);
     }
 
     /**
