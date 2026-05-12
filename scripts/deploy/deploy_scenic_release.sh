@@ -123,21 +123,22 @@ COPY scenic_release_updates (
     scoring_version
 ) FROM '/tmp/scenic_score_tiles_updates.csv' WITH (FORMAT csv, HEADER true);
 
-DO $$
-DECLARE
-    expected_version TEXT := nullif(:'expected_scoring_version', '');
-    mismatched_count INTEGER;
-BEGIN
-    IF expected_version IS NULL THEN
-        RETURN;
-    END IF;
-    SELECT COUNT(*) INTO mismatched_count
-    FROM scenic_release_updates
-    WHERE scoring_version <> expected_version;
-    IF mismatched_count > 0 THEN
-        RAISE EXCEPTION 'Scenic release scoring_version mismatch. Expected %, found % mismatched rows.', expected_version, mismatched_count;
-    END IF;
-END $$;
+SELECT CASE
+    WHEN nullif(:'expected_scoring_version', '') IS NULL THEN 0
+    ELSE (
+        SELECT COUNT(*)
+        FROM scenic_release_updates
+        WHERE scoring_version <> :'expected_scoring_version'
+    )
+END AS mismatched_count
+\gset
+
+\if :mismatched_count != 0
+\echo Scenic release scoring_version mismatch detected.
+\echo Expected: :expected_scoring_version
+\echo Mismatched rows: :mismatched_count
+\quit 3
+\endif
 
 WITH updated AS (
     UPDATE scenic_score_tiles sst
