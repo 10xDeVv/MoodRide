@@ -16,8 +16,8 @@ const spaceGrotesk = Space_Grotesk({
 });
 
 export const metadata: Metadata = {
-  title: "MoodRide Planner",
-  description: "Scenic loop planning, map handoff, and GPX export."
+  title: "MoodRide | Scenic Route Intelligence",
+  description: "Generate scenic loops for drives, walks, and rides, starting with Canada-wide driving routes."
 };
 
 export default function RootLayout({ children }: { children: ReactNode }) {

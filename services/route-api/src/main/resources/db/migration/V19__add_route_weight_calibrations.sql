@@ -1,0 +1,12 @@
+CREATE TABLE IF NOT EXISTS route_weight_calibrations (
+    vibe VARCHAR(32) PRIMARY KEY,
+    water_multiplier DOUBLE PRECISION NOT NULL DEFAULT 1.0,
+    greenery_multiplier DOUBLE PRECISION NOT NULL DEFAULT 1.0,
+    elevation_multiplier DOUBLE PRECISION NOT NULL DEFAULT 1.0,
+    solitude_multiplier DOUBLE PRECISION NOT NULL DEFAULT 1.0,
+    curves_multiplier DOUBLE PRECISION NOT NULL DEFAULT 1.0,
+    poi_multiplier DOUBLE PRECISION NOT NULL DEFAULT 1.0,
+    sample_count INTEGER NOT NULL DEFAULT 0,
+    updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+

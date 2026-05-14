@@ -6,15 +6,21 @@
 
 [![Java](https://img.shields.io/badge/Java-25-orange.svg)](https://openjdk.java.net/)
 [![Spring Boot](https://img.shields.io/badge/Spring%20Boot-3.3-brightgreen.svg)](https://spring.io/projects/spring-boot)
-[![Kafka](https://img.shields.io/badge/Kafka-3.7-blue.svg)](https://kafka.apache.org/)
+[![Kafka](https://img.shields.io/badge/Kafka-7.6-blue.svg)](https://kafka.apache.org/)
 [![PostGIS](https://img.shields.io/badge/PostGIS-3.4-blue.svg)](https://postgis.net/)
 
 ---
 
 ## 📋 Quick Links
 
-- **[Engineering Specification](docs/engineering-specification.md)** - Complete technical specification (122KB)
-- **[Implementation Plan](docs/implementation-plan.md)** - Phase-by-phase development guide
+- **[Engineering Specification](docs/engineering-specification.md)** - System design, contracts, runtime scope
+- **[Deployment Pipeline](docs/DeploymentPipeline.md)** - CI/CD and release flows
+- **[Release QA Baseline](docs/ReleaseQABaseline.md)** - Post-deploy validation script
+- **[Data Quality Upgrade](docs/DataQualityUpgrade.md)** - Land cover + DEM scoring plan
+- **[Hybrid Routing Progress](docs/HybridRoutingProgress.md)** - Current route-generation status
+- **[Route Export & UI Polish Progress](docs/RouteExportAndUIPolishProgress.md)** - UX polish status
+- **[API Alias Deprecation Plan](docs/ApiAliasDeprecationPlan.md)** - `/routes/*` sunset plan
+- **[Implementation Plan](docs/implementation-plan.md)** - Roadmap
 - **[Project Structure](PROJECT_STRUCTURE.md)** - Microservices architecture overview
 
 ---
@@ -51,32 +57,32 @@ MoodRide generates a loop route optimized for:
                    │                                       │
            ┌───────▼────────┐                    ┌────────▼────────┐
            │  route-worker  │                    │  notification   │
-           │  (Beam Search) │                    │   (WebSocket)   │
+           │ (hybrid OSRM)  │                    │   (WebSocket)   │
            └───────┬────────┘                    └─────────────────┘
                    │
         ┌──────────┼──────────┐
         │          │          │
 ┌───────▼──────┐  │  ┌───────▼─────────┐
 │   PostGIS    │  │  │   Redis Cache   │
-│ (Geospatial) │  │  │  (4-layer)      │
+│ (Scenic DB)  │  │  │  (4-layer)      │
 └──────────────┘  │  └─────────────────┘
                   │
         ┌─────────▼──────────┐
-        │  scenic-scoring    │
-        │   (Batch Weekly)   │
+        │       OSRM         │
+        │  (Trip / Loop)     │
         └────────────────────┘
 ```
 
 ### Microservices
 
-| Service | Purpose | Tech |
-|---------|---------|------|
-| **route-api** | REST API, job management | Spring Boot Web, Kafka Producer |
-| **route-worker** | Route generation (beam search) | Kafka Consumer, JGraphT, PostGIS |
-| **scenic-scoring** | Weekly scenic tile scoring | Spring Batch, 6 external APIs |
-| **ingestion-service** | OSM data ingestion | osm4j, PostGIS |
-| **notification-service** | WebSocket real-time delivery | Spring WebSocket |
-| **cdc-service** | Cache invalidation (Debezium) | Debezium, Redis |
+| Service | Purpose | Runtime |
+|---------|---------|---------|
+| **route-api** | REST API, job management, route detail | Always-on |
+| **route-worker** | Hybrid OSRM loop generation + scoring | Always-on |
+| **notification-service** | WebSocket completion/failure updates | Always-on |
+| **scenic-scoring-service** | Batch scenic tile scoring/recompute | Offline/batch |
+| **ingestion-service** | OSM ingest → `road_segments` | Offline/batch |
+| **cdc-service** | Optional CDC cache invalidation | Optional/offline |
 
 ---
 
@@ -85,10 +91,11 @@ MoodRide generates a loop route optimized for:
 **Backend:**
 - **Java 25** (Virtual Threads, FFM API, Vector API) 🔥
 - Spring Boot 3.3+
-- PostgreSQL 16 + PostGIS 3.4 (geospatial queries)
-- Apache Kafka 3.7 (async job queue)
-- Redis 7.2 (4-layer caching)
-- Debezium 2.7 (CDC for cache invalidation)
+- PostgreSQL 15/16 + PostGIS 3.3/3.4
+- Apache Kafka (Confluent 7.5/7.6)
+- Redis 7.x (4-layer caching)
+- OSRM (loop routing via `/trip`)
+- H3 (spatial indexing)
 
 **Frontend:**
 - Next.js 14+ (React)
@@ -97,26 +104,25 @@ MoodRide generates a loop route optimized for:
 
 **Data Sources:**
 - OpenStreetMap - road network
-- NLCD - land use classification
-- OpenTopoData - elevation profiles (self-hosted)
 - Natural Earth - water bodies
-- TomTom API - traffic data (optional)
+- Canada Land Cover - land use (upgrade in progress)
+- Copernicus DEM - elevation (upgrade in progress)
+- OpenTopoData - elevation profiles (optional)
 
 **Observability:**
-- Prometheus + Grafana (metrics)
-- Jaeger (distributed tracing)
+- Prometheus + Grafana (optional)
 - Structured JSON logging
 
 ---
 
 ## 🎨 Key Innovations
 
-1. **NP-Hard Optimization**: Solves Orienteering Problem using **beam search (K=10)** instead of exact ILP
-2. **H3 Hexagonal Indexing**: Superior to GeoHash for uniform spatial partitioning
-3. **Precomputed Scenic Scores**: Weekly batch eliminates 1,200+ API calls per route request
-4. **CDC Cache Invalidation**: Debezium monitors PostgreSQL WAL for near-real-time freshness
-5. **Async Job Architecture**: Route generation happens in Kafka workers, not blocking API calls
-6. **Java 25 Virtual Threads**: 2-5x throughput on I/O-heavy operations
+1. **Hybrid OSRM Loop Generation**: Tile-based waypoint rings + corridor scoring (`hybrid_osrm_v1`)
+2. **H3 Scenic Intelligence**: Component scores (water/green/elevation/solitude/curve/poi) + preferences
+3. **Multi-Option Routes**: `most_scenic` / `balanced` / `shorter` profiles persisted per job
+4. **Async Job Architecture**: Kafka workers + WebSocket completion/failure updates
+5. **Versioned Data Releases**: OSRM + scenic tiles released through GitHub Actions
+6. **Release QA Baseline**: Regression tracking after app/data deploys
 
 ---
 
@@ -138,28 +144,28 @@ git clone <repository-url>
 cd MoodRide
 ```
 
-**2. Start all infrastructure services**
+**2. Start core infrastructure**
 ```bash
-cd infrastructure/docker
-docker-compose up -d
+docker compose up -d
 ```
 
 This starts:
-- PostgreSQL 16 + PostGIS
-- Redis 7
-- Apache Kafka + Zookeeper
-- Debezium Connect
+- PostgreSQL + PostGIS (host port `5433`)
+- Redis
+- Kafka + Zookeeper
 - OSRM (route engine for `/trip` loop routing)
-- OpenTopoData (elevation API)
-- Prometheus + Grafana
-- Jaeger (tracing)
 
 On first startup, `osrm-prepare` preprocesses `data/osm-samples/new-brunswick-latest.osm.pbf` into `data/osrm/*.osrm*`.
 This one-time step can take a few minutes depending on machine performance.
 
+**Optional full infra stack (OpenTopoData + Prometheus + Grafana):**
+```bash
+docker compose -f infrastructure/docker/docker-compose.yml up -d
+```
+Note: this stack exposes Postgres on `5432`, so set `SPRING_DATASOURCE_URL` accordingly when running services.
+
 **3. Build all services**
 ```bash
-cd ../..
 mvn clean install
 ```
 
@@ -175,7 +181,11 @@ mvn spring-boot:run
 # (low-memory alternative on this machine)
 powershell -ExecutionPolicy Bypass -File scripts/start-route-worker-lowmem.ps1
 
-# Terminal 3 - Frontend
+# Terminal 3 - WebSocket notifications
+cd services/notification-service
+mvn spring-boot:run
+
+# Terminal 4 - Frontend
 cd frontend/moodride-web
 npm install && npm run dev
 ```
@@ -184,8 +194,7 @@ npm install && npm run dev
 - Frontend: http://localhost:3000
 - API: http://localhost:8080
 - OSRM: http://localhost:5002
-- Grafana: http://localhost:3001 (admin/admin)
-- Jaeger: http://localhost:16686
+- Grafana: http://localhost:3001 (admin/admin, optional)
 
 ---
 
@@ -195,7 +204,7 @@ npm install && npm run dev
 MoodRide/
 ├── services/              # Microservices
 │   ├── route-api/         # REST API (Port 8080)
-│   ├── route-worker/      # Beam search worker (Port 8081)
+│   ├── route-worker/      # Hybrid OSRM worker (Port 8081)
 │   ├── scenic-scoring-service/
 │   ├── ingestion-service/
 │   ├── notification-service/
@@ -216,26 +225,24 @@ See [PROJECT_STRUCTURE.md](PROJECT_STRUCTURE.md) for detailed breakdown.
 
 ---
 
-## 🧪 Development Workflow
+## ✅ Current Status (May 2026)
 
-### Completed Through Phase 4
-- [x] Microservices structure and parent Maven build
-- [x] Docker Compose infrastructure for PostgreSQL/PostGIS, Kafka, and Redis
-- [x] Flyway schema and sample data for route generation
-- [x] PostGIS-backed graph extraction and scenic route worker
-- [x] End-to-end route generation via Kafka worker and database persistence
+- Hybrid OSRM routing (`hybrid_osrm_v1`) is the default generator; beam-search fallback removed.
+- Multi-option routes are persisted and exposed in API + UI (`most_scenic`, `balanced`, `shorter`).
+- Start Drive (Google/Apple) + GPX export shipped; mobile handoff validation still pending.
+- `/routes/*` aliases are in deprecation window; `/api/*` is canonical (sunset Aug 1, 2026).
+- Release QA baseline script and artifacts are in place for each deploy.
+- Data quality upgrade (land cover + DEM) is in progress; scoped runs complete, national coverage pending.
 
-### Current Focus: Phase 5
-- [x] Route submission endpoint
-- [x] Job polling endpoint
-- [x] Route retrieval endpoint
-- [ ] Scenic region preview endpoint
-- [ ] WebSocket notification service
-- [ ] Timeout watchdog and retry logic
+See [HybridRoutingProgress](docs/HybridRoutingProgress.md), [RouteExportAndUIPolishProgress](docs/RouteExportAndUIPolishProgress.md), and [DataQualityUpgradeProgress](docs/DataQualityUpgradeProgress.md).
 
-### Phase 2-8: See [implementation-plan.md](docs/implementation-plan.md)
+---
 
-**Total Timeline: 8-10 weeks**
+## 🚢 Operations & Releases
+
+- App deploys: GitHub Actions flow in [DeploymentPipeline](docs/DeploymentPipeline.md).
+- Data releases: OSRM dataset + scenic tiles published to GitHub Releases and deployed via workflows.
+- Release QA: run [ReleaseQABaseline](docs/ReleaseQABaseline.md) after app/data deploys; artifacts land in `artifacts/release-qa`.
 
 ---
 
@@ -245,8 +252,11 @@ See [PROJECT_STRUCTURE.md](PROJECT_STRUCTURE.md) for detailed breakdown.
 # Build all services
 mvn clean install
 
-# Start infrastructure
-cd infrastructure/docker && docker-compose up -d
+# Start core infrastructure
+docker compose up -d
+
+# Start full infrastructure (optional)
+cd infrastructure/docker && docker compose up -d
 
 # Run tests
 mvn test
@@ -258,38 +268,39 @@ cd services/route-api && mvn spring-boot:run
 powershell -ExecutionPolicy Bypass -File scripts/start-route-worker-lowmem.ps1
 
 # Stop all containers
-docker-compose down
+docker compose down
 
 # View logs
-docker-compose logs -f kafka
+docker compose logs -f kafka
+
+# Release QA baseline (post-deploy)
+powershell -ExecutionPolicy Bypass -File scripts/deploy/run_release_qa_baseline.ps1 -BaseUrl "https://app.moodrides.com"
 ```
 
 ---
 
-## 📊 Monitoring
+## 📊 Monitoring (Optional)
 
 - **Metrics**: http://localhost:9090 (Prometheus)
 - **Dashboards**: http://localhost:3001 (Grafana)
-- **Tracing**: http://localhost:16686 (Jaeger)
 - **Service Health**: http://localhost:8080/actuator/health
 
 ---
 
 ## 🔐 Security
 
-- Rate limiting: 10 requests/min per user
-- TLS only (HTTPS/WSS)
-- Location data soft-deleted after 30 days
-- External API keys in environment variables
+- TLS termination via Caddy in production compose
+- Secrets loaded via environment or `.env.prod` (see [infrastructure/docker/secrets/README.md](infrastructure/docker/secrets/README.md))
 - Parameterized SQL queries (injection prevention)
 
 ---
 
 ## 📖 Documentation
 
-- [Engineering Specification](docs/engineering-specification.md) - Complete system design
-- [Implementation Plan](docs/implementation-plan.md) - Development roadmap
-- [Project Structure](PROJECT_STRUCTURE.md) - Microservices architecture
+- [Engineering Specification](docs/engineering-specification.md) - System design
+- [Deployment Pipeline](docs/DeploymentPipeline.md) - CI/CD and release flows
+- [Data Quality Upgrade](docs/DataQualityUpgrade.md) - Land cover + DEM scoring
+- [Release QA Baseline](docs/ReleaseQABaseline.md) - Post-deploy validation
 
 ---
 
@@ -299,14 +310,6 @@ docker-compose logs -f kafka
 - PostGIS team for geospatial database extensions
 - Uber H3 for hexagonal hierarchical spatial indexing
 - Spring Boot and Kafka communities
-
----
-
-## 🎯 Project Status
-
-**Current Phase**: Phase 5 - Async Job Queue & API In Progress  
-**Progress**: Phases 3 and 4 are complete in the local environment, including successful end-to-end route generation.  
-**Next Steps**: Finish the remaining phase-5 contract items: scenic region previews, notification delivery, and job timeout/retry behavior.
 
 ---
 

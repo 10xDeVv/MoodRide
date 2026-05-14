@@ -32,11 +32,18 @@ public class RouteJob {
     @Column(nullable = false)
     private int timeBudgetMinutes;
 
+    @Enumerated(EnumType.STRING)
+    @Column(name = "route_mode", nullable = false, length = 16)
+    private RouteMode routeMode = RouteMode.DRIVE;
+
     @Column(nullable = false, length = 20)
     private String vibe;  // "coastal", "mountain", "forest", "mixed"
 
     @Column(name = "preference_vector", columnDefinition = "TEXT")
     private String preferenceVector;
+
+    @Column(name = "vibes_json", columnDefinition = "TEXT")
+    private String vibesJson;
 
     @Column(name = "algorithm_version", length = 50)
     private String algorithmVersion;
@@ -77,6 +84,7 @@ public class RouteJob {
         this.startLatitude = startLatitude;
         this.startLongitude = startLongitude;
         this.timeBudgetMinutes = timeBudgetMinutes;
+        this.routeMode = RouteMode.DRIVE;
         this.vibe = vibe;
         this.status = JobStatus.QUEUED;
         this.submittedAt = Instant.now();
@@ -153,11 +161,17 @@ public class RouteJob {
     public int getTimeBudgetMinutes() { return timeBudgetMinutes; }
     public void setTimeBudgetMinutes(int timeBudgetMinutes) { this.timeBudgetMinutes = timeBudgetMinutes; }
 
+    public RouteMode getRouteMode() { return routeMode == null ? RouteMode.DRIVE : routeMode; }
+    public void setRouteMode(RouteMode routeMode) { this.routeMode = routeMode == null ? RouteMode.DRIVE : routeMode; }
+
     public String getVibe() { return vibe; }
     public void setVibe(String vibe) { this.vibe = vibe; }
 
     public String getPreferenceVector() { return preferenceVector; }
     public void setPreferenceVector(String preferenceVector) { this.preferenceVector = preferenceVector; }
+
+    public String getVibesJson() { return vibesJson; }
+    public void setVibesJson(String vibesJson) { this.vibesJson = vibesJson; }
 
     public String getAlgorithmVersion() { return algorithmVersion; }
     public void setAlgorithmVersion(String algorithmVersion) { this.algorithmVersion = algorithmVersion; }

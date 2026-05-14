@@ -40,6 +40,10 @@ public class Route {
     @Column(nullable = false)
     private double scenicScore;  // Average scenic score (0.0 - 1.0)
 
+    @Enumerated(EnumType.STRING)
+    @Column(name = "route_mode", nullable = false, length = 16)
+    private RouteMode routeMode = RouteMode.DRIVE;
+
     @Column(nullable = false)
     private String vibe;  // "coastal", "mountain", "forest", "mixed"
 
@@ -68,6 +72,7 @@ public class Route {
         this.jobId = jobId;
         this.userId = userId;
         this.geometry = geometry;
+        this.routeMode = RouteMode.DRIVE;
         this.vibe = vibe;
         this.generatedAt = Instant.now();
         this.expiresAt = this.generatedAt.plusSeconds(24 * 60 * 60); // 24 hours
@@ -94,6 +99,9 @@ public class Route {
 
     public double getScenicScore() { return scenicScore; }
     public void setScenicScore(double scenicScore) { this.scenicScore = scenicScore; }
+
+    public RouteMode getRouteMode() { return routeMode == null ? RouteMode.DRIVE : routeMode; }
+    public void setRouteMode(RouteMode routeMode) { this.routeMode = routeMode == null ? RouteMode.DRIVE : routeMode; }
 
     public String getVibe() { return vibe; }
     public void setVibe(String vibe) { this.vibe = vibe; }

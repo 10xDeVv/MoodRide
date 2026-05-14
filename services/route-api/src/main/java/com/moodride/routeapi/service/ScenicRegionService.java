@@ -70,17 +70,27 @@ public class ScenicRegionService {
     }
 
     private double scoreTile(ScenicScoreTile tile, VibeWeights.Vibe vibe) {
+        double water = resolveComponentScore(tile.getWaterScore(), tile.getWaterProximity());
+        double elevation = normalizeElevation(resolveComponentScore(tile.getElevationScore(), tile.getElevationVariance()));
+        double greenery = resolveComponentScore(tile.getGreenScore(), tile.getNaturalLandUse());
+        double curves = resolveComponentScore(tile.getCurveScore(), tile.getVisualComplexity());
+        double solitude = resolveComponentScore(
+            tile.getSolitudeScore(),
+            (1.0 - clamp01(tile.getRoadDensity()) + clamp01(tile.getTrafficSignalScore())) / 2.0
+        );
+        double poi = resolveComponentScore(tile.getPoiScore(), tile.getPoiDensity());
+
         if (vibe == null) {
-            return tile.getScenicScore();
+            return clamp01(tile.getScenicScore());
         }
 
         Map<String, Double> signals = new HashMap<>();
-        signals.put("water_proximity", tile.getWaterProximity());
-        signals.put("elevation", tile.getElevationVariance());
-        signals.put("land_use", tile.getNaturalLandUse());
-        signals.put("curvature", tile.getVisualComplexity());
-        signals.put("traffic", tile.getTrafficSignalScore());
-        signals.put("poi", tile.getPoiDensity());
+        signals.put("water_proximity", water);
+        signals.put("elevation", elevation);
+        signals.put("land_use", greenery);
+        signals.put("curvature", curves);
+        signals.put("traffic", solitude);
+        signals.put("poi", poi);
         return VibeWeights.calculateCompositeScore(vibe, signals);
     }
 
@@ -88,8 +98,12 @@ public class ScenicRegionService {
         if (vibe == null || vibe.isBlank()) {
             return null;
         }
-        String normalized = vibe.trim().toUpperCase(Locale.ROOT).replace('-', '_').replace(' ', '_');
-        return VibeWeights.Vibe.valueOf(normalized);
+        try {
+            String normalized = vibe.trim().toUpperCase(Locale.ROOT).replace('-', '_').replace(' ', '_');
+            return VibeWeights.Vibe.valueOf(normalized);
+        } catch (IllegalArgumentException ex) {
+            return null;
+        }
     }
 
     private BoundingBoxResponse buildBoundingBox(double latitude, double longitude, double radiusKm) {
@@ -141,5 +155,23 @@ public class ScenicRegionService {
                 ) / 5.0
             )
         );
+    }
+
+    private double normalizeElevation(double value) {
+        if (value <= 1.0) {
+            return clamp01(value);
+        }
+        return clamp01(value / 40.0);
+    }
+
+    private double resolveComponentScore(double component, double legacyFallback) {
+        if (component > 0.0) {
+            return clamp01(component);
+        }
+        return clamp01(legacyFallback);
+    }
+
+    private double clamp01(double value) {
+        return Math.max(0.0, Math.min(1.0, value));
     }
 }

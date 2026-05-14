@@ -5,6 +5,7 @@ import java.time.Duration;
 import java.util.Arrays;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.LinkedHashMap;
@@ -21,10 +22,13 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.moodride.datamodels.Route;
 import com.moodride.datamodels.RouteJob;
+import com.moodride.datamodels.RouteMode;
 import com.moodride.datamodels.RouteWaypoint;
+import com.moodride.datamodels.RouteWeightCalibration;
 import com.moodride.eventmodels.DriveCompletedEvent;
 import com.moodride.eventmodels.RouteJobEvent;
 import com.moodride.eventmodels.RouteRatedEvent;
@@ -39,6 +43,7 @@ import com.moodride.routeapi.exception.JobNotFoundException;
 import com.moodride.routeapi.exception.RouteNotFoundException;
 import com.moodride.routeapi.repository.RouteJobRepository;
 import com.moodride.routeapi.repository.RouteRepository;
+import com.moodride.routeapi.repository.RouteWeightCalibrationRepository;
 
 @Service
 @Transactional
@@ -52,6 +57,8 @@ public class RouteService {
         "open_roads",
         "riverside"
     );
+
+    private static final Set<RouteMode> ENABLED_ROUTE_MODES = Set.of(RouteMode.DRIVE);
 
     private static final Map<String, String> PREFERENCE_KEY_ALIASES = Map.of(
         "water", "water",
@@ -69,23 +76,50 @@ public class RouteService {
         "balanced",
         "shorter"
     );
+
+    private static final List<String> SUPPORTED_PREFERENCE_KEYS = List.of(
+        "water",
+        "greenery",
+        "elevation",
+        "solitude",
+        "curves",
+        "poi"
+    );
+
+    private static final double CALIBRATION_LEARNING_RATE = 0.04;
+    private static final double CALIBRATION_MIN_MULTIPLIER = 0.70;
+    private static final double CALIBRATION_MAX_MULTIPLIER = 1.30;
+
+    private static final Map<String, PreferenceWeights> VIBE_DEFAULTS = Map.of(
+        "coastal", new PreferenceWeights(0.90, 0.70, 0.30, 0.60, 0.45, 0.20),
+        "mountain", new PreferenceWeights(0.20, 0.55, 0.90, 0.70, 0.80, 0.20),
+        "forest", new PreferenceWeights(0.30, 0.90, 0.45, 0.80, 0.45, 0.20),
+        "countryside", new PreferenceWeights(0.40, 0.70, 0.45, 0.70, 0.60, 0.30),
+        "open_roads", new PreferenceWeights(0.25, 0.45, 0.35, 0.40, 0.90, 0.25),
+        "riverside", new PreferenceWeights(0.85, 0.75, 0.35, 0.65, 0.45, 0.25)
+    );
     
     private final RouteJobRepository jobRepository;
     private final RouteRepository routeRepository;
+    private final RouteWeightCalibrationRepository calibrationRepository;
     private final KafkaTemplate<String, String> kafkaTemplate;
     private final ObjectMapper objectMapper;
     
-    public RouteService(RouteJobRepository jobRepository, RouteRepository routeRepository,
-                       KafkaTemplate<String, String> kafkaTemplate,
-                       ObjectMapper objectMapper) {
+    public RouteService(RouteJobRepository jobRepository,
+                        RouteRepository routeRepository,
+                        RouteWeightCalibrationRepository calibrationRepository,
+                        KafkaTemplate<String, String> kafkaTemplate,
+                        ObjectMapper objectMapper) {
         this.jobRepository = jobRepository;
         this.routeRepository = routeRepository;
+        this.calibrationRepository = calibrationRepository;
         this.kafkaTemplate = kafkaTemplate;
         this.objectMapper = objectMapper.copy().findAndRegisterModules();
     }
     
     public RouteSubmissionResponse submitRoute(RouteRequest request) {
         List<String> resolvedVibes = normalizeAndValidateVibes(request.resolvedVibes());
+        RouteMode routeMode = normalizeAndValidateRouteMode(request.routeMode());
 
         RouteJob job = new RouteJob(
             request.userId(),
@@ -94,7 +128,9 @@ public class RouteService {
             request.timeBudgetMinutes(),
             resolvedVibes.getFirst()
         );
+        job.setRouteMode(routeMode);
         job.setStatus(RouteJob.JobStatus.QUEUED);
+        job.setVibesJson(serializeVibes(resolvedVibes));
         job.setPreferenceVector(serializePreferenceVector(normalizePreferenceVector(request.preferenceVector())));
         jobRepository.save(job);
 
@@ -145,7 +181,8 @@ public class RouteService {
             job.getFailedAt(),
             estimatedRemaining,
             job.getRetryCount(),
-            job.getMaxRetries()
+            job.getMaxRetries(),
+            job.getRouteMode().apiValue()
         );
     }
     
@@ -178,6 +215,7 @@ public class RouteService {
         routeRepository.save(route);
 
         publishUserFeedbackEvents(route, rating, ratedAt);
+        applyCalibrationFeedback(route, rating, ratedAt);
 
         return new RouteRatingResponse(route.getId(), rating, ratedAt);
     }
@@ -226,9 +264,10 @@ public class RouteService {
             route.getTotalDistanceKm(),
             route.getEstimatedDurationMinutes(),
             routeJob == null ? null : routeJob.getTimeBudgetMinutes(),
+            resolveRouteMode(routeJob, route).apiValue(),
             waypoints.isEmpty() ? 0.0 : waypoints.getFirst().getLatitude(),
             waypoints.isEmpty() ? 0.0 : waypoints.getFirst().getLongitude(),
-            List.of(route.getVibe()),
+            resolveRouteVibes(routeJob, route),
             feature,
             scenicHighlights,
             routeOptions,
@@ -264,6 +303,49 @@ public class RouteService {
         } catch (JsonProcessingException ex) {
             throw new IllegalStateException("Failed to serialize user feedback events", ex);
         }
+    }
+
+    private void applyCalibrationFeedback(Route route, int rating, Instant ratedAt) {
+        RouteJob routeJob = jobRepository.findById(route.getJobId()).orElse(null);
+        List<String> vibes = resolveRouteVibes(routeJob, route);
+        if (vibes.isEmpty()) {
+            return;
+        }
+
+        PreferenceWeights effectiveWeights = resolveEffectivePreferenceWeights(
+            vibes,
+            routeJob == null ? Map.of() : parseStoredPreferenceVector(routeJob.getPreferenceVector())
+        );
+        Map<String, Double> componentRatios = effectiveWeights.componentRatios();
+        double feedbackSignal = (rating - 3.0) / 2.0;
+
+        List<RouteWeightCalibration> existing = calibrationRepository.findByVibeIn(vibes);
+        Map<String, RouteWeightCalibration> byVibe = new HashMap<>();
+        for (RouteWeightCalibration calibration : existing) {
+            byVibe.put(calibration.getVibe(), calibration);
+        }
+
+        List<RouteWeightCalibration> updates = new ArrayList<>();
+        for (String vibe : vibes) {
+            RouteWeightCalibration calibration = byVibe.getOrDefault(vibe, new RouteWeightCalibration(vibe));
+            calibration.setWaterMultiplier(adjustMultiplier(calibration.getWaterMultiplier(), componentRatios.get("water"), feedbackSignal));
+            calibration.setGreeneryMultiplier(adjustMultiplier(calibration.getGreeneryMultiplier(), componentRatios.get("greenery"), feedbackSignal));
+            calibration.setElevationMultiplier(adjustMultiplier(calibration.getElevationMultiplier(), componentRatios.get("elevation"), feedbackSignal));
+            calibration.setSolitudeMultiplier(adjustMultiplier(calibration.getSolitudeMultiplier(), componentRatios.get("solitude"), feedbackSignal));
+            calibration.setCurvesMultiplier(adjustMultiplier(calibration.getCurvesMultiplier(), componentRatios.get("curves"), feedbackSignal));
+            calibration.setPoiMultiplier(adjustMultiplier(calibration.getPoiMultiplier(), componentRatios.get("poi"), feedbackSignal));
+            calibration.setSampleCount(Math.max(0, calibration.getSampleCount()) + 1);
+            calibration.setUpdatedAt(ratedAt);
+            updates.add(calibration);
+        }
+
+        calibrationRepository.saveAll(updates);
+    }
+
+    private double adjustMultiplier(double current, double componentRatio, double feedbackSignal) {
+        double safeCurrent = current <= 0.0 ? 1.0 : current;
+        double delta = CALIBRATION_LEARNING_RATE * feedbackSignal * clamp01(componentRatio);
+        return clamp(safeCurrent + delta, CALIBRATION_MIN_MULTIPLIER, CALIBRATION_MAX_MULTIPLIER);
     }
 
     private List<Double> toCoordinate(RouteWaypoint waypoint) {
@@ -477,6 +559,59 @@ public class RouteService {
                 .map(Route::getId));
     }
 
+    private List<String> resolveRouteVibes(RouteJob routeJob, Route route) {
+        if (routeJob != null) {
+            List<String> parsed = parseVibesJson(routeJob.getVibesJson());
+            if (!parsed.isEmpty()) {
+                return parsed;
+            }
+            if (routeJob.getVibe() != null && !routeJob.getVibe().isBlank()) {
+                return List.of(routeJob.getVibe());
+            }
+        }
+        if (route != null && route.getVibe() != null && !route.getVibe().isBlank()) {
+            return List.of(route.getVibe());
+        }
+        return List.of("countryside");
+    }
+
+    private RouteMode resolveRouteMode(RouteJob routeJob, Route route) {
+        if (routeJob != null) {
+            return routeJob.getRouteMode();
+        }
+        if (route != null) {
+            return route.getRouteMode();
+        }
+        return RouteMode.DRIVE;
+    }
+
+    private List<String> parseVibesJson(String rawVibesJson) {
+        if (rawVibesJson == null || rawVibesJson.isBlank()) {
+            return List.of();
+        }
+        try {
+            List<String> raw = objectMapper.readValue(rawVibesJson, new TypeReference<>() {
+            });
+            if (raw == null || raw.isEmpty()) {
+                return List.of();
+            }
+            List<String> normalized = new ArrayList<>();
+            Set<String> seen = new HashSet<>();
+            for (String value : raw) {
+                if (value == null || value.isBlank()) {
+                    continue;
+                }
+                String vibe = normalizeVibe(value);
+                if (ALLOWED_VIBES.contains(vibe) && seen.add(vibe)) {
+                    normalized.add(vibe);
+                }
+            }
+            return List.copyOf(normalized);
+        } catch (Exception ex) {
+            return List.of();
+        }
+    }
+
     private String normalizeRouteProfile(String routeProfile) {
         if (routeProfile == null || routeProfile.isBlank()) {
             return null;
@@ -529,6 +664,16 @@ public class RouteService {
             .toList();
     }
 
+    private RouteMode normalizeAndValidateRouteMode(String routeMode) {
+        RouteMode normalized = RouteMode.fromApiValue(routeMode);
+        if (!ENABLED_ROUTE_MODES.contains(normalized)) {
+            throw new IllegalArgumentException(
+                normalized.displayName() + " mode is not enabled yet. Canada driving is live; walking and biking are planned city pilots."
+            );
+        }
+        return normalized;
+    }
+
     private String normalizeVibe(String vibe) {
         if (vibe == null || vibe.isBlank()) {
             throw new IllegalArgumentException("Vibe cannot be empty");
@@ -537,6 +682,17 @@ public class RouteService {
             .toLowerCase(Locale.ROOT)
             .replace('-', '_')
             .replace(' ', '_');
+    }
+
+    private String serializeVibes(List<String> vibes) {
+        if (vibes == null || vibes.isEmpty()) {
+            return null;
+        }
+        try {
+            return objectMapper.writeValueAsString(vibes);
+        } catch (JsonProcessingException ex) {
+            throw new IllegalArgumentException("Invalid vibes payload", ex);
+        }
     }
 
     private String serializePreferenceVector(Map<String, Double> preferenceVector) {
@@ -556,6 +712,8 @@ public class RouteService {
         }
 
         Map<String, Double> normalized = new LinkedHashMap<>();
+        List<String> unknownKeys = new ArrayList<>();
+        List<String> invalidValueKeys = new ArrayList<>();
         for (Map.Entry<String, Object> entry : preferenceVector.entrySet()) {
             if (entry.getKey() == null || entry.getValue() == null) {
                 continue;
@@ -563,16 +721,79 @@ public class RouteService {
 
             String normalizedKey = normalizePreferenceKey(entry.getKey());
             if (normalizedKey == null) {
+                unknownKeys.add(entry.getKey());
                 continue;
             }
 
             Double normalizedValue = parsePreferenceValue(entry.getValue());
             if (normalizedValue != null) {
                 normalized.put(normalizedKey, normalizedValue);
+            } else {
+                invalidValueKeys.add(entry.getKey());
             }
         }
 
+        if (!unknownKeys.isEmpty() || !invalidValueKeys.isEmpty()) {
+            throw new IllegalArgumentException(
+                "preferenceVector must use numeric values for keys: "
+                    + String.join(", ", SUPPORTED_PREFERENCE_KEYS)
+                    + ". Unknown keys: " + unknownKeys
+                    + ". Invalid values: " + invalidValueKeys
+            );
+        }
+
         return Map.copyOf(normalized);
+    }
+
+    private Map<String, Double> parseStoredPreferenceVector(String rawPreferenceVector) {
+        if (rawPreferenceVector == null || rawPreferenceVector.isBlank()) {
+            return Map.of();
+        }
+        try {
+            Map<String, Object> raw = objectMapper.readValue(rawPreferenceVector, new TypeReference<>() {
+            });
+            return normalizePreferenceVector(raw);
+        } catch (Exception ex) {
+            return Map.of();
+        }
+    }
+
+    private PreferenceWeights resolveEffectivePreferenceWeights(List<String> vibes, Map<String, Double> overrides) {
+        PreferenceWeights defaults = blendVibeDefaults(vibes);
+        if (overrides == null || overrides.isEmpty()) {
+            return defaults.normalized();
+        }
+        return defaults.withOverrides(overrides).normalized();
+    }
+
+    private PreferenceWeights blendVibeDefaults(List<String> vibes) {
+        List<String> activeVibes = (vibes == null || vibes.isEmpty()) ? List.of("countryside") : vibes;
+        double water = 0.0;
+        double greenery = 0.0;
+        double elevation = 0.0;
+        double solitude = 0.0;
+        double curves = 0.0;
+        double poi = 0.0;
+
+        for (String vibe : activeVibes) {
+            PreferenceWeights defaults = VIBE_DEFAULTS.getOrDefault(vibe, VIBE_DEFAULTS.get("countryside"));
+            water += defaults.water();
+            greenery += defaults.greenery();
+            elevation += defaults.elevation();
+            solitude += defaults.solitude();
+            curves += defaults.curves();
+            poi += defaults.poi();
+        }
+
+        double count = Math.max(1.0, activeVibes.size());
+        return new PreferenceWeights(
+            water / count,
+            greenery / count,
+            elevation / count,
+            solitude / count,
+            curves / count,
+            poi / count
+        );
     }
 
     private String normalizePreferenceKey(String rawKey) {
@@ -594,6 +815,56 @@ public class RouteService {
             }
         }
         return null;
+    }
+
+    private double clamp(double value, double min, double max) {
+        return Math.max(min, Math.min(max, value));
+    }
+
+    private record PreferenceWeights(double water,
+                                     double greenery,
+                                     double elevation,
+                                     double solitude,
+                                     double curves,
+                                     double poi) {
+        private double totalWeight() {
+            return Math.max(0.0001, water + greenery + elevation + solitude + curves + poi);
+        }
+
+        private PreferenceWeights withOverrides(Map<String, Double> overrides) {
+            return new PreferenceWeights(
+                overrides.getOrDefault("water", water),
+                overrides.getOrDefault("greenery", greenery),
+                overrides.getOrDefault("elevation", elevation),
+                overrides.getOrDefault("solitude", solitude),
+                overrides.getOrDefault("curves", curves),
+                overrides.getOrDefault("poi", poi)
+            );
+        }
+
+        private PreferenceWeights normalized() {
+            double total = totalWeight();
+            return new PreferenceWeights(
+                water / total,
+                greenery / total,
+                elevation / total,
+                solitude / total,
+                curves / total,
+                poi / total
+            );
+        }
+
+        private Map<String, Double> componentRatios() {
+            PreferenceWeights normalized = normalized();
+            return Map.of(
+                "water", normalized.water(),
+                "greenery", normalized.greenery(),
+                "elevation", normalized.elevation(),
+                "solitude", normalized.solitude(),
+                "curves", normalized.curves(),
+                "poi", normalized.poi()
+            );
+        }
     }
 
 }

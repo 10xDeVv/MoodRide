@@ -51,9 +51,11 @@ class ScenicRegionServiceTest {
         ScenicRegionService service = new ScenicRegionService(scenicScoreTileRepository);
         ScenicRegionsResponse coastal = service.getScenicRegions(45.50, -122.70, 50, 25, "coastal");
         ScenicRegionsResponse mountain = service.getScenicRegions(45.50, -122.70, 50, 25, "mountain");
+        ScenicRegionsResponse riverside = service.getScenicRegions(45.50, -122.70, 50, 25, "riverside");
 
         assertThat(coastal.regions()).hasSize(1);
         assertThat(coastal.regions().getFirst().compositeScore()).isGreaterThan(mountain.regions().getFirst().compositeScore());
+        assertThat(riverside.regions()).hasSize(1);
         assertThat(coastal.boundingBox()).isNotNull();
         assertThat(coastal.totalRegions()).isEqualTo(1);
     }

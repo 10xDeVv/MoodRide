@@ -2,6 +2,7 @@ package com.moodride.routeworker.service;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.moodride.datamodels.RouteMode;
 import com.moodride.routeworker.config.OsrmConfiguration;
 import com.moodride.routeworker.graph.RoadNode;
 import org.slf4j.Logger;
@@ -36,6 +37,10 @@ public class OsrmTripClient {
     }
 
     public Optional<TripResult> requestRoundTrip(List<RoadNode> waypoints) {
+        return requestRoundTrip(waypoints, RouteMode.DRIVE);
+    }
+
+    public Optional<TripResult> requestRoundTrip(List<RoadNode> waypoints, RouteMode routeMode) {
         if (waypoints == null || waypoints.size() < 2) {
             return Optional.empty();
         }
@@ -48,7 +53,7 @@ public class OsrmTripClient {
 
             String baseUrl = trimTrailingSlash(osrmConfiguration.getBaseUrl());
             String query = "?roundtrip=true&source=first&overview=full&geometries=polyline";
-            URI uri = URI.create(baseUrl + "/trip/v1/driving/" + coordinates + query);
+            URI uri = URI.create(baseUrl + "/trip/v1/" + resolveProfile(routeMode) + "/" + coordinates + query);
 
             HttpRequest request = HttpRequest.newBuilder(uri)
                 .GET()
@@ -97,6 +102,10 @@ public class OsrmTripClient {
             logger.warn("OSRM trip request failed: {}", ex.getMessage());
             return Optional.empty();
         }
+    }
+
+    private String resolveProfile(RouteMode routeMode) {
+        return (routeMode == null ? RouteMode.DRIVE : routeMode).osrmProfile();
     }
 
     private String trimTrailingSlash(String url) {

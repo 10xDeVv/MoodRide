@@ -11,6 +11,7 @@ public class VibeWeights {
     
     public enum Vibe {
         COASTAL,
+        RIVERSIDE,
         MOUNTAIN,
         COUNTRYSIDE,
         FOREST,
@@ -34,6 +35,16 @@ public class VibeWeights {
         coastal.put("traffic", 0.05);
         coastal.put("poi", 0.05);
         VIBE_WEIGHTS.put(Vibe.COASTAL, coastal);
+
+        // Riverside: emphasize water and greener/quiet corridors
+        Map<String, Double> riverside = new HashMap<>();
+        riverside.put("water_proximity", 0.45);
+        riverside.put("elevation", 0.15);
+        riverside.put("land_use", 0.20);
+        riverside.put("curvature", 0.10);
+        riverside.put("traffic", 0.05);
+        riverside.put("poi", 0.05);
+        VIBE_WEIGHTS.put(Vibe.RIVERSIDE, riverside);
         
         // Mountain: emphasize elevation and curvature
         Map<String, Double> mountain = new HashMap<>();
@@ -137,7 +148,7 @@ public class VibeWeights {
             return Vibe.valueOf(vibeString.toUpperCase().replace(" ", "_"));
         } catch (IllegalArgumentException e) {
             throw new IllegalArgumentException("Invalid vibe: " + vibeString + 
-                ". Valid vibes: coastal, mountain, countryside, forest, open_roads, urban_explorer");
+                ". Valid vibes: coastal, riverside, mountain, countryside, forest, open_roads, urban_explorer");
         }
     }
 }

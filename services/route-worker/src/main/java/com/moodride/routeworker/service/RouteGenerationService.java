@@ -66,6 +66,7 @@ public class RouteGenerationService {
             RouteCandidate candidate = candidates.get(i);
             Route route = new Route(job.getId(), job.getUserId(),
                 buildLineString(candidate.getWaypoints()), job.getVibe());
+            route.setRouteMode(job.getRouteMode());
             if (i < ROUTE_OPTION_PROFILES.size()) {
                 route.setRouteProfile(ROUTE_OPTION_PROFILES.get(i));
             }

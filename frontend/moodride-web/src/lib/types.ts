@@ -1,12 +1,14 @@
 export type Vibe = "coastal" | "mountain" | "forest" | "countryside" | "riverside" | "open_roads";
+export type RouteMode = "drive" | "walk" | "bike";
 
 export interface RouteRequest {
   userId: string;
   lat: number;
   lng: number;
   timeBudgetMinutes: number;
+  routeMode: RouteMode;
   vibes: string[];
-  preferenceVector: Record<string, unknown>;
+  preferenceVector: Record<string, number>;
 }
 
 export interface RouteSubmissionResponse {
@@ -43,6 +45,7 @@ export interface RouteJobStatusResponse {
   estimatedRemainingSeconds: number | null;
   retryCount: number;
   maxRetries: number;
+  routeMode: RouteMode;
 }
 
 export interface RouteDetailResponse {
@@ -54,6 +57,7 @@ export interface RouteDetailResponse {
   totalDistanceKm: number;
   estimatedDurationMinutes: number;
   timeBudgetMinutes: number | null;
+  routeMode: RouteMode;
   startLat: number;
   startLng: number;
   vibes: string[];

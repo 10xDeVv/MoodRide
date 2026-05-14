@@ -8,6 +8,7 @@ import type {
   LocationSuggestion,
   RouteDetailResponse,
   RouteJobStatusResponse,
+  RouteMode,
   RouteOptionResponse,
   RouteSubmissionResponse,
   ScenicRegionsResponse,
@@ -18,6 +19,11 @@ import { ScenicHighlightsPanel } from "@/components/ScenicHighlightsPanel";
 
 const VIBES: Vibe[] = ["coastal", "mountain", "countryside", "riverside", "forest", "open_roads"];
 const TIME_BUDGET_OPTIONS = [30, 60, 90, 120] as const;
+const ROUTE_MODES: Array<{ value: RouteMode; label: string; status: string; enabled: boolean }> = [
+  { value: "drive", label: "Drive", status: "Canada live", enabled: true },
+  { value: "walk", label: "Walk", status: "City pilot next", enabled: false },
+  { value: "bike", label: "Bike", status: "Safety scoring next", enabled: false }
+];
 const PROFILE_DISPLAY_NAMES: Record<string, string> = {
   most_scenic: "Most Scenic",
   balanced: "Balanced",
@@ -31,7 +37,24 @@ const VIBE_DISPLAY_NAMES: Record<string, string> = {
   forest: "Forest",
   open_roads: "Open Roads"
 };
+const VIBE_PREFERENCE_DEFAULTS: Record<string, Record<string, number>> = {
+  coastal: { water: 0.9, greenery: 0.7, elevation: 0.3, solitude: 0.6, curves: 0.45, poi: 0.2 },
+  mountain: { water: 0.2, greenery: 0.55, elevation: 0.9, solitude: 0.7, curves: 0.8, poi: 0.2 },
+  countryside: { water: 0.4, greenery: 0.7, elevation: 0.45, solitude: 0.7, curves: 0.6, poi: 0.3 },
+  riverside: { water: 0.85, greenery: 0.75, elevation: 0.35, solitude: 0.65, curves: 0.45, poi: 0.25 },
+  forest: { water: 0.3, greenery: 0.9, elevation: 0.45, solitude: 0.8, curves: 0.45, poi: 0.2 },
+  open_roads: { water: 0.25, greenery: 0.45, elevation: 0.35, solitude: 0.4, curves: 0.9, poi: 0.25 }
+};
 const IOS_DEVICE_REGEX = /iPad|iPhone|iPod/;
+const GOOGLE_TRAVEL_MODES: Record<RouteMode, string> = {
+  drive: "driving",
+  walk: "walking",
+  bike: "bicycling"
+};
+const APPLE_TRAVEL_FLAGS: Partial<Record<RouteMode, string>> = {
+  drive: "d",
+  walk: "w"
+};
 
 type Coordinate = {
   lat: number;
@@ -68,7 +91,7 @@ function formatCoordinate(point: Coordinate): string {
   return `${point.lat},${point.lng}`;
 }
 
-function buildGoogleMapsUrl(points: Coordinate[]): string {
+function buildGoogleMapsUrl(points: Coordinate[], routeMode: RouteMode): string {
   const origin = points[0];
   const destination = points[points.length - 1];
   const waypoints = points.slice(1, -1).map(formatCoordinate).join("|");
@@ -80,11 +103,11 @@ function buildGoogleMapsUrl(points: Coordinate[]): string {
   if (waypoints) {
     url.searchParams.set("waypoints", waypoints);
   }
-  url.searchParams.set("travelmode", "driving");
+  url.searchParams.set("travelmode", GOOGLE_TRAVEL_MODES[routeMode] ?? "driving");
   return url.toString();
 }
 
-function buildAppleMapsUrl(points: Coordinate[]): string {
+function buildAppleMapsUrl(points: Coordinate[], routeMode: RouteMode): string {
   const origin = points[0];
   const destinations = points.slice(1).map(formatCoordinate);
 
@@ -92,6 +115,10 @@ function buildAppleMapsUrl(points: Coordinate[]): string {
   url.searchParams.set("saddr", formatCoordinate(origin));
   if (destinations.length > 0) {
     url.searchParams.set("daddr", destinations.join("+to:"));
+  }
+  const travelFlag = APPLE_TRAVEL_FLAGS[routeMode];
+  if (travelFlag) {
+    url.searchParams.set("dirflg", travelFlag);
   }
   return url.toString();
 }
@@ -103,6 +130,30 @@ function sanitizeFileName(value: string): string {
     return fallback;
   }
   return trimmed.replace(/[^a-z0-9-_]+/gi, "_").replace(/_+/g, "_");
+}
+
+function buildPreferenceVector(vibes: string[]): Record<string, number> {
+  const activeVibes = vibes.length > 0 ? vibes : ["countryside"];
+  const accumulators = { water: 0, greenery: 0, elevation: 0, solitude: 0, curves: 0, poi: 0 };
+  for (const vibe of activeVibes) {
+    const defaults = VIBE_PREFERENCE_DEFAULTS[vibe] ?? VIBE_PREFERENCE_DEFAULTS.countryside;
+    accumulators.water += defaults.water;
+    accumulators.greenery += defaults.greenery;
+    accumulators.elevation += defaults.elevation;
+    accumulators.solitude += defaults.solitude;
+    accumulators.curves += defaults.curves;
+    accumulators.poi += defaults.poi;
+  }
+
+  const count = Math.max(1, activeVibes.length);
+  return {
+    water: Number((accumulators.water / count).toFixed(4)),
+    greenery: Number((accumulators.greenery / count).toFixed(4)),
+    elevation: Number((accumulators.elevation / count).toFixed(4)),
+    solitude: Number((accumulators.solitude / count).toFixed(4)),
+    curves: Number((accumulators.curves / count).toFixed(4)),
+    poi: Number((accumulators.poi / count).toFixed(4))
+  };
 }
 
 function escapeXml(value: string): string {
@@ -172,6 +223,7 @@ export function RoutePlanner() {
   const [locationLookupPending, setLocationLookupPending] = useState(false);
   const [locationLookupError, setLocationLookupError] = useState<string | null>(null);
   const [locationDropdownVisible, setLocationDropdownVisible] = useState(false);
+  const [routeMode, setRouteMode] = useState<RouteMode>("drive");
   const [timeBudgetMinutes, setTimeBudgetMinutes] = useState(60);
   const [vibes, setVibes] = useState<string[]>(["countryside"]);
   const [submission, setSubmission] = useState<RouteSubmissionResponse | null>(null);
@@ -195,9 +247,11 @@ export function RoutePlanner() {
   const regions = scenicRegions?.regions ?? [];
 
   const canSubmit = useMemo(
-    () => vibes.length > 0 && vibes.length <= 3 && phase !== "submitting" && phase !== "tracking",
-    [phase, vibes.length]
+    () => routeMode === "drive" && vibes.length > 0 && vibes.length <= 3 && phase !== "submitting" && phase !== "tracking",
+    [phase, routeMode, vibes.length]
   );
+
+  const activeMode = ROUTE_MODES.find((mode) => mode.value === routeMode) ?? ROUTE_MODES[0];
 
   const formatRouteProfile = (profile: string) => {
     if (PROFILE_DISPLAY_NAMES[profile]) {
@@ -452,8 +506,9 @@ export function RoutePlanner() {
         lat,
         lng,
         timeBudgetMinutes,
+        routeMode,
         vibes,
-        preferenceVector: { avoidTolls: false }
+        preferenceVector: buildPreferenceVector(vibes)
       });
 
       setSubmission(response);
@@ -518,7 +573,8 @@ export function RoutePlanner() {
     }
 
     const isIos = IOS_DEVICE_REGEX.test(navigator.userAgent);
-    const navigationUrl = isIos ? buildAppleMapsUrl(sampledPoints) : buildGoogleMapsUrl(sampledPoints);
+    const activeRouteMode = route.routeMode ?? "drive";
+    const navigationUrl = isIos ? buildAppleMapsUrl(sampledPoints, activeRouteMode) : buildGoogleMapsUrl(sampledPoints, activeRouteMode);
     window.open(navigationUrl, "_blank", "noopener,noreferrer");
     setMessage(isIos ? "Opening Apple Maps." : "Opening Google Maps.");
   };
@@ -555,36 +611,70 @@ export function RoutePlanner() {
 
   const activeRouteProfile = routeOptions.find((option) => option.routeId === route?.routeId)?.profile;
   const activeProfileLabel = activeRouteProfile ? formatRouteProfile(activeRouteProfile) : "Route";
-  const submitLabel = phase === "submitting" || phase === "tracking" ? "Generating Route..." : "Submit Route";
+  const routeModeLabel = route?.routeMode === "walk" ? "Walk" : route?.routeMode === "bike" ? "Ride" : "Drive";
+  const submitLabel = phase === "submitting" || phase === "tracking" ? "Generating Route..." : `Generate ${activeMode.label}`;
 
   return (
     <main className="planner-page">
-      <section className="panel panel-stagger planner-hero" style={staggerStyle(0)}>
-        <span className="planner-eyebrow">Scenic Intelligence</span>
-        <h1 className="planner-title">MoodRide Scenic Planner</h1>
-        <p className="planner-subtitle">
-          Build a loop route around your location, compare options instantly, then launch navigation or export GPX without extra setup.
-        </p>
-        <div className="hero-stats">
-          <div className="hero-stat">
-            <p className="hero-stat-label">Phase</p>
-            <p className="hero-stat-value">{phase}</p>
+      <section className="product-hero panel-stagger" style={staggerStyle(0)}>
+        <nav className="product-nav" aria-label="MoodRide">
+          <span className="brand-mark">MoodRide</span>
+          <span className="nav-pill">Canada scenic beta</span>
+        </nav>
+        <div className="hero-layout">
+          <div className="hero-copy">
+            <span className="planner-eyebrow">Scenic route intelligence</span>
+            <h1 className="planner-title">Beautiful loops for the time you actually have.</h1>
+            <p className="planner-subtitle">
+              Generate scenic routes from a starting point, compare route personalities, then launch navigation or export GPX.
+            </p>
           </div>
-          <div className="hero-stat">
-            <p className="hero-stat-label">Selected Vibes</p>
-            <p className="hero-stat-value">{vibes.length}/3</p>
-          </div>
-          <div className="hero-stat">
-            <p className="hero-stat-label">Current Route</p>
-            <p className="hero-stat-value">{route ? activeProfileLabel : "Not Ready"}</p>
+          <div className="hero-stats" aria-label="MoodRide status">
+            <div className="hero-stat">
+              <p className="hero-stat-label">Coverage</p>
+              <p className="hero-stat-value">Canada</p>
+            </div>
+            <div className="hero-stat">
+              <p className="hero-stat-label">Live Mode</p>
+              <p className="hero-stat-value">{activeMode.label}</p>
+            </div>
+            <div className="hero-stat">
+              <p className="hero-stat-label">Route</p>
+              <p className="hero-stat-value">{route ? activeProfileLabel : phase}</p>
+            </div>
           </div>
         </div>
       </section>
       <div className="grid grid-2">
         <section className="panel panel-stagger" style={staggerStyle(1)}>
           <div className="panel-title-row">
-            <h2>Route Request</h2>
-            <span className="small">Choose point, budget, and vibe blend.</span>
+            <h2>Plan A Route</h2>
+            <span className="small">{activeMode.status}</span>
+          </div>
+
+          <label>Mode</label>
+          <div className="mode-selector" role="tablist" aria-label="Route mode">
+            {ROUTE_MODES.map((mode) => {
+              const active = routeMode === mode.value;
+              return (
+                <button
+                  type="button"
+                  key={mode.value}
+                  className={`mode-option ${active ? "active" : ""} ${mode.enabled ? "" : "locked"}`}
+                  onClick={() => {
+                    setRouteMode(mode.value);
+                    if (!mode.enabled) {
+                      setMessage(`${mode.label} mode is planned as a focused city pilot after Canada driving launch.`);
+                    }
+                  }}
+                  role="tab"
+                  aria-selected={active}
+                >
+                  <span>{mode.label}</span>
+                  <small>{mode.status}</small>
+                </button>
+              );
+            })}
           </div>
 
           <label htmlFor="location-search">Search Place</label>
@@ -677,7 +767,7 @@ export function RoutePlanner() {
                 Regenerate
               </button>
               <button type="button" className="primary-drive-btn" onClick={startDrive}>
-                Start Drive
+                Start {routeModeLabel}
               </button>
               <button type="button" className="secondary-btn" onClick={exportGpx}>
                 Export GPX
@@ -688,7 +778,7 @@ export function RoutePlanner() {
           <div className="status-row">
             <span className={`status-pill status-${phase}`}>{phase}</span>
             <span className="small">
-              {route ? `${route.geometry.geometry.coordinates.length} geometry points loaded` : "Submit a request to generate a route."}
+              {route ? `${route.geometry.geometry.coordinates.length} geometry points loaded` : `${activeMode.label} mode ready.`}
             </span>
           </div>
           {message && <div className={`message-banner ${phase === "failed" ? "error" : ""}`}>{message}</div>}
@@ -782,9 +872,9 @@ export function RoutePlanner() {
           {route && phase === "completed" && (
             <div className="panel panel-stagger" style={staggerStyle(5)}>
               <div className="panel-title-row">
-                <h2>Rate This Drive</h2>
+                <h2>Rate This Route</h2>
               </div>
-              <p className="small">How was your drive? (1-5 stars)</p>
+              <p className="small">How was this route? (1-5 stars)</p>
               <div className="rating-row" role="group" aria-label="Drive rating">
                 {[1, 2, 3, 4, 5].map((ratingValue) => (
                   <button

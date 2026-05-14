@@ -2,10 +2,12 @@ package com.moodride.routeworker.algorithm;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.moodride.datamodels.RouteJob;
+import com.moodride.datamodels.RouteMode;
 import com.moodride.datamodels.ScenicScoreTile;
 import com.moodride.geo.H3Utils;
 import com.moodride.routeworker.config.ApplicationConfiguration;
 import com.moodride.routeworker.graph.RoadNode;
+import com.moodride.routeworker.repository.RouteWeightCalibrationRepository;
 import com.moodride.routeworker.repository.ScenicScoreTileRepository;
 import com.moodride.routeworker.service.OsrmTripClient;
 import org.junit.jupiter.api.BeforeEach;
@@ -27,6 +29,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.anyCollection;
 import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -40,6 +43,9 @@ class RoutePlannerTest {
     @Mock
     private OsrmTripClient osrmTripClient;
 
+    @Mock
+    private RouteWeightCalibrationRepository routeWeightCalibrationRepository;
+
     private RoutePlanner routePlanner;
 
     @BeforeEach
@@ -52,26 +58,33 @@ class RoutePlannerTest {
         config.setSectorCount(6);
         config.setCorridorSampleMeters(500);
         config.setMaxDurationOverrunRatio(1.0);
-        routePlanner = new RoutePlanner(scenicScoreTileRepository, osrmTripClient, config, new ObjectMapper());
+        routePlanner = new RoutePlanner(
+            scenicScoreTileRepository,
+            routeWeightCalibrationRepository,
+            osrmTripClient,
+            config,
+            new ObjectMapper()
+        );
+        when(routeWeightCalibrationRepository.findByVibeIn(anyCollection())).thenReturn(List.of());
     }
 
     @Test
     void generateRouteUsesSyntheticHybridWhenTileRingHasNoCandidates() {
         when(scenicScoreTileRepository.findByH3IndexIn(anyCollection())).thenReturn(List.of());
-        when(osrmTripClient.requestRoundTrip(anyList())).thenReturn(Optional.of(defaultTrip(25)));
+        when(osrmTripClient.requestRoundTrip(anyList(), eq(RouteMode.DRIVE))).thenReturn(Optional.of(defaultTrip(25)));
 
         RouteCandidate candidate = routePlanner.generateRoute(sampleJob(45));
 
         assertThat(candidate.getAlgorithmVersion()).isEqualTo("hybrid_osrm_v1");
         assertThat(candidate.getBeamCandidates()).isNull();
         assertThat(candidate.getWaypoints()).hasSizeGreaterThan(1);
-        verify(osrmTripClient, atLeastOnce()).requestRoundTrip(anyList());
+        verify(osrmTripClient, atLeastOnce()).requestRoundTrip(anyList(), eq(RouteMode.DRIVE));
     }
 
     @Test
     void generateRouteReturnsBestOverBudgetHybridCandidateWhenNoInBudgetOptionExists() {
         when(scenicScoreTileRepository.findByH3IndexIn(anyCollection())).thenReturn(List.of());
-        when(osrmTripClient.requestRoundTrip(anyList())).thenReturn(Optional.of(defaultTrip(22)));
+        when(osrmTripClient.requestRoundTrip(anyList(), eq(RouteMode.DRIVE))).thenReturn(Optional.of(defaultTrip(22)));
 
         RouteCandidate candidate = routePlanner.generateRoute(sampleJob(15));
 
@@ -82,7 +95,7 @@ class RoutePlannerTest {
     @Test
     void generateRouteThrowsWhenNoHybridCandidateCanBeProduced() {
         when(scenicScoreTileRepository.findByH3IndexIn(anyCollection())).thenReturn(List.of());
-        when(osrmTripClient.requestRoundTrip(anyList())).thenReturn(Optional.empty());
+        when(osrmTripClient.requestRoundTrip(anyList(), eq(RouteMode.DRIVE))).thenReturn(Optional.empty());
 
         assertThatThrownBy(() -> routePlanner.generateRoute(sampleJob(45)))
             .isInstanceOf(IllegalStateException.class)
@@ -92,7 +105,7 @@ class RoutePlannerTest {
     @Test
     void generateRouteOptionsReturnsThreeDistinctProfilesWhenCandidatesExist() {
         when(scenicScoreTileRepository.findByH3IndexIn(anyCollection())).thenReturn(List.of());
-        when(osrmTripClient.requestRoundTrip(anyList())).thenAnswer(invocation -> {
+        when(osrmTripClient.requestRoundTrip(anyList(), eq(RouteMode.DRIVE))).thenAnswer(invocation -> {
             @SuppressWarnings("unchecked")
             List<RoadNode> variant = invocation.getArgument(0);
             int durationMinutes = variant.size() * 8;
@@ -125,7 +138,7 @@ class RoutePlannerTest {
             ScenicScoreTile tile = scenicTile(indexes.iterator().next(), 46.10, -64.77);
             return List.of(tile);
         });
-        when(osrmTripClient.requestRoundTrip(anyList())).thenReturn(Optional.of(defaultTrip(25)));
+        when(osrmTripClient.requestRoundTrip(anyList(), eq(RouteMode.DRIVE))).thenReturn(Optional.of(defaultTrip(25)));
 
         RouteCandidate candidate = routePlanner.generateRoute(sampleJob(45));
 

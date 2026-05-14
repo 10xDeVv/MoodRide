@@ -14,6 +14,7 @@ public record RouteDetailResponse(
         double totalDistanceKm,
         int estimatedDurationMinutes,
         Integer timeBudgetMinutes,
+        String routeMode,
         double startLat,
         double startLng,
         List<String> vibes,

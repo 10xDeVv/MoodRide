@@ -32,8 +32,22 @@ public record RouteRequest(
     List<String> vibes,
     @JsonAlias({"vibe"})
     String vibe,
-    Map<String, Object> preferenceVector
+    Map<String, Object> preferenceVector,
+    @JsonAlias({"mode", "travelMode"})
+    String routeMode
 ) {
+    public RouteRequest(
+        UUID userId,
+        Double lat,
+        Double lng,
+        int timeBudgetMinutes,
+        List<String> vibes,
+        String vibe,
+        Map<String, Object> preferenceVector
+    ) {
+        this(userId, lat, lng, timeBudgetMinutes, vibes, vibe, preferenceVector, null);
+    }
+
     public List<String> resolvedVibes() {
         if (vibes != null && !vibes.isEmpty()) {
             return vibes;

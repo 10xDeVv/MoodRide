@@ -13,6 +13,7 @@ public record RouteJobEvent(
     double startLatitude,
     double startLongitude,
     int timeBudgetMinutes,
+    String routeMode,
     String vibe,  // "coastal", "mountain", "forest", "mixed"
     Instant submittedAt
 ) {

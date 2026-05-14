@@ -1,6 +1,7 @@
 package com.moodride.routeapi.service;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.moodride.datamodels.Route;
 import com.moodride.datamodels.RouteJob;
 import com.moodride.datamodels.RouteWaypoint;
@@ -12,6 +13,7 @@ import com.moodride.routeapi.dto.RouteRequest;
 import com.moodride.routeapi.dto.RouteSubmissionResponse;
 import com.moodride.routeapi.repository.RouteJobRepository;
 import com.moodride.routeapi.repository.RouteRepository;
+import com.moodride.routeapi.repository.RouteWeightCalibrationRepository;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -32,6 +34,7 @@ import java.util.UUID;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyCollection;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.verify;
 
@@ -47,11 +50,20 @@ class RouteServiceTest {
     @Mock
     private KafkaTemplate<String, String> kafkaTemplate;
 
+    @Mock
+    private RouteWeightCalibrationRepository calibrationRepository;
+
     private RouteService routeService;
 
     @BeforeEach
     void setUp() {
-        routeService = new RouteService(jobRepository, routeRepository, kafkaTemplate, new ObjectMapper());
+        routeService = new RouteService(
+            jobRepository,
+            routeRepository,
+            calibrationRepository,
+            kafkaTemplate,
+            new ObjectMapper()
+        );
 
         lenient().when(jobRepository.save(any(RouteJob.class))).thenAnswer(invocation -> {
             RouteJob job = invocation.getArgument(0);
@@ -60,10 +72,12 @@ class RouteServiceTest {
             }
             return job;
         });
+        lenient().when(calibrationRepository.findByVibeIn(anyCollection())).thenReturn(List.of());
+        lenient().when(calibrationRepository.saveAll(anyCollection())).thenAnswer(invocation -> invocation.getArgument(0));
     }
 
     @Test
-    void submitRouteReturnsSpecAlignedStatusUrl() {
+    void submitRouteReturnsSpecAlignedStatusUrl() throws Exception {
         RouteRequest request = new RouteRequest(
             UUID.randomUUID(),
             45.5152,
@@ -83,6 +97,9 @@ class RouteServiceTest {
         ArgumentCaptor<RouteJob> saved = ArgumentCaptor.forClass(RouteJob.class);
         verify(jobRepository).save(saved.capture());
         assertThat(saved.getValue().getVibe()).isEqualTo("coastal");
+        List<String> storedVibes = new ObjectMapper().readValue(saved.getValue().getVibesJson(), new TypeReference<>() {
+        });
+        assertThat(storedVibes).containsExactly("coastal", "mountain");
     }
 
     @Test
@@ -119,6 +136,23 @@ class RouteServiceTest {
         assertThatThrownBy(() -> routeService.submitRoute(request))
             .isInstanceOf(IllegalArgumentException.class)
             .hasMessageContaining("Invalid vibe");
+    }
+
+    @Test
+    void submitRouteRejectsUnknownPreferenceKeys() {
+        RouteRequest request = new RouteRequest(
+            UUID.randomUUID(),
+            45.5152,
+            -122.6784,
+            90,
+            List.of("coastal"),
+            null,
+            Map.of("avoidTolls", false)
+        );
+
+        assertThatThrownBy(() -> routeService.submitRoute(request))
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("preferenceVector must use numeric values");
     }
 
     @Test
@@ -172,6 +206,7 @@ class RouteServiceTest {
 
         RouteJob job = new RouteJob(userId, 45.5152, -122.6784, 90, "coastal");
         job.setId(jobId);
+        job.setVibesJson("[\"coastal\",\"riverside\"]");
         job.setStartedAt(Instant.parse("2026-04-02T14:30:01Z"));
         job.setCompletedAt(Instant.parse("2026-04-02T14:30:05Z"));
         job.setTimeBudgetMinutes(90);
@@ -212,6 +247,7 @@ class RouteServiceTest {
         Map<String, Object> properties = castMap(response.geometry().get("properties"));
         assertThat((List<?>) properties.get("segmentScores")).isNotEmpty();
         assertThat((List<?>) properties.get("segmentColors")).isNotEmpty();
+        assertThat(response.vibes()).containsExactly("coastal", "riverside");
         assertThat(response.scenicHighlights()).isNotEmpty();
         assertThat(response.routeOptions()).hasSize(1);
         assertThat(response.routeOptions().getFirst().profile()).isEqualTo("most_scenic");

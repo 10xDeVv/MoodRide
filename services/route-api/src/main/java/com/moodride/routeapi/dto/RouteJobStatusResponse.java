@@ -17,7 +17,8 @@ public record RouteJobStatusResponse(
         Instant failedAt,
         Integer estimatedRemainingSeconds,
         int retryCount,
-        int maxRetries
+        int maxRetries,
+        String routeMode
 ) {
 }
 

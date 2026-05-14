@@ -4,9 +4,11 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.moodride.datamodels.RouteJob;
 import com.moodride.datamodels.ScenicScoreTile;
+import com.moodride.datamodels.RouteWeightCalibration;
 import com.moodride.geo.H3Utils;
 import com.moodride.routeworker.config.ApplicationConfiguration;
 import com.moodride.routeworker.graph.RoadNode;
+import com.moodride.routeworker.repository.RouteWeightCalibrationRepository;
 import com.moodride.routeworker.repository.ScenicScoreTileRepository;
 import com.moodride.routeworker.service.OsrmTripClient;
 import org.slf4j.Logger;
@@ -29,8 +31,9 @@ public class RoutePlanner {
 
     private static final Logger logger = LoggerFactory.getLogger(RoutePlanner.class);
     private static final int DEFAULT_H3_RESOLUTION = H3Utils.DEFAULT_RESOLUTION;
-    private static final int SAMPLE_NEIGHBOR_EXPANSION_RING = 1;
+    private static final int SAMPLE_NEIGHBOR_EXPANSION_RING = 2;
     private static final double FLAT_SCENIC_SCORE_EPSILON = 0.0001;
+    private static final double DEFAULT_SCENIC_FALLBACK = 0.35;
 
     private static final List<Integer> WAYPOINT_VARIANTS = List.of(8, 6, 4);
     private static final Map<String, String> PREFERENCE_KEY_ALIASES = Map.of(
@@ -54,15 +57,18 @@ public class RoutePlanner {
     );
 
     private final ScenicScoreTileRepository scenicScoreTileRepository;
+    private final RouteWeightCalibrationRepository routeWeightCalibrationRepository;
     private final OsrmTripClient osrmTripClient;
     private final ApplicationConfiguration config;
     private final ObjectMapper objectMapper;
 
     public RoutePlanner(ScenicScoreTileRepository scenicScoreTileRepository,
+                        RouteWeightCalibrationRepository routeWeightCalibrationRepository,
                         OsrmTripClient osrmTripClient,
                         ApplicationConfiguration config,
                         ObjectMapper objectMapper) {
         this.scenicScoreTileRepository = scenicScoreTileRepository;
+        this.routeWeightCalibrationRepository = routeWeightCalibrationRepository;
         this.osrmTripClient = osrmTripClient;
         this.config = config;
         this.objectMapper = objectMapper;
@@ -74,7 +80,8 @@ public class RoutePlanner {
 
     public List<RouteCandidate> generateRouteOptions(RouteJob job) {
         RoadNode start = new RoadNode(job.getStartLatitude(), job.getStartLongitude());
-        PreferenceWeights preferences = resolvePreferenceWeights(job.getVibe(), job.getPreferenceVector());
+        List<String> requestVibes = resolveJobVibes(job);
+        PreferenceWeights preferences = resolvePreferenceWeights(requestVibes, job.getPreferenceVector());
 
         List<TileCandidate> scoredTiles = scoreNearbyTiles(start, job.getTimeBudgetMinutes(), preferences);
         List<List<RoadNode>> waypointVariants = buildWaypointRings(start, scoredTiles, job.getTimeBudgetMinutes());
@@ -108,7 +115,7 @@ public class RoutePlanner {
         int maxAllowedMinutes = (int) Math.ceil(job.getTimeBudgetMinutes() * Math.max(1.0, config.getMaxDurationOverrunRatio()));
 
         for (List<RoadNode> variant : waypointVariants) {
-            var result = osrmTripClient.requestRoundTrip(variant);
+            var result = osrmTripClient.requestRoundTrip(variant, job.getRouteMode());
             if (result.isEmpty()) {
                 continue;
             }
@@ -593,7 +600,7 @@ public class RoutePlanner {
             tiles = findTilesForSamples(samples, DEFAULT_H3_RESOLUTION, true);
         }
         if (tiles.isEmpty()) {
-            return 0.30;
+            return estimateFallbackScenicDensity(path, preferences);
         }
 
         double weightedScoreSum = 0.0;
@@ -604,9 +611,32 @@ public class RoutePlanner {
         }
 
         if (coveredTiles == 0) {
-            return 0.30;
+            return estimateFallbackScenicDensity(path, preferences);
         }
         return clamp01(weightedScoreSum / coveredTiles);
+    }
+
+    private double estimateFallbackScenicDensity(List<RoadNode> path, PreferenceWeights preferences) {
+        if (path == null || path.isEmpty()) {
+            return DEFAULT_SCENIC_FALLBACK;
+        }
+
+        RoadNode start = path.getFirst();
+        int ringSize = Math.max(2, Math.min(config.getTileSelectionRingMax(), config.getTileSelectionRingMin() + 2));
+        List<ScenicScoreTile> startTiles = findTilesNearStart(start, ringSize, DEFAULT_H3_RESOLUTION);
+        if (!startTiles.isEmpty()) {
+            return clamp01(
+                startTiles.stream()
+                    .mapToDouble(tile -> scoreTile(tile, preferences))
+                    .average()
+                    .orElse(DEFAULT_SCENIC_FALLBACK)
+            );
+        }
+
+        double curvature = estimateCurvatureScore(path);
+        double closureDistanceKm = distanceKm(path.getFirst(), path.getLast());
+        double closureBonus = clamp01(1.0 - (closureDistanceKm / 15.0));
+        return clamp01((DEFAULT_SCENIC_FALLBACK * 0.7) + (curvature * 0.2) + (closureBonus * 0.1));
     }
 
     private List<ScenicScoreTile> findTilesForSamples(List<RoadNode> samples,
@@ -652,13 +682,109 @@ public class RoutePlanner {
         return samples;
     }
 
-    private PreferenceWeights resolvePreferenceWeights(String vibe, String rawPreferenceVectorJson) {
-        PreferenceWeights defaults = VIBE_DEFAULTS.getOrDefault(normalizeVibe(vibe), VIBE_DEFAULTS.get("countryside"));
+    private PreferenceWeights resolvePreferenceWeights(List<String> vibes, String rawPreferenceVectorJson) {
+        PreferenceWeights defaults = blendVibeDefaults(vibes);
         Map<String, Double> overrides = parsePreferenceOverrides(rawPreferenceVectorJson);
-        if (overrides.isEmpty()) {
-            return defaults;
+        PreferenceWeights weighted = overrides.isEmpty() ? defaults : defaults.withOverrides(overrides);
+        return applyCalibration(weighted, vibes);
+    }
+
+    private List<String> resolveJobVibes(RouteJob job) {
+        List<String> parsed = parseVibesJson(job.getVibesJson());
+        if (!parsed.isEmpty()) {
+            return parsed;
         }
-        return defaults.withOverrides(overrides);
+        return List.of(normalizeVibe(job.getVibe()));
+    }
+
+    private List<String> parseVibesJson(String rawVibesJson) {
+        if (rawVibesJson == null || rawVibesJson.isBlank()) {
+            return List.of();
+        }
+        try {
+            List<String> raw = objectMapper.readValue(rawVibesJson, new TypeReference<>() {
+            });
+            if (raw == null || raw.isEmpty()) {
+                return List.of();
+            }
+            List<String> normalized = new ArrayList<>();
+            Set<String> seen = new HashSet<>();
+            for (String vibe : raw) {
+                if (vibe == null || vibe.isBlank()) {
+                    continue;
+                }
+                String normalizedVibe = normalizeVibe(vibe);
+                if (VIBE_DEFAULTS.containsKey(normalizedVibe) && seen.add(normalizedVibe)) {
+                    normalized.add(normalizedVibe);
+                }
+            }
+            return List.copyOf(normalized);
+        } catch (Exception ex) {
+            logger.warn("Failed to parse vibes JSON '{}': {}", rawVibesJson, ex.getMessage());
+            return List.of();
+        }
+    }
+
+    private PreferenceWeights blendVibeDefaults(List<String> vibes) {
+        List<String> activeVibes = (vibes == null || vibes.isEmpty()) ? List.of("countryside") : vibes;
+        double water = 0.0;
+        double greenery = 0.0;
+        double elevation = 0.0;
+        double solitude = 0.0;
+        double curves = 0.0;
+        double poi = 0.0;
+
+        for (String vibe : activeVibes) {
+            PreferenceWeights defaults = VIBE_DEFAULTS.getOrDefault(vibe, VIBE_DEFAULTS.get("countryside"));
+            water += defaults.water();
+            greenery += defaults.greenery();
+            elevation += defaults.elevation();
+            solitude += defaults.solitude();
+            curves += defaults.curves();
+            poi += defaults.poi();
+        }
+
+        double count = Math.max(1.0, activeVibes.size());
+        return new PreferenceWeights(
+            water / count,
+            greenery / count,
+            elevation / count,
+            solitude / count,
+            curves / count,
+            poi / count
+        );
+    }
+
+    private PreferenceWeights applyCalibration(PreferenceWeights weights, List<String> vibes) {
+        if (vibes == null || vibes.isEmpty()) {
+            return weights;
+        }
+
+        List<RouteWeightCalibration> calibrations = routeWeightCalibrationRepository.findByVibeIn(vibes);
+        if (calibrations == null || calibrations.isEmpty()) {
+            return weights;
+        }
+
+        double count = calibrations.size();
+        double waterMultiplier = calibrations.stream().mapToDouble(RouteWeightCalibration::getWaterMultiplier).average().orElse(1.0);
+        double greeneryMultiplier = calibrations.stream().mapToDouble(RouteWeightCalibration::getGreeneryMultiplier).average().orElse(1.0);
+        double elevationMultiplier = calibrations.stream().mapToDouble(RouteWeightCalibration::getElevationMultiplier).average().orElse(1.0);
+        double solitudeMultiplier = calibrations.stream().mapToDouble(RouteWeightCalibration::getSolitudeMultiplier).average().orElse(1.0);
+        double curvesMultiplier = calibrations.stream().mapToDouble(RouteWeightCalibration::getCurvesMultiplier).average().orElse(1.0);
+        double poiMultiplier = calibrations.stream().mapToDouble(RouteWeightCalibration::getPoiMultiplier).average().orElse(1.0);
+
+        if (count <= 0.0) {
+            return weights;
+        }
+
+        return new PreferenceWeights(
+            weights.water() * waterMultiplier,
+            weights.greenery() * greeneryMultiplier,
+            weights.elevation() * elevationMultiplier,
+            weights.solitude() * solitudeMultiplier,
+            weights.curves() * curvesMultiplier,
+            weights.poi() * poiMultiplier
+        );
     }
 
     private Map<String, Double> parsePreferenceOverrides(String rawPreferenceVectorJson) {
