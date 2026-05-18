@@ -8,6 +8,10 @@
 -- - Safe to rerun after interruption; each batch commits independently via \gexec.
 -- - Elevation will be 0 outside the DEM footprint.
 
+SET work_mem = '256MB';
+SET temp_buffers = '256MB';
+SET max_parallel_workers_per_gather = 4;
+
 DO $$
 BEGIN
     IF to_regclass('public.scenic_score_tiles') IS NULL THEN
@@ -113,40 +117,34 @@ BEGIN
     RAISE NOTICE 'Batch %%..%% started', v_start, v_end;
 
     -- 1) Green + solitude for this batch.
-    WITH batch_h3 AS (
-        SELECT h3_index
-        FROM public.dq_national_batches
-        WHERE rn BETWEEN v_start AND v_end
+    WITH batch_h3 AS MATERIALIZED (
+        SELECT
+            sst.h3_index,
+            ST_Transform(sst.geometry, 3979) AS geom_3979
+        FROM public.dq_national_batches b
+        JOIN public.scenic_score_tiles sst
+          ON sst.h3_index = b.h3_index
+        WHERE b.rn BETWEEN v_start AND v_end
     ),
     landcover_pixel_counts AS (
         SELECT
-            sst.h3_index,
+            b.h3_index,
             vc.value::INTEGER AS class_id,
             SUM(vc.count)::DOUBLE PRECISION AS pixel_count
-        FROM scenic_score_tiles sst
-        JOIN batch_h3 b
-          ON b.h3_index = sst.h3_index
+        FROM batch_h3 b
         JOIN landcover_raster lr
-          ON ST_Intersects(
-                lr.rast,
-                CASE
-                    WHEN ST_SRID(sst.geometry) = ST_SRID(lr.rast) THEN sst.geometry
-                    ELSE ST_Transform(sst.geometry, ST_SRID(lr.rast))
-                END
-             )
+          ON ST_ConvexHull(lr.rast) && b.geom_3979
+         AND ST_Intersects(ST_ConvexHull(lr.rast), b.geom_3979)
         CROSS JOIN LATERAL ST_ValueCount(
             ST_Clip(
                 lr.rast,
-                CASE
-                    WHEN ST_SRID(sst.geometry) = ST_SRID(lr.rast) THEN sst.geometry
-                    ELSE ST_Transform(sst.geometry, ST_SRID(lr.rast))
-                END,
+                b.geom_3979,
                 TRUE
             ),
             1,
             TRUE
         ) AS vc(value, count)
-        GROUP BY sst.h3_index, vc.value
+        GROUP BY b.h3_index, vc.value
     ),
     landcover_aggregates AS (
         SELECT
@@ -180,38 +178,32 @@ BEGIN
     WHERE sst.h3_index = b.h3_index;
 
     -- 2) Elevation for this batch (0 outside DEM coverage).
-    WITH batch_h3 AS (
-        SELECT h3_index
-        FROM public.dq_national_batches
-        WHERE rn BETWEEN v_start AND v_end
+    WITH batch_h3 AS MATERIALIZED (
+        SELECT
+            sst.h3_index,
+            sst.geometry AS geom_4326
+        FROM public.dq_national_batches b
+        JOIN public.scenic_score_tiles sst
+          ON sst.h3_index = b.h3_index
+        WHERE b.rn BETWEEN v_start AND v_end
     ),
     elevation_stats AS (
         SELECT
-            sst.h3_index,
+            b.h3_index,
             (ST_SummaryStatsAgg(
                 ST_Clip(
                     er.rast,
-                    CASE
-                        WHEN ST_SRID(sst.geometry) = ST_SRID(er.rast) THEN sst.geometry
-                        ELSE ST_Transform(sst.geometry, ST_SRID(er.rast))
-                    END,
+                    b.geom_4326,
                     TRUE
                 ),
                 1,
                 TRUE
             )).stddev AS elevation_stddev_m
-        FROM scenic_score_tiles sst
-        JOIN batch_h3 b
-          ON b.h3_index = sst.h3_index
+        FROM batch_h3 b
         JOIN elevation_raster er
-          ON ST_Intersects(
-                er.rast,
-                CASE
-                    WHEN ST_SRID(sst.geometry) = ST_SRID(er.rast) THEN sst.geometry
-                    ELSE ST_Transform(sst.geometry, ST_SRID(er.rast))
-                END
-             )
-        GROUP BY sst.h3_index
+          ON ST_ConvexHull(er.rast) && b.geom_4326
+         AND ST_Intersects(ST_ConvexHull(er.rast), b.geom_4326)
+        GROUP BY b.h3_index
     )
     UPDATE scenic_score_tiles sst
     SET elevation_score = LEAST(1.0, GREATEST(0.0, COALESCE(es.elevation_stddev_m, 0.0) / 100.0)),
@@ -257,7 +249,7 @@ FROM bounds
 
 ANALYZE scenic_score_tiles;
 
-\echo Final stats (2.6 target + global)
+\echo Final stats (2.7 target + global)
 SELECT
     COUNT(*) AS tiles,
     COUNT(*) FILTER (WHERE green_score > 0.0) AS green_non_zero_tiles,

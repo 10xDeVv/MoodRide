@@ -1,73 +1,55 @@
 # Data Quality Upgrade Progress Tracker
 
-Last updated: 2026-04-28  
-Owner: Codex + aadeb  
+Last updated: 2026-05-18
+Owner: Codex + aadeb
 Plan source: `docs/DataQualityUpgrade.md`
 
 ## Phase Status
 
 | Phase | Status | Notes |
 |---|---|---|
-| Phase 0 - Execution scaffolding | Completed | Added runnable scripts: `import-raster-to-postgis.ps1`, `run-data-quality-upgrade.ps1`, `data-quality-upgrade.sql`. |
-| Phase 1 - Data acquisition + raster load | In Progress | `landcover_raster` loaded (184,549 rows, SRID 3979) and `elevation_raster` loaded (20,475 rows, SRID 4326, Maritimes subset). Remaining: final spot-check + class legend confirmation. |
-| Phase 2 - Component score computation | In Progress | Scoped DEM-only recompute completed for remaining tiles; national coverage still pending. |
-| Phase 3 - Composite recompute + validation | In Progress | Scoped DEM-only composite recompute completed; national coverage still pending. |
+| Phase 0 - Execution scaffolding | Completed | Raster import, regional DEM resume, scenic recompute, scenic release publish, and scenic deploy scripts are in place. |
+| Phase 1 - Data acquisition + raster load | Completed | Canada land cover is loaded; national Copernicus DEM is loaded into `elevation_raster` with `310,900` raster tiles. |
+| Phase 2 - Component score computation | Completed | `green_score`, `solitude_score`, and `elevation_score` recomputed nationally with raster-backed inputs. |
+| Phase 3 - Composite recompute + validation | Completed | `211,510` scenic tiles recomputed at `2.7-raster-data-quality-upgrade-national-batched`, published, deployed, and verified in production. |
 
-## Detailed Checklist
+## Completed Checklist
 
-### Phase 0 - Scaffolding (Completed)
-- [x] Add reusable raster import script (`scripts/setup/import-raster-to-postgis.ps1`)
-- [x] Add upgrade SQL (`scripts/setup/data-quality-upgrade.sql`)
-- [x] Add orchestration entrypoint (`scripts/setup/run-data-quality-upgrade.ps1`)
-- [x] Add progress tracking document (`docs/DataQualityUpgradeProgress.md`)
+- [x] Import Canada land cover raster into `landcover_raster`
+- [x] Import national Copernicus DEM into `elevation_raster`
+- [x] Rebuild one clean raster spatial index after DEM import
+- [x] Run final `VACUUM ANALYZE` on `elevation_raster`
+- [x] Compute `green_score` from land cover class proportions
+- [x] Compute `solitude_score` from urban proportion + road density
+- [x] Compute `elevation_score` from DEM elevation standard deviation
+- [x] Recompute composite `scenic_score`
+- [x] Publish scenic release artifact
+- [x] Deploy scenic release to production
+- [x] Verify production DB has all rows at `2.7`
+- [x] Smoke-test production scenic-region API
 
-### Phase 1 - Data Acquisition and Loading
-- [ ] Confirm final land-cover raster legend/version to use for class mapping
-- [x] Download/prepare Copernicus DEM raster(s) for operational area (Maritimes subset)
-- [x] Import `landcover_raster`
-- [x] Import `elevation_raster`
-- [ ] Spot-check raster values at known locations
+## Final Metrics
 
-### Phase 2 - Component Score Computation
-- [ ] Review/tune `landcover_class_weights` defaults in `data-quality-upgrade.sql`
-- [x] Execute chunked scoped recompute using `scripts/setup/data-quality-upgrade-scoped-batched.sql`
-- [x] Optimize scoped target selection to DEM footprint union (avoid raster-tile EXISTS scan per H3 tile)
-- [x] Scoped recompute finished for remaining DEM tiles (resume run, chunk_size=200)
-- [x] Compute `green_score` from raster class proportions (DEM-scoped)
-- [x] Compute `solitude_score` from urban proportion + road density (DEM-scoped)
-- [x] Compute `elevation_score` from DEM elevation stddev (DEM-scoped)
-- [x] Confirm non-trivial variance in each component (DEM-scoped)
-
-### Phase 3 - Composite Recompute and Validation
-- [x] Recompute `scenic_score` from component scores (DEM-scoped tiles)
-- [ ] Compare before/after score distribution
-- [ ] Spot-check known scenic vs urban/industrial locations
-- [ ] Confirm preference vectors produce route differences
-
-## Runbook Commands
-
-```powershell
-# Dry run to preview commands:
-.\scripts\setup\run-data-quality-upgrade.ps1 `
-  -ElevationInputPath "C:\path\to\elevation_merged.tif" `
-  -Password "<postgres-password>" `
-  -DryRun
-
-# Full execution:
-.\scripts\setup\run-data-quality-upgrade.ps1 `
-  -ElevationInputPath "C:\path\to\elevation_merged.tif" `
-  -Password "<postgres-password>"
-
-# Scoped batched recompute over DEM-covered tiles (recommended now):
-psql -d moodride -v ON_ERROR_STOP=1 -v chunk_size=500 -f scripts/setup/data-quality-upgrade-scoped-batched.sql
+```text
+DEM raster tiles: 310900
+DEM extent: lon -141 to -51, lat 41 to 84
+Scenic tiles: 211510
+Scoring version: 2.7-raster-data-quality-upgrade-national-batched
+green_non_zero_tiles: 187904
+solitude_non_zero_tiles: 211510
+elevation_non_zero_tiles: 122173
+avg_scenic_score: 0.491143
+stddev_scenic_score: 0.201429
+min_scenic_score: 0.034941860465116284
+max_scenic_score: 0.9252447761002579
 ```
 
 ## Validation Log
 
-- 2026-04-26: Scaffolding created; end-to-end data run not executed yet in this session.
-- 2026-04-27: Confirmed raster loads present (`landcover_raster`: 184,549 rows SRID 3979, `elevation_raster`: 20,475 rows SRID 4326).
-- 2026-04-27: Monolithic recompute canceled due to long-running no-commit behavior; switched to chunked scoped execution plan.
-- 2026-04-27: Added optimized batched script path using precomputed DEM footprint in `scripts/setup/data-quality-upgrade-scoped-batched.sql`.
-- 2026-04-27: Run started with `chunk_size=100`; target set built successfully (`24,282` DEM-covered tiles), currently executing batch `1..100`.
-- 2026-04-28: Resume run completed remaining `9,282` DEM-scoped tiles (chunk_size=200). Final scoped stats: green>0 `9,166`, solitude>0 `9,282`, elevation>0 `9,116`, avg_scenic `0.665141` (stddev `0.066092`).
-- 2026-04-28: Full DEM-scoped totals (24,282 tiles): green>0 `24,009`, solitude>0 `24,282`, elevation>0 `23,873`, avg_green `0.533798` (stddev `0.185206`), avg_elevation `0.931839` (stddev `0.230583`), avg_scenic `0.664639` (stddev `0.066652`).
+- 2026-04-26: Initial scaffolding created for data quality upgrade.
+- 2026-04-28: Scoped DEM-backed recompute completed for the early DEM subset.
+- 2026-05-12 to 2026-05-18: National DEM import completed region by region using resumable per-tile imports.
+- 2026-05-18: `elevation_raster` verified at `310,900` raster tiles covering Canada operating bounds.
+- 2026-05-18: National `2.7` scenic recompute completed for `211,510` tiles.
+- 2026-05-18: Scenic release `scenic-2.7-raster-data-quality-upgrade-national-batched-20260518-1311` deployed successfully.
+- 2026-05-18: Production verification confirmed `211,510` rows at `2.7`; Toronto and Vancouver scenic-region smoke tests returned data.

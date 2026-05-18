@@ -18,7 +18,8 @@ param(
     [string]$PostgresContainerName = "moodride-postgres",
     [string]$DockerGdalImage = "artsdatabanken/raster2pgsql",
     [string]$DockerMemoryLimit = "3g",
-    [string]$DockerRaster2PgsqlPath = "/usr/lib/postgresql/12/bin/raster2pgsql"
+    [string]$DockerRaster2PgsqlPath = "/usr/lib/postgresql/12/bin/raster2pgsql",
+    [switch]$SkipVerify
 )
 
 $ErrorActionPreference = "Stop"
@@ -49,6 +50,9 @@ $docker = Get-Command docker -ErrorAction SilentlyContinue
 
 $modeFlag = if ($Append) { "-a" } else { "-d" }
 $qualifiedTable = "public.$TargetTable"
+$applyIndex = -not $Append
+$applyConstraints = -not $Append
+$applyVacuum = -not $Append
 
 if ($Password) {
     $env:PGPASSWORD = $Password
@@ -56,15 +60,24 @@ if ($Password) {
 
 function Invoke-LocalImport {
     Write-Host "Loading raster with local raster2pgsql + psql into $qualifiedTable ..."
-    & $raster2pgsql.Source `
-        -s $Srid `
-        -t $TileSize `
-        -I `
-        -C `
-        -M `
-        $modeFlag `
-        $resolvedInput `
-        $qualifiedTable `
+    $rasterArgs = @(
+        "-s", $Srid,
+        "-t", $TileSize,
+        $modeFlag,
+        $resolvedInput,
+        $qualifiedTable
+    )
+    if ($applyIndex) {
+        $rasterArgs = @($rasterArgs[0..3] + "-I" + $rasterArgs[4..($rasterArgs.Count - 1)])
+    }
+    if ($applyConstraints) {
+        $rasterArgs = @($rasterArgs[0..3] + "-C" + $rasterArgs[4..($rasterArgs.Count - 1)])
+    }
+    if ($applyVacuum) {
+        $rasterArgs = @($rasterArgs[0..3] + "-M" + $rasterArgs[4..($rasterArgs.Count - 1)])
+    }
+
+    & $raster2pgsql.Source @rasterArgs `
     | & $psql.Source `
         -h $DbHost `
         -p $Port `
@@ -74,6 +87,11 @@ function Invoke-LocalImport {
 
     if ($LASTEXITCODE -ne 0) {
         throw "Local raster import failed with exit code $LASTEXITCODE"
+    }
+
+    if ($SkipVerify) {
+        Write-Host "Verification query skipped."
+        return
     }
 
     & $psql.Source -h $DbHost -p $Port -U $Username -d $Database -v ON_ERROR_STOP=1 -c @"
@@ -115,13 +133,22 @@ function Invoke-DockerImport {
         $DockerRaster2PgsqlPath,
         "-s", "$Srid",
         "-t", $TileSize,
-        "-I",
-        "-C",
-        "-M",
         $modeArg,
         "/workspace/input/$inputFile",
         $qualifiedTable
     )
+    if ($applyIndex) {
+        $insertAt = [Math]::Max(0, $gdalArgs.Count - 3)
+        $gdalArgs = @($gdalArgs[0..($insertAt - 1)] + "-I" + $gdalArgs[$insertAt..($gdalArgs.Count - 1)])
+    }
+    if ($applyConstraints) {
+        $insertAt = [Math]::Max(0, $gdalArgs.Count - 3)
+        $gdalArgs = @($gdalArgs[0..($insertAt - 1)] + "-C" + $gdalArgs[$insertAt..($gdalArgs.Count - 1)])
+    }
+    if ($applyVacuum) {
+        $insertAt = [Math]::Max(0, $gdalArgs.Count - 3)
+        $gdalArgs = @($gdalArgs[0..($insertAt - 1)] + "-M" + $gdalArgs[$insertAt..($gdalArgs.Count - 1)])
+    }
 
     $psqlArgs = @("exec", "-i")
     if ($Password) { $psqlArgs += @("-e", "PGPASSWORD=$Password") }
@@ -136,6 +163,11 @@ function Invoke-DockerImport {
     & docker @gdalArgs | & docker @psqlArgs
     if ($LASTEXITCODE -ne 0) {
         throw "Docker raster import failed with exit code $LASTEXITCODE"
+    }
+
+    if ($SkipVerify) {
+        Write-Host "Verification query skipped."
+        return
     }
 
     $verifyCommand = @"
