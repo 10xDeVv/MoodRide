@@ -589,12 +589,24 @@ button:disabled {
 
 .component-row {
   display: grid;
-  grid-template-columns: minmax(70px, 0.32fr) minmax(120px, 1fr) 2.8rem;
+  grid-template-columns: minmax(96px, 0.44fr) minmax(120px, 1fr) 2.8rem;
   align-items: center;
   gap: 0.55rem;
   color: var(--ink-700);
   font-size: 0.82rem;
   font-weight: 800;
+}
+
+.component-label {
+  display: grid;
+  gap: 0.12rem;
+}
+
+.component-label small {
+  color: var(--ink-500);
+  font-size: 0.68rem;
+  font-weight: 800;
+  line-height: 1.2;
 }
 
 .component-track {
@@ -630,7 +642,7 @@ button:disabled {
   }
 
   .component-row {
-    grid-template-columns: minmax(76px, 0.42fr) minmax(90px, 1fr) 2.6rem;
+    grid-template-columns: minmax(116px, 0.58fr) minmax(72px, 1fr) 2.6rem;
   }
 }
 

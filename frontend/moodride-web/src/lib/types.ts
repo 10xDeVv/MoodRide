@@ -34,9 +34,14 @@ export interface RouteOptionResponse {
 
 export interface RouteOptionExplanationResponse {
   componentAverages: Record<string, number>;
+  baselineAverages: Record<string, number>;
+  componentLifts: Record<string, number>;
+  componentWeights: Record<string, number>;
+  weightedContributions: Record<string, number>;
   leadingComponents: string[];
   summary: string;
   sampleTileCount: number;
+  baselineTileCount: number;
 }
 
 export interface RouteJobStatusResponse {

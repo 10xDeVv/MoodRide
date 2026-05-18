@@ -5,6 +5,8 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.moodride.datamodels.Route;
 import com.moodride.datamodels.RouteJob;
 import com.moodride.datamodels.RouteWaypoint;
+import com.moodride.datamodels.ScenicScoreTile;
+import com.moodride.geo.H3Utils;
 import com.moodride.routeapi.dto.RouteDetailResponse;
 import com.moodride.routeapi.dto.RouteJobStatusResponse;
 import com.moodride.routeapi.dto.RouteRatingRequest;
@@ -36,6 +38,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyCollection;
+import static org.mockito.ArgumentMatchers.anyDouble;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.verify;
 
@@ -80,6 +84,8 @@ class RouteServiceTest {
         lenient().when(calibrationRepository.findByVibeIn(anyCollection())).thenReturn(List.of());
         lenient().when(calibrationRepository.saveAll(anyCollection())).thenAnswer(invocation -> invocation.getArgument(0));
         lenient().when(scenicScoreTileRepository.findByH3IndexIn(anyCollection())).thenReturn(List.of());
+        lenient().when(scenicScoreTileRepository.findScenicTilesNearPoint(anyDouble(), anyDouble(), anyDouble(), anyInt()))
+            .thenReturn(List.of());
     }
 
     @Test
@@ -309,6 +315,57 @@ class RouteServiceTest {
     }
 
     @Test
+    void routeOptionExplanationRanksWeightedLiftInsteadOfRawAverage() {
+        UUID jobId = UUID.randomUUID();
+        UUID userId = UUID.randomUUID();
+
+        RouteJob job = new RouteJob(userId, 51.1784, -115.5708, 90, "mountain");
+        job.setId(jobId);
+        job.setStatus(RouteJob.JobStatus.COMPLETED);
+
+        GeometryFactory geometryFactory = new GeometryFactory();
+        LineString lineString = geometryFactory.createLineString(new Coordinate[] {
+            new Coordinate(-115.5708, 51.1784),
+            new Coordinate(-115.6000, 51.1900)
+        });
+
+        Route route = new Route();
+        route.setId(UUID.randomUUID());
+        route.setJobId(jobId);
+        route.setRouteProfile("most_scenic");
+        route.setGeometry(lineString);
+        route.setScenicScore(0.82);
+        route.setTotalDistanceKm(52.0);
+        route.setEstimatedDurationMinutes(89);
+        route.setGeneratedAt(Instant.parse("2026-04-02T14:30:05Z"));
+
+        List<ScenicScoreTile> routeTiles = List.of(
+            scenicTile(H3Utils.getH3Index(51.1784, -115.5708, H3Utils.DEFAULT_RESOLUTION), 0.98, 0.72, 0.91, 0.78, 0.36, 0.12),
+            scenicTile(H3Utils.getH3Index(51.1900, -115.6000, H3Utils.DEFAULT_RESOLUTION), 0.99, 0.70, 0.89, 0.79, 0.34, 0.10)
+        );
+        List<ScenicScoreTile> baselineTiles = List.of(
+            scenicTile("baseline-a", 0.97, 0.38, 0.32, 0.74, 0.30, 0.08),
+            scenicTile("baseline-b", 0.96, 0.40, 0.30, 0.72, 0.31, 0.09)
+        );
+
+        lenient().when(jobRepository.findById(jobId)).thenReturn(Optional.of(job));
+        lenient().when(routeRepository.findByJobIdOrderByGeneratedAtAsc(jobId)).thenReturn(List.of(route));
+        lenient().when(scenicScoreTileRepository.findByH3IndexIn(anyCollection())).thenReturn(routeTiles);
+        lenient().when(scenicScoreTileRepository.findScenicTilesNearPoint(anyDouble(), anyDouble(), anyDouble(), anyInt()))
+            .thenReturn(baselineTiles);
+
+        RouteJobStatusResponse response = routeService.getRouteJobStatus(jobId);
+
+        var explanation = response.routeOptions().getFirst().explanation();
+        assertThat(explanation).isNotNull();
+        assertThat(explanation.leadingComponents().getFirst()).isEqualTo("elevation");
+        assertThat(explanation.summary()).contains("vs area");
+        assertThat(explanation.weightedContributions().get("elevation")).isGreaterThan(explanation.weightedContributions().get("water"));
+        assertThat(explanation.componentLifts().get("water")).isLessThan(explanation.componentLifts().get("elevation"));
+        assertThat(explanation.baselineTileCount()).isEqualTo(2);
+    }
+
+    @Test
     void getRouteJobStatusUsesPersistedProfilesOverGeneratedOrder() {
         UUID jobId = UUID.randomUUID();
         UUID userId = UUID.randomUUID();
@@ -360,5 +417,31 @@ class RouteServiceTest {
     @SuppressWarnings("unchecked")
     private static Map<String, Object> castMap(Object value) {
         return (Map<String, Object>) value;
+    }
+
+    private static ScenicScoreTile scenicTile(
+        String h3Index,
+        double water,
+        double greenery,
+        double elevation,
+        double solitude,
+        double curves,
+        double poi
+    ) {
+        ScenicScoreTile tile = new ScenicScoreTile();
+        tile.setH3Index(h3Index);
+        tile.setWaterScore(water);
+        tile.setWaterProximity(water);
+        tile.setGreenScore(greenery);
+        tile.setNaturalLandUse(greenery);
+        tile.setElevationScore(elevation);
+        tile.setElevationVariance(elevation);
+        tile.setSolitudeScore(solitude);
+        tile.setTrafficSignalScore(solitude);
+        tile.setCurveScore(curves);
+        tile.setVisualComplexity(curves);
+        tile.setPoiScore(poi);
+        tile.setPoiDensity(poi);
+        return tile;
     }
 }

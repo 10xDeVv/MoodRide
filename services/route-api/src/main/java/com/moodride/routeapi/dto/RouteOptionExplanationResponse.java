@@ -5,8 +5,13 @@ import java.util.Map;
 
 public record RouteOptionExplanationResponse(
         Map<String, Double> componentAverages,
+        Map<String, Double> baselineAverages,
+        Map<String, Double> componentLifts,
+        Map<String, Double> componentWeights,
+        Map<String, Double> weightedContributions,
         List<String> leadingComponents,
         String summary,
-        int sampleTileCount
+        int sampleTileCount,
+        int baselineTileCount
 ) {
 }

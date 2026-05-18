@@ -95,6 +95,9 @@ public class RouteService {
     private static final double CALIBRATION_MIN_MULTIPLIER = 0.70;
     private static final double CALIBRATION_MAX_MULTIPLIER = 1.30;
     private static final int ROUTE_EXPLANATION_SAMPLE_LIMIT = 160;
+    private static final double ROUTE_EXPLANATION_BASELINE_RADIUS_METERS = 50_000.0;
+    private static final int ROUTE_EXPLANATION_BASELINE_TILE_LIMIT = 1_000;
+    private static final double ROUTE_EXPLANATION_LIFT_EPSILON = 0.003;
 
     private static final Map<String, PreferenceWeights> VIBE_DEFAULTS = Map.of(
         "coastal", new PreferenceWeights(0.90, 0.70, 0.30, 0.60, 0.45, 0.20),
@@ -162,7 +165,7 @@ public class RouteService {
             .orElseThrow(() -> new JobNotFoundException(jobId));
 
         List<Route> jobRoutes = routeRepository.findByJobIdOrderByGeneratedAtAsc(jobId);
-        List<RouteOptionResponse> routeOptions = buildRouteOptions(jobRoutes);
+        List<RouteOptionResponse> routeOptions = buildRouteOptions(jobRoutes, job);
 
         UUID routeId = job.getRouteId();
         if (routeId == null) {
@@ -232,7 +235,8 @@ public class RouteService {
     private RouteDetailResponse mapRouteToDetail(Route route) {
         RouteJob routeJob = jobRepository.findById(route.getJobId()).orElse(null);
         List<RouteOptionResponse> routeOptions = buildRouteOptions(
-            routeRepository.findByJobIdOrderByGeneratedAtAsc(route.getJobId())
+            routeRepository.findByJobIdOrderByGeneratedAtAsc(route.getJobId()),
+            routeJob
         );
 
         Map<String, Object> lineGeometry = new HashMap<>();
@@ -489,7 +493,7 @@ public class RouteService {
         return "STANDARD";
     }
 
-    private List<RouteOptionResponse> buildRouteOptions(List<Route> routes) {
+    private List<RouteOptionResponse> buildRouteOptions(List<Route> routes, RouteJob routeJob) {
         if (routes == null || routes.isEmpty()) {
             return List.of();
         }
@@ -498,6 +502,7 @@ public class RouteService {
             .sorted(Comparator.comparing(Route::getGeneratedAt, Comparator.nullsLast(Comparator.naturalOrder())))
             .toList();
         List<Route> profileOrdered = orderByProfileWithFallback(chronologicallyOrdered);
+        ComponentAccumulator baselineAccumulator = buildBaselineAccumulator(routeJob, profileOrdered);
 
         List<RouteOptionResponse> options = new ArrayList<>(profileOrdered.size());
         for (int i = 0; i < profileOrdered.size(); i++) {
@@ -513,14 +518,18 @@ public class RouteService {
                 route.getScenicScore() * 100.0,
                 route.getTotalDistanceKm(),
                 route.getEstimatedDurationMinutes(),
-                buildRouteOptionExplanation(route)
+                buildRouteOptionExplanation(route, routeJob, baselineAccumulator)
             ));
         }
 
         return List.copyOf(options);
     }
 
-    private RouteOptionExplanationResponse buildRouteOptionExplanation(Route route) {
+    private RouteOptionExplanationResponse buildRouteOptionExplanation(
+        Route route,
+        RouteJob routeJob,
+        ComponentAccumulator baselineAccumulator
+    ) {
         if (route == null || route.getGeometry() == null || route.getGeometry().isEmpty()) {
             return null;
         }
@@ -541,7 +550,18 @@ public class RouteService {
         }
 
         Map<String, Double> averages = accumulator.averages();
-        List<String> leadingComponents = averages.entrySet().stream()
+        Map<String, Double> baselineAverages = baselineAccumulator == null ? Map.of() : baselineAccumulator.averages();
+        Map<String, Double> componentWeights = resolveEffectivePreferenceWeights(
+            resolveRouteVibes(routeJob, route),
+            routeJob == null ? Map.of() : parseStoredPreferenceVector(routeJob.getPreferenceVector())
+        ).componentRatios();
+        Map<String, Double> componentLifts = buildComponentLifts(averages, baselineAverages);
+        Map<String, Double> weightedContributions = buildWeightedContributions(averages, componentWeights);
+        Map<String, Double> weightedLifts = buildWeightedLifts(componentLifts, componentWeights);
+        boolean liftBased = weightedLifts.values().stream().anyMatch(value -> value > ROUTE_EXPLANATION_LIFT_EPSILON);
+        Map<String, Double> rankingSignals = liftBased ? weightedLifts : weightedContributions;
+
+        List<String> leadingComponents = rankingSignals.entrySet().stream()
             .sorted(Map.Entry.<String, Double>comparingByValue().reversed())
             .limit(3)
             .map(Map.Entry::getKey)
@@ -549,10 +569,56 @@ public class RouteService {
 
         return new RouteOptionExplanationResponse(
             averages,
+            baselineAverages,
+            componentLifts,
+            componentWeights,
+            weightedContributions,
             leadingComponents,
-            buildRouteExplanationSummary(leadingComponents),
-            tiles.size()
+            buildRouteExplanationSummary(leadingComponents, componentLifts, weightedContributions, liftBased),
+            tiles.size(),
+            baselineAccumulator == null ? 0 : baselineAccumulator.count()
         );
+    }
+
+    private ComponentAccumulator buildBaselineAccumulator(RouteJob routeJob, List<Route> routes) {
+        Coordinate origin = resolveExplanationOrigin(routeJob, routes);
+        if (origin == null) {
+            return null;
+        }
+
+        List<ScenicScoreTile> baselineTiles = scenicScoreTileRepository.findScenicTilesNearPoint(
+            origin.getY(),
+            origin.getX(),
+            ROUTE_EXPLANATION_BASELINE_RADIUS_METERS,
+            ROUTE_EXPLANATION_BASELINE_TILE_LIMIT
+        );
+        if (baselineTiles == null || baselineTiles.isEmpty()) {
+            return null;
+        }
+
+        ComponentAccumulator accumulator = new ComponentAccumulator();
+        for (ScenicScoreTile tile : baselineTiles) {
+            accumulator.add(tile);
+        }
+        return accumulator;
+    }
+
+    private Coordinate resolveExplanationOrigin(RouteJob routeJob, List<Route> routes) {
+        if (routeJob != null) {
+            return new Coordinate(routeJob.getStartLongitude(), routeJob.getStartLatitude());
+        }
+        if (routes == null) {
+            return null;
+        }
+        for (Route route : routes) {
+            if (route != null && route.getGeometry() != null && !route.getGeometry().isEmpty()) {
+                Coordinate[] coordinates = route.getGeometry().getCoordinates();
+                if (coordinates != null && coordinates.length > 0) {
+                    return coordinates[0];
+                }
+            }
+        }
+        return null;
     }
 
     private Set<String> sampleRouteH3Indexes(Route route) {
@@ -573,18 +639,88 @@ public class RouteService {
         return h3Indexes;
     }
 
-    private String buildRouteExplanationSummary(List<String> leadingComponents) {
+    private Map<String, Double> buildComponentLifts(Map<String, Double> averages, Map<String, Double> baselineAverages) {
+        if (averages == null || averages.isEmpty()) {
+            return Map.of();
+        }
+
+        Map<String, Double> lifts = new LinkedHashMap<>();
+        for (String component : SUPPORTED_PREFERENCE_KEYS) {
+            double average = averages.getOrDefault(component, 0.0);
+            double baseline = baselineAverages == null ? 0.0 : baselineAverages.getOrDefault(component, average);
+            lifts.put(component, roundSignedComponent(average - baseline));
+        }
+        return Map.copyOf(lifts);
+    }
+
+    private Map<String, Double> buildWeightedContributions(Map<String, Double> averages, Map<String, Double> componentWeights) {
+        if (averages == null || averages.isEmpty()) {
+            return Map.of();
+        }
+
+        Map<String, Double> rawContributions = new LinkedHashMap<>();
+        double total = 0.0;
+        for (String component : SUPPORTED_PREFERENCE_KEYS) {
+            double contribution = averages.getOrDefault(component, 0.0) * componentWeights.getOrDefault(component, 0.0);
+            rawContributions.put(component, contribution);
+            total += contribution;
+        }
+
+        Map<String, Double> normalized = new LinkedHashMap<>();
+        double safeTotal = Math.max(0.0001, total);
+        for (String component : SUPPORTED_PREFERENCE_KEYS) {
+            normalized.put(component, roundComponent(rawContributions.getOrDefault(component, 0.0) / safeTotal));
+        }
+        return Map.copyOf(normalized);
+    }
+
+    private Map<String, Double> buildWeightedLifts(Map<String, Double> componentLifts, Map<String, Double> componentWeights) {
+        if (componentLifts == null || componentLifts.isEmpty()) {
+            return Map.of();
+        }
+
+        Map<String, Double> weightedLifts = new LinkedHashMap<>();
+        for (String component : SUPPORTED_PREFERENCE_KEYS) {
+            double positiveLift = Math.max(0.0, componentLifts.getOrDefault(component, 0.0));
+            weightedLifts.put(component, roundComponent(positiveLift * componentWeights.getOrDefault(component, 0.0)));
+        }
+        return Map.copyOf(weightedLifts);
+    }
+
+    private String buildRouteExplanationSummary(
+        List<String> leadingComponents,
+        Map<String, Double> componentLifts,
+        Map<String, Double> weightedContributions,
+        boolean liftBased
+    ) {
         if (leadingComponents == null || leadingComponents.isEmpty()) {
             return "Scored from nearby scenic tiles along this route.";
         }
 
         String first = componentLabel(leadingComponents.getFirst());
         if (leadingComponents.size() == 1) {
-            return first + " is the strongest signal on this option.";
+            return liftBased
+                ? first + " is the strongest above-area signal on this option (" + formatLift(componentLifts.get(leadingComponents.getFirst())) + ")."
+                : first + " carries the strongest weighted influence on this option (" + formatContribution(weightedContributions.get(leadingComponents.getFirst())) + ").";
         }
 
         String second = componentLabel(leadingComponents.get(1));
-        return first + " and " + second + " are the strongest signals on this option.";
+        if (liftBased) {
+            return first + " (" + formatLift(componentLifts.get(leadingComponents.getFirst())) + ") and "
+                + second + " (" + formatLift(componentLifts.get(leadingComponents.get(1))) + ") are strongest above the local area baseline.";
+        }
+        return first + " (" + formatContribution(weightedContributions.get(leadingComponents.getFirst())) + ") and "
+            + second + " (" + formatContribution(weightedContributions.get(leadingComponents.get(1))) + ") carry the most weighted influence on this option.";
+    }
+
+    private String formatLift(Double lift) {
+        double points = (lift == null ? 0.0 : lift) * 100.0;
+        return String.format(Locale.ROOT, "%+.0f pts vs area", points);
+    }
+
+    private String formatContribution(Double contribution) {
+        double percent = (contribution == null ? 0.0 : contribution) * 100.0;
+        return String.format(Locale.ROOT, "%.0f%% contribution", percent);
     }
 
     private String componentLabel(String component) {
@@ -920,6 +1056,14 @@ public class RouteService {
         return clamp01(legacyFallback);
     }
 
+    private double roundComponent(double value) {
+        return Math.round(clamp01(value) * 10_000.0) / 10_000.0;
+    }
+
+    private double roundSignedComponent(double value) {
+        return Math.round(clamp(value, -1.0, 1.0) * 10_000.0) / 10_000.0;
+    }
+
     private double clamp(double value, double min, double max) {
         return Math.max(min, Math.min(max, value));
     }
@@ -956,6 +1100,10 @@ public class RouteService {
             values.put("curves", roundComponent(curves / safeCount));
             values.put("poi", roundComponent(poi / safeCount));
             return Map.copyOf(values);
+        }
+
+        private int count() {
+            return count;
         }
 
         private double roundComponent(double value) {

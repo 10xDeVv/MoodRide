@@ -291,6 +291,15 @@ export function RoutePlanner() {
   const formatComponentPercent = (value: number | null | undefined) =>
     typeof value === "number" && Number.isFinite(value) ? `${Math.round(value * 100)}%` : "0%";
 
+  const formatComponentLift = (value: number | null | undefined) => {
+    if (typeof value !== "number" || !Number.isFinite(value)) {
+      return "baseline n/a";
+    }
+    const points = Math.round(value * 100);
+    const prefix = points > 0 ? "+" : "";
+    return `${prefix}${points} pts vs area`;
+  };
+
   const getPrimaryRouteId = (status: RouteJobStatusResponse): string | null => {
     if (status.routeId) {
       return status.routeId;
@@ -882,19 +891,31 @@ export function RoutePlanner() {
                   <div className="route-explanation">
                     <div className="route-explanation-header">
                       <p className="detail-metric-label">Why this option</p>
-                      <span className="small">{activeExplanation.sampleTileCount} scenic tiles sampled</span>
+                      <span className="small">
+                        {activeExplanation.sampleTileCount} route tiles · {activeExplanation.baselineTileCount} area tiles
+                      </span>
                     </div>
                     <p className="route-explanation-summary">{activeExplanation.summary}</p>
-                    <div className="component-bars" aria-label="Route component averages">
+                    <div className="component-bars" aria-label="Route weighted component contribution">
                       {COMPONENT_ORDER.map((component) => {
-                        const value = activeExplanation.componentAverages?.[component] ?? 0;
+                        const routeAverage = activeExplanation.componentAverages?.[component] ?? 0;
+                        const weightedContribution = activeExplanation.weightedContributions?.[component] ?? routeAverage;
+                        const lift = activeExplanation.componentLifts?.[component];
                         return (
                           <div className="component-row" key={component}>
-                            <span>{formatComponent(component)}</span>
+                            <span className="component-label">
+                              {formatComponent(component)}
+                              <small>
+                                avg {formatComponentPercent(routeAverage)} · {formatComponentLift(lift)}
+                              </small>
+                            </span>
                             <div className="component-track" aria-hidden="true">
-                              <span className="component-fill" style={{ width: `${Math.max(0, Math.min(100, value * 100))}%` }} />
+                              <span
+                                className="component-fill"
+                                style={{ width: `${Math.max(0, Math.min(100, weightedContribution * 100))}%` }}
+                              />
                             </div>
-                            <strong>{formatComponentPercent(value)}</strong>
+                            <strong>{formatComponentPercent(weightedContribution)}</strong>
                           </div>
                         );
                       })}

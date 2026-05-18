@@ -35,5 +35,26 @@ public interface ScenicScoreTileRepository extends JpaRepository<ScenicScoreTile
     @Query(value = "SELECT * FROM scenic_score_tiles ORDER BY scenic_score DESC LIMIT :limit", nativeQuery = true)
     List<ScenicScoreTile> findTopByScenicScore(@Param("limit") int limit);
 
+    @Query(
+        value = """
+            SELECT *
+            FROM scenic_score_tiles
+            WHERE ST_DWithin(
+                geometry::geography,
+                ST_SetSRID(ST_MakePoint(:longitude, :latitude), 4326)::geography,
+                :radiusMeters
+            )
+            ORDER BY geometry <-> ST_SetSRID(ST_MakePoint(:longitude, :latitude), 4326)
+            LIMIT :limit
+            """,
+        nativeQuery = true
+    )
+    List<ScenicScoreTile> findScenicTilesNearPoint(
+        @Param("latitude") double latitude,
+        @Param("longitude") double longitude,
+        @Param("radiusMeters") double radiusMeters,
+        @Param("limit") int limit
+    );
+
     List<ScenicScoreTile> findByH3IndexIn(Collection<String> h3Indexes);
 }

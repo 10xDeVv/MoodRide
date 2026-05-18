@@ -83,11 +83,18 @@ Interpretation: `2.8` keeps national coverage, makes grasslands correctly count 
 The route API now returns route-option explanations with:
 
 - `componentAverages`: route-sampled averages for `water`, `greenery`, `elevation`, `solitude`, `curves`, and `poi`
-- `leadingComponents`: the strongest three route-selection signals
+- `baselineAverages`: local-area averages from nearby scenic tiles around the route origin
+- `componentLifts`: route average minus local baseline, so explanations can say a route is greener or more mountainous than its nearby area
+- `componentWeights`: the effective weights produced from the selected vibes and `preferenceVector`
+- `weightedContributions`: normalized component influence after applying the user/vibe weights
+- `leadingComponents`: the strongest three explanation signals, ranked by positive weighted lift when available and otherwise by weighted contribution
 - `summary`: a user-facing explanation string
 - `sampleTileCount`: how many scenic tiles were sampled along the route geometry
+- `baselineTileCount`: how many nearby scenic tiles were used for the local baseline
 
-The frontend displays this under "Why this option" so QA and users can see whether a route is being selected for water, greenery, elevation, solitude, curves, or stops.
+The frontend displays this under "Why this option" so QA and users can see whether a route is being selected for water, greenery, elevation, solitude, curves, or stops. The visible bar uses weighted contribution, while the secondary text shows raw route average plus lift versus the local area. This avoids the earlier false signal where high raw water averages dominated every explanation even when water was common across the whole region.
+
+Current Banff/Rockies QA note: route-option scenic spread is still low there. That is not primarily an explanation-data issue; the same candidate loop family scores similarly across vibe profiles in an already-scenic mountain area. The next ranking-side improvement should diversify candidate generation or apply stronger profile-specific contrast so `most_scenic`, `balanced`, and `shorter` differ more visibly in universally scenic regions.
 
 ## Route QA
 
