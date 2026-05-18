@@ -9,6 +9,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
@@ -29,11 +30,14 @@ import com.moodride.datamodels.RouteJob;
 import com.moodride.datamodels.RouteMode;
 import com.moodride.datamodels.RouteWaypoint;
 import com.moodride.datamodels.RouteWeightCalibration;
+import com.moodride.datamodels.ScenicScoreTile;
 import com.moodride.eventmodels.DriveCompletedEvent;
 import com.moodride.eventmodels.RouteJobEvent;
 import com.moodride.eventmodels.RouteRatedEvent;
+import com.moodride.geo.H3Utils;
 import com.moodride.routeapi.dto.RouteDetailResponse;
 import com.moodride.routeapi.dto.RouteJobStatusResponse;
+import com.moodride.routeapi.dto.RouteOptionExplanationResponse;
 import com.moodride.routeapi.dto.RouteOptionResponse;
 import com.moodride.routeapi.dto.RouteRatingRequest;
 import com.moodride.routeapi.dto.RouteRatingResponse;
@@ -44,6 +48,7 @@ import com.moodride.routeapi.exception.RouteNotFoundException;
 import com.moodride.routeapi.repository.RouteJobRepository;
 import com.moodride.routeapi.repository.RouteRepository;
 import com.moodride.routeapi.repository.RouteWeightCalibrationRepository;
+import com.moodride.routeapi.repository.ScenicScoreTileRepository;
 
 @Service
 @Transactional
@@ -89,6 +94,7 @@ public class RouteService {
     private static final double CALIBRATION_LEARNING_RATE = 0.04;
     private static final double CALIBRATION_MIN_MULTIPLIER = 0.70;
     private static final double CALIBRATION_MAX_MULTIPLIER = 1.30;
+    private static final int ROUTE_EXPLANATION_SAMPLE_LIMIT = 160;
 
     private static final Map<String, PreferenceWeights> VIBE_DEFAULTS = Map.of(
         "coastal", new PreferenceWeights(0.90, 0.70, 0.30, 0.60, 0.45, 0.20),
@@ -102,17 +108,20 @@ public class RouteService {
     private final RouteJobRepository jobRepository;
     private final RouteRepository routeRepository;
     private final RouteWeightCalibrationRepository calibrationRepository;
+    private final ScenicScoreTileRepository scenicScoreTileRepository;
     private final KafkaTemplate<String, String> kafkaTemplate;
     private final ObjectMapper objectMapper;
     
     public RouteService(RouteJobRepository jobRepository,
                         RouteRepository routeRepository,
                         RouteWeightCalibrationRepository calibrationRepository,
+                        ScenicScoreTileRepository scenicScoreTileRepository,
                         KafkaTemplate<String, String> kafkaTemplate,
                         ObjectMapper objectMapper) {
         this.jobRepository = jobRepository;
         this.routeRepository = routeRepository;
         this.calibrationRepository = calibrationRepository;
+        this.scenicScoreTileRepository = scenicScoreTileRepository;
         this.kafkaTemplate = kafkaTemplate;
         this.objectMapper = objectMapper.copy().findAndRegisterModules();
     }
@@ -503,11 +512,91 @@ public class RouteService {
                 "/routes/route/" + route.getId(),
                 route.getScenicScore() * 100.0,
                 route.getTotalDistanceKm(),
-                route.getEstimatedDurationMinutes()
+                route.getEstimatedDurationMinutes(),
+                buildRouteOptionExplanation(route)
             ));
         }
 
         return List.copyOf(options);
+    }
+
+    private RouteOptionExplanationResponse buildRouteOptionExplanation(Route route) {
+        if (route == null || route.getGeometry() == null || route.getGeometry().isEmpty()) {
+            return null;
+        }
+
+        Set<String> h3Indexes = sampleRouteH3Indexes(route);
+        if (h3Indexes.isEmpty()) {
+            return null;
+        }
+
+        List<ScenicScoreTile> tiles = scenicScoreTileRepository.findByH3IndexIn(h3Indexes);
+        if (tiles == null || tiles.isEmpty()) {
+            return null;
+        }
+
+        ComponentAccumulator accumulator = new ComponentAccumulator();
+        for (ScenicScoreTile tile : tiles) {
+            accumulator.add(tile);
+        }
+
+        Map<String, Double> averages = accumulator.averages();
+        List<String> leadingComponents = averages.entrySet().stream()
+            .sorted(Map.Entry.<String, Double>comparingByValue().reversed())
+            .limit(3)
+            .map(Map.Entry::getKey)
+            .toList();
+
+        return new RouteOptionExplanationResponse(
+            averages,
+            leadingComponents,
+            buildRouteExplanationSummary(leadingComponents),
+            tiles.size()
+        );
+    }
+
+    private Set<String> sampleRouteH3Indexes(Route route) {
+        Coordinate[] coordinates = route.getGeometry().getCoordinates();
+        if (coordinates == null || coordinates.length == 0) {
+            return Set.of();
+        }
+
+        Set<String> h3Indexes = new LinkedHashSet<>();
+        int step = Math.max(1, (int) Math.ceil((double) coordinates.length / ROUTE_EXPLANATION_SAMPLE_LIMIT));
+        for (int i = 0; i < coordinates.length; i += step) {
+            Coordinate coordinate = coordinates[i];
+            h3Indexes.add(H3Utils.getH3Index(coordinate.getY(), coordinate.getX(), H3Utils.DEFAULT_RESOLUTION));
+        }
+
+        Coordinate last = coordinates[coordinates.length - 1];
+        h3Indexes.add(H3Utils.getH3Index(last.getY(), last.getX(), H3Utils.DEFAULT_RESOLUTION));
+        return h3Indexes;
+    }
+
+    private String buildRouteExplanationSummary(List<String> leadingComponents) {
+        if (leadingComponents == null || leadingComponents.isEmpty()) {
+            return "Scored from nearby scenic tiles along this route.";
+        }
+
+        String first = componentLabel(leadingComponents.getFirst());
+        if (leadingComponents.size() == 1) {
+            return first + " is the strongest signal on this option.";
+        }
+
+        String second = componentLabel(leadingComponents.get(1));
+        return first + " and " + second + " are the strongest signals on this option.";
+    }
+
+    private String componentLabel(String component) {
+        return switch (component) {
+            case "water" -> "Water";
+            case "greenery" -> "Greenery";
+            case "elevation" -> "Elevation";
+            case "solitude" -> "Solitude";
+            case "curves" -> "Curves";
+            case "poi" -> "Stops";
+            default -> component;
+        };
     }
 
     private List<Route> orderByProfileWithFallback(List<Route> routes) {
@@ -817,8 +906,61 @@ public class RouteService {
         return null;
     }
 
+    private double normalizeElevation(double value) {
+        if (value <= 1.0) {
+            return clamp01(value);
+        }
+        return clamp01(value / 40.0);
+    }
+
+    private double resolveComponentScore(double component, double legacyFallback) {
+        if (component > 0.0) {
+            return clamp01(component);
+        }
+        return clamp01(legacyFallback);
+    }
+
     private double clamp(double value, double min, double max) {
         return Math.max(min, Math.min(max, value));
+    }
+
+    private final class ComponentAccumulator {
+        private double water;
+        private double greenery;
+        private double elevation;
+        private double solitude;
+        private double curves;
+        private double poi;
+        private int count;
+
+        private void add(ScenicScoreTile tile) {
+            water += resolveComponentScore(tile.getWaterScore(), tile.getWaterProximity());
+            greenery += resolveComponentScore(tile.getGreenScore(), tile.getNaturalLandUse());
+            elevation += normalizeElevation(resolveComponentScore(tile.getElevationScore(), tile.getElevationVariance()));
+            solitude += resolveComponentScore(
+                tile.getSolitudeScore(),
+                (1.0 - clamp01(tile.getRoadDensity()) + clamp01(tile.getTrafficSignalScore())) / 2.0
+            );
+            curves += resolveComponentScore(tile.getCurveScore(), tile.getVisualComplexity());
+            poi += resolveComponentScore(tile.getPoiScore(), tile.getPoiDensity());
+            count++;
+        }
+
+        private Map<String, Double> averages() {
+            double safeCount = Math.max(1.0, count);
+            Map<String, Double> values = new LinkedHashMap<>();
+            values.put("water", roundComponent(water / safeCount));
+            values.put("greenery", roundComponent(greenery / safeCount));
+            values.put("elevation", roundComponent(elevation / safeCount));
+            values.put("solitude", roundComponent(solitude / safeCount));
+            values.put("curves", roundComponent(curves / safeCount));
+            values.put("poi", roundComponent(poi / safeCount));
+            return Map.copyOf(values);
+        }
+
+        private double roundComponent(double value) {
+            return Math.round(clamp01(value) * 10_000.0) / 10_000.0;
+        }
     }
 
     private record PreferenceWeights(double water,

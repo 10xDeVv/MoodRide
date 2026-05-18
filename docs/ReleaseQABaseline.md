@@ -38,11 +38,14 @@ Outputs:
 - `artifacts/release-qa/release-qa-<timestamp>.json`
 - `artifacts/release-qa/release-qa-<timestamp>.md`
 
+The JSON includes full route options. The Markdown summary includes route-option count, explanation count, and score spread per scenario.
+
 ## Pass Criteria
 
 - All scenarios complete (`status=COMPLETED`)
 - No `FAILED` or `TIMEOUT` jobs
 - Route options returned for each completed scenario
+- Each route option includes an `explanation` object with component averages and leading components
 - Score spread is non-zero for most completed scenarios
 - Regional differences are plausible: Rockies/coastal/Atlantic should generally score higher than flat prairie and dense urban areas
 
@@ -51,3 +54,4 @@ Outputs:
 - For PowerShell web requests, use this script or `curl.exe` to avoid browser-parsing prompts from `curl` alias behavior.
 - Keep each output artifact as a baseline record for regressions between releases.
 - The route request uses the current numeric `preferenceVector` schema (`water`, `greenery`, `elevation`, `solitude`, `curves`, `poi`).
+- Current production scenic data is `2.8-urban-aware-elevation-calibration`.

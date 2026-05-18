@@ -1,6 +1,6 @@
 # MoodRide Data Quality Upgrade
 
-Status: completed and deployed to production on 2026-05-18.
+Status: completed and deployed to production on 2026-05-18. Current production scenic data is calibrated through `2.8-urban-aware-elevation-calibration`.
 
 This document records the completed core data upgrade for scenic routing. The original plan was to replace weak OSM-only scenic components with real raster-backed data for land cover and elevation. That work is now complete for the current national Canada operating dataset.
 
@@ -12,9 +12,9 @@ This document records the completed core data upgrade for scenic routing. The or
 | Land cover raster | Complete | `landcover_raster`, SRID `3979`, spatial index present |
 | Copernicus DEM raster | Complete | `elevation_raster`, SRID `4326`, `310,900` raster tiles |
 | DEM coverage | Complete | lon `-141` to `-51`, lat `41` to `84` |
-| Scenic recompute | Complete | `211,510` tiles at `2.7-raster-data-quality-upgrade-national-batched` |
+| Scenic recompute | Complete | `211,510` tiles at `2.8-urban-aware-elevation-calibration` |
 | Scenic release deploy | Complete | GitHub Actions deploy succeeded |
-| Production verification | Complete | Prod DB has `211,510` rows at `2.7`; API smoke tests passed |
+| Production verification | Complete | Prod DB has `211,510` rows at `2.8`; API smoke tests passed |
 
 ## What Improved
 
@@ -27,7 +27,42 @@ This document records the completed core data upgrade for scenic routing. The or
 
 Existing `water_score`, `curve_score`, and `poi_score` were retained.
 
-## Final 2.7 Metrics
+## Current 2.8 Metrics
+
+`2.8` is the current production calibration release. It keeps the completed national DEM coverage from `2.7`, corrects the NALCMS land-cover class legend, recomputes `green_score` and `solitude_score`, and downweights DEM surface-model elevation where land cover is urban/built-up.
+
+```text
+scoring_version: 2.8-urban-aware-elevation-calibration
+tile_count: 211510
+green_non_zero_tiles: 189796
+solitude_non_zero_tiles: 211510
+elevation_non_zero_tiles: 122173
+avg_green_score: 0.486400
+stddev_green_score: 0.294640
+avg_elevation_score: 0.497642
+stddev_elevation_score: 0.457073
+avg_scenic_score: 0.508183
+stddev_scenic_score: 0.199907
+min_scenic_score: 0.041511627906976746
+max_scenic_score: 0.9218142190162193
+```
+
+Production DB verification:
+
+```sql
+SELECT scoring_version, COUNT(*)
+FROM scenic_score_tiles
+GROUP BY scoring_version
+ORDER BY COUNT(*) DESC;
+```
+
+Expected:
+
+```text
+2.8-urban-aware-elevation-calibration | 211510
+```
+
+## Historical 2.7 Metrics
 
 Local recompute and production deploy completed with:
 
@@ -56,7 +91,7 @@ GROUP BY scoring_version
 ORDER BY COUNT(*) DESC;
 ```
 
-Expected:
+Historical expected result:
 
 ```text
 2.7-raster-data-quality-upgrade-national-batched | 211510
@@ -108,7 +143,7 @@ max_lat: 84.00013888888888
 
 ## Scenic Recompute Runbook
 
-Run the national `2.7` recompute:
+Run the national `2.7` recompute after DEM import:
 
 ```powershell
 ./scripts/deploy/run_nationwide_scenic_recompute.ps1 `
@@ -140,13 +175,37 @@ gh workflow run "Deploy Scenic Release" --repo 10xDeVv/MoodRide `
 gh run watch --repo 10xDeVv/MoodRide
 ```
 
+Run the current `2.8` calibration release after `2.7`:
+
+```powershell
+./scripts/deploy/run_nationwide_scenic_recompute.ps1 `
+  -SqlScriptPath "scripts/setup/data-quality-calibration-v28.sql" `
+  -ChunkSize 5000 `
+  -PostgresContainerName "moodride-postgres" `
+  -ExpectedScoringVersion "2.8-urban-aware-elevation-calibration"
+```
+
+Publish and deploy:
+
+```powershell
+./scripts/deploy/publish_scenic_release.ps1 `
+  -ScoringVersion "2.8-urban-aware-elevation-calibration" `
+  -ReleaseTag "scenic-2.8-urban-aware-elevation-calibration-20260518-1406" `
+  -Repo "10xDeVv/MoodRide"
+
+gh workflow run "Deploy Scenic Release" --repo 10xDeVv/MoodRide `
+  -f release_tag=scenic-2.8-urban-aware-elevation-calibration-20260518-1406 `
+  -f scoring_version=2.8-urban-aware-elevation-calibration
+```
+
 ## Implementation Notes
 
 - `scripts/setup/import-raster-to-postgis.ps1` skips per-tile `-I`, `-C`, and `-M` in append mode. This prevents duplicate spatial indexes, stale extent/alignment constraints, and per-tile vacuum/analyze overhead.
 - `scripts/setup/data-quality-upgrade-batched-v27.sql` uses raster convex-hull indexes and materialized batch geometries so raster clipping uses indexed prefiltering.
+- `scripts/setup/data-quality-calibration-v28.sql` fixes the NALCMS class mapping: class `10` is grassland, class `17` is urban/built-up, and class `18` is water.
 - Land cover remains in SRID `3979`; scenic/elevation geometries are SRID `4326`. The `2.7` SQL transforms scenic tile geometry once per batch for land cover.
 - `elevation_non_zero_tiles` is lower than total tile count because many tiles are flat, water-dominated, outside meaningful terrain relief, or have no useful DEM variance.
 
 ## Remaining Future Work
 
-The core data upgrade is complete. Future quality work should use `docs/AdditionalDataQualityUpgrade.md` and should be treated as separate enrichment releases, not blockers for the completed 2.7 upgrade.
+The core data upgrade is complete. Future quality work should use `docs/AdditionalDataQualityUpgrade.md` and should be treated as separate enrichment releases, not blockers for the completed `2.8` calibrated upgrade.

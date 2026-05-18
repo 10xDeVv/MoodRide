@@ -29,6 +29,14 @@ export interface RouteOptionResponse {
   scenicScore: number;
   totalDistanceKm: number;
   estimatedDurationMinutes: number;
+  explanation: RouteOptionExplanationResponse | null;
+}
+
+export interface RouteOptionExplanationResponse {
+  componentAverages: Record<string, number>;
+  leadingComponents: string[];
+  summary: string;
+  sampleTileCount: number;
 }
 
 export interface RouteJobStatusResponse {

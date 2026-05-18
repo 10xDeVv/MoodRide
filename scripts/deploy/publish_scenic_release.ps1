@@ -227,8 +227,16 @@ WHERE scoring_version = '$escapedVersion';
         $repoArgs = @("--repo", $Repo)
     }
 
-    & gh release view $ReleaseTag @repoArgs *> $null
-    if ($LASTEXITCODE -ne 0) {
+    $previousErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        & gh release view $ReleaseTag @repoArgs *> $null
+        $releaseExists = $LASTEXITCODE -eq 0
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+
+    if (-not $releaseExists) {
         & gh release create $ReleaseTag --title "Scenic release $ReleaseTag" --notes "Scenic tile release for scoring_version '$ScoringVersion'." @repoArgs
         if ($LASTEXITCODE -ne 0) {
             throw "Failed to create release $ReleaseTag."

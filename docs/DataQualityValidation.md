@@ -2,7 +2,19 @@
 
 Last updated: 2026-05-18
 
-This document explains what changed between the deployed `2.6` and `2.7` scenic data releases and what still needs validation.
+This document explains what changed between the deployed `2.6`, `2.7`, and `2.8` scenic data releases and what still needs validation.
+
+## Current Production Release
+
+Production is currently on:
+
+```text
+2.8-urban-aware-elevation-calibration | 211510
+```
+
+`2.8` is a calibration release on top of the completed national DEM work from `2.7`. It corrects the NALCMS land-cover class mapping, recomputes greenery and solitude with the corrected urban class, then downweights DEM elevation variance in urban/built-up tiles.
+
+Reference: the Canada land-cover raster is part of the [NALCMS 30 m product described by Natural Resources Canada](https://atlas.gc.ca/land-cover/Atlas_LandCover_EN.html). The [NALCMS class table](https://developers.google.com/earth-engine/datasets/catalog/USGS_NLCD_RELEASES_2020_REL_NALCMS) identifies class `10` as grassland and class `17` as urban/built-up.
 
 ## 2.6 to 2.7 Summary
 
@@ -45,18 +57,37 @@ This confirms the expected broad behavior:
 - Prairie tiles remain low elevation, which is correct.
 - Ontario/Atlantic tiles changed substantially because those regions gained DEM coverage in `2.7`.
 
-## Calibration Finding
+## 2.7 to 2.8 Calibration
 
-The upgrade is real, but it is not automatically the final scoring calibration.
+`2.7` proved the national DEM upgrade worked, but validation exposed two calibration issues:
 
-Some flat or urban eastern areas now show high `elevation_score` values. This can happen because Copernicus GLO-30 is a digital surface model, so buildings, tree canopy, bridges, and other surface features can add local height variance. The current score also normalizes elevation standard deviation with `/100.0`, which may be too aggressive for some H3 tile sizes and regions.
+- Some flat or urban eastern areas showed high `elevation_score` values. Copernicus GLO-30 is a digital surface model, so buildings, tree canopy, bridges, and other surface features can add local height variance.
+- The Canada land-cover class table was too generic. It treated NALCMS class `10` as urban, but class `10` is grassland; NALCMS class `17` is urban/built-up.
 
-Recommended `2.8` calibration:
+`2.8` fixes those issues.
 
-- Suppress or downweight `elevation_score` where land cover is heavily urban/developed.
-- Consider blending elevation with land-cover context, for example reduce elevation contribution when `green_score` is low and urban proportion is high.
-- Add route-option explanations showing component averages (`water`, `green`, `elevation`, `solitude`, `curves`, `poi`) so users and QA can see why a route was chosen.
-- Run the release QA baseline after calibration and compare regional score distributions again.
+| Metric | 2.7 | 2.8 | Change |
+|---|---:|---:|---:|
+| Scenic tiles | 211,510 | 211,510 | no coverage change |
+| Average scenic score | 0.491143 | 0.508183 | +0.017040 |
+| Scenic score stddev | 0.201429 | 0.199907 | -0.001522 |
+| Green non-zero tiles | 187,904 | 189,796 | +1,892 |
+| Average green score | 0.330282 | 0.486400 | +0.156118 |
+| Elevation non-zero tiles | 122,173 | 122,173 | no coverage change |
+| Average elevation score | 0.550105 | 0.497642 | -0.052463 |
+
+Interpretation: `2.8` keeps national coverage, makes grasslands correctly count as natural/green instead of urban, and reduces urban DSM elevation overboost without removing real terrain signal from mountainous/non-urban areas.
+
+## Route Explanation Validation
+
+The route API now returns route-option explanations with:
+
+- `componentAverages`: route-sampled averages for `water`, `greenery`, `elevation`, `solitude`, `curves`, and `poi`
+- `leadingComponents`: the strongest three route-selection signals
+- `summary`: a user-facing explanation string
+- `sampleTileCount`: how many scenic tiles were sampled along the route geometry
+
+The frontend displays this under "Why this option" so QA and users can see whether a route is being selected for water, greenery, elevation, solitude, curves, or stops.
 
 ## Route QA
 

@@ -8,6 +8,7 @@ public record RouteOptionResponse(
         String routeUrl,
         double scenicScore,
         double totalDistanceKm,
-        int estimatedDurationMinutes
+        int estimatedDurationMinutes,
+        RouteOptionExplanationResponse explanation
 ) {
 }

@@ -507,6 +507,14 @@ button:disabled {
   font-size: 0.96rem;
 }
 
+.route-option-reasons {
+  display: block;
+  color: var(--brand-dark);
+  font-size: 0.76rem;
+  font-weight: 900;
+  overflow-wrap: anywhere;
+}
+
 .route-option.active {
   border-color: var(--brand);
   background: #edf7f0;
@@ -553,9 +561,76 @@ button:disabled {
   font-weight: 900;
 }
 
+.route-explanation {
+  margin-top: 0.85rem;
+  border-top: 1px solid var(--border);
+  padding-top: 0.85rem;
+  display: grid;
+  gap: 0.65rem;
+}
+
+.route-explanation-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.route-explanation-summary {
+  color: var(--ink-700);
+  font-size: 0.92rem;
+  line-height: 1.45;
+}
+
+.component-bars {
+  display: grid;
+  gap: 0.48rem;
+}
+
+.component-row {
+  display: grid;
+  grid-template-columns: minmax(70px, 0.32fr) minmax(120px, 1fr) 2.8rem;
+  align-items: center;
+  gap: 0.55rem;
+  color: var(--ink-700);
+  font-size: 0.82rem;
+  font-weight: 800;
+}
+
+.component-track {
+  position: relative;
+  height: 0.52rem;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #e4ece5;
+}
+
+.component-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--brand), var(--blue));
+}
+
+.component-row strong {
+  color: var(--ink-900);
+  text-align: right;
+}
+
 @media (max-width: 900px) {
   .detail-metrics {
     grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 520px) {
+  .route-explanation-header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .component-row {
+    grid-template-columns: minmax(76px, 0.42fr) minmax(90px, 1fr) 2.6rem;
   }
 }
 

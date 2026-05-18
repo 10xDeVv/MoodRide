@@ -1,6 +1,7 @@
 package com.moodride.routeapi.repository;
 
 import com.moodride.datamodels.ScenicScoreTile;
+import java.util.Collection;
 import java.util.List;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Query;
@@ -33,4 +34,6 @@ public interface ScenicScoreTileRepository extends JpaRepository<ScenicScoreTile
 
     @Query(value = "SELECT * FROM scenic_score_tiles ORDER BY scenic_score DESC LIMIT :limit", nativeQuery = true)
     List<ScenicScoreTile> findTopByScenicScore(@Param("limit") int limit);
+
+    List<ScenicScoreTile> findByH3IndexIn(Collection<String> h3Indexes);
 }

@@ -45,6 +45,15 @@ const VIBE_PREFERENCE_DEFAULTS: Record<string, Record<string, number>> = {
   forest: { water: 0.3, greenery: 0.9, elevation: 0.45, solitude: 0.8, curves: 0.45, poi: 0.2 },
   open_roads: { water: 0.25, greenery: 0.45, elevation: 0.35, solitude: 0.4, curves: 0.9, poi: 0.25 }
 };
+const COMPONENT_DISPLAY_NAMES: Record<string, string> = {
+  water: "Water",
+  greenery: "Greenery",
+  elevation: "Elevation",
+  solitude: "Solitude",
+  curves: "Curves",
+  poi: "Stops"
+};
+const COMPONENT_ORDER = ["water", "greenery", "elevation", "solitude", "curves", "poi"];
 const IOS_DEVICE_REGEX = /iPad|iPhone|iPod/;
 const GOOGLE_TRAVEL_MODES: Record<RouteMode, string> = {
   drive: "driving",
@@ -276,6 +285,11 @@ export function RoutePlanner() {
       .map((segment) => segment[0].toUpperCase() + segment.slice(1))
       .join(" ");
   };
+
+  const formatComponent = (component: string) => COMPONENT_DISPLAY_NAMES[component] ?? formatVibe(component);
+
+  const formatComponentPercent = (value: number | null | undefined) =>
+    typeof value === "number" && Number.isFinite(value) ? `${Math.round(value * 100)}%` : "0%";
 
   const getPrimaryRouteId = (status: RouteJobStatusResponse): string | null => {
     if (status.routeId) {
@@ -609,7 +623,9 @@ export function RoutePlanner() {
     }
   };
 
-  const activeRouteProfile = routeOptions.find((option) => option.routeId === route?.routeId)?.profile;
+  const activeRouteOption = routeOptions.find((option) => option.routeId === route?.routeId);
+  const activeRouteProfile = activeRouteOption?.profile;
+  const activeExplanation = activeRouteOption?.explanation;
   const activeProfileLabel = activeRouteProfile ? formatRouteProfile(activeRouteProfile) : "Route";
   const routeModeLabel = route?.routeMode === "walk" ? "Walk" : route?.routeMode === "bike" ? "Ride" : "Drive";
   const submitLabel = phase === "submitting" || phase === "tracking" ? "Generating Route..." : `Generate ${activeMode.label}`;
@@ -837,6 +853,11 @@ export function RoutePlanner() {
                               {formatNumber(option.totalDistanceKm, 1)} km · {option.estimatedDurationMinutes} min ·
                               score {formatNumber(option.scenicScore, 2)}
                             </span>
+                            {option.explanation?.leadingComponents?.length ? (
+                              <span className="route-option-reasons">
+                                {option.explanation.leadingComponents.slice(0, 3).map(formatComponent).join(" · ")}
+                              </span>
+                            ) : null}
                           </button>
                         );
                       })}
@@ -857,6 +878,29 @@ export function RoutePlanner() {
                     <p className="detail-metric-value">{route.estimatedDurationMinutes} min</p>
                   </div>
                 </div>
+                {activeExplanation && (
+                  <div className="route-explanation">
+                    <div className="route-explanation-header">
+                      <p className="detail-metric-label">Why this option</p>
+                      <span className="small">{activeExplanation.sampleTileCount} scenic tiles sampled</span>
+                    </div>
+                    <p className="route-explanation-summary">{activeExplanation.summary}</p>
+                    <div className="component-bars" aria-label="Route component averages">
+                      {COMPONENT_ORDER.map((component) => {
+                        const value = activeExplanation.componentAverages?.[component] ?? 0;
+                        return (
+                          <div className="component-row" key={component}>
+                            <span>{formatComponent(component)}</span>
+                            <div className="component-track" aria-hidden="true">
+                              <span className="component-fill" style={{ width: `${Math.max(0, Math.min(100, value * 100))}%` }} />
+                            </div>
+                            <strong>{formatComponentPercent(value)}</strong>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
                 {showDebug && <p className="small">Algorithm: {route.algorithmVersion}</p>}
               </div>
             )}

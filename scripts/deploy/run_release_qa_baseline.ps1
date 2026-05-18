@@ -221,6 +221,14 @@ foreach ($region in $regions) {
         } else {
             $null
         }
+        $optionExplanationCount = @($routeOptions | Where-Object {
+            $_.explanation -and $_.explanation.componentAverages -and $_.explanation.leadingComponents
+        }).Count
+        $leadingComponents = @($routeOptions | ForEach-Object {
+            if ($_.explanation -and $_.explanation.leadingComponents) {
+                ($_.explanation.leadingComponents -join "+")
+            }
+        } | Where-Object { $_ })
 
         $results += [ordered]@{
             regionId = $region.id
@@ -235,6 +243,8 @@ foreach ($region in $regions) {
             routeId = $routeId
             routeOptions = $routeOptions
             scoreSpread = $scoreSpread
+            optionExplanationCount = $optionExplanationCount
+            leadingComponents = $leadingComponents
             failureReason = if ($jobStatus -and $jobStatus.reason) { [string]$jobStatus.reason } else { $null }
             checkedAtUtc = (Get-Date).ToUniversalTime().ToString("o")
         }
@@ -268,13 +278,14 @@ $lines += "- Scenarios: $($results.Count)"
 $lines += "- Completed: $($completed.Count)"
 $lines += "- Non-completed: $($failed.Count)"
 $lines += ""
-$lines += "| Region | Vibes | Status | Job ID | Route Options | Score Spread |"
-$lines += "|---|---|---|---|---:|---:|"
+$lines += "| Region | Vibes | Status | Job ID | Route Options | Explanations | Score Spread |"
+$lines += "|---|---|---|---|---:|---:|---:|"
 foreach ($item in $results) {
     $vibesLabel = ($item.vibes -join ",")
     $optionCount = if ($item.routeOptions) { @($item.routeOptions).Count } else { 0 }
+    $explanationCount = if ($null -ne $item.optionExplanationCount) { [int]$item.optionExplanationCount } else { 0 }
     $spreadLabel = if ($null -ne $item.scoreSpread) { "{0:N4}" -f [double]$item.scoreSpread } else { "n/a" }
-    $lines += "| $($item.regionLabel) | $vibesLabel | $($item.status) | $($item.jobId) | $optionCount | $spreadLabel |"
+    $lines += "| $($item.regionLabel) | $vibesLabel | $($item.status) | $($item.jobId) | $optionCount | $explanationCount | $spreadLabel |"
 }
 $lines += ""
 

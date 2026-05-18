@@ -14,6 +14,7 @@ import com.moodride.routeapi.dto.RouteSubmissionResponse;
 import com.moodride.routeapi.repository.RouteJobRepository;
 import com.moodride.routeapi.repository.RouteRepository;
 import com.moodride.routeapi.repository.RouteWeightCalibrationRepository;
+import com.moodride.routeapi.repository.ScenicScoreTileRepository;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -53,6 +54,9 @@ class RouteServiceTest {
     @Mock
     private RouteWeightCalibrationRepository calibrationRepository;
 
+    @Mock
+    private ScenicScoreTileRepository scenicScoreTileRepository;
+
     private RouteService routeService;
 
     @BeforeEach
@@ -61,6 +65,7 @@ class RouteServiceTest {
             jobRepository,
             routeRepository,
             calibrationRepository,
+            scenicScoreTileRepository,
             kafkaTemplate,
             new ObjectMapper()
         );
@@ -74,6 +79,7 @@ class RouteServiceTest {
         });
         lenient().when(calibrationRepository.findByVibeIn(anyCollection())).thenReturn(List.of());
         lenient().when(calibrationRepository.saveAll(anyCollection())).thenAnswer(invocation -> invocation.getArgument(0));
+        lenient().when(scenicScoreTileRepository.findByH3IndexIn(anyCollection())).thenReturn(List.of());
     }
 
     @Test
