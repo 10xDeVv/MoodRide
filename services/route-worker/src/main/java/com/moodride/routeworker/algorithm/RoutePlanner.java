@@ -246,9 +246,9 @@ public class RoutePlanner {
     }
 
     private double mostScenicProfileScore(RouteCandidate candidate, int targetMinutes) {
-        return (candidate.getTotalScenicScore() * 0.72)
-            + (budgetUtilizationScore(candidate, targetMinutes) * 0.18)
-            + (budgetFitScore(candidate, targetMinutes) * 0.10);
+        return (candidate.getTotalScenicScore() * 0.92)
+            + (budgetFitScore(candidate, targetMinutes) * 0.05)
+            + (budgetUtilizationScore(candidate, targetMinutes) * 0.03);
     }
 
     private double balancedProfileScore(RouteCandidate candidate, int targetMinutes) {

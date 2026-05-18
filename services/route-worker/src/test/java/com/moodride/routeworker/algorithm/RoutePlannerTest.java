@@ -121,6 +121,11 @@ class RoutePlannerTest {
             .hasSizeGreaterThanOrEqualTo(2);
         assertThat(options.stream().map(RouteCandidate::getTotalScenicScore).collect(Collectors.toSet()))
             .hasSizeGreaterThan(1);
+        double maxScenicScore = options.stream()
+            .mapToDouble(RouteCandidate::getTotalScenicScore)
+            .max()
+            .orElse(0.0);
+        assertThat(options.getFirst().getTotalScenicScore()).isEqualTo(maxScenicScore);
     }
 
     @Test
