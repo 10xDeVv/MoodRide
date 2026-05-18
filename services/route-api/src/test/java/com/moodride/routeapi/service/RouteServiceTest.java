@@ -115,13 +115,13 @@ class RouteServiceTest {
     }
 
     @Test
-    void submitRouteNormalizesVibeAliases() {
+    void submitRouteNormalizesVibeAliases() throws Exception {
         RouteRequest request = new RouteRequest(
             UUID.randomUUID(),
             45.5152,
             -122.6784,
             90,
-            List.of("open roads"),
+            List.of("Date Night", "winding roads", "Photo-Worthy"),
             null,
             Map.of()
         );
@@ -130,7 +130,10 @@ class RouteServiceTest {
 
         ArgumentCaptor<RouteJob> saved = ArgumentCaptor.forClass(RouteJob.class);
         verify(jobRepository).save(saved.capture());
-        assertThat(saved.getValue().getVibe()).isEqualTo("open_roads");
+        assertThat(saved.getValue().getVibe()).isEqualTo("date_night");
+        List<String> storedVibes = new ObjectMapper().readValue(saved.getValue().getVibesJson(), new TypeReference<>() {
+        });
+        assertThat(storedVibes).containsExactly("date_night", "winding_roads", "photo_worthy");
     }
 
     @Test

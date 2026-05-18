@@ -378,6 +378,41 @@ button:disabled {
   margin-bottom: 0.95rem;
 }
 
+.tag-list.compact {
+  margin-bottom: 0;
+}
+
+.vibe-groups {
+  display: grid;
+  gap: 0.62rem;
+  margin-bottom: 0.95rem;
+}
+
+.vibe-group {
+  border: 1px solid rgba(119, 143, 125, 0.32);
+  border-radius: calc(var(--radius) * 0.9);
+  background: linear-gradient(135deg, rgba(248, 251, 246, 0.94), rgba(239, 246, 239, 0.78));
+  padding: 0.58rem;
+}
+
+.vibe-group-copy {
+  display: grid;
+  gap: 0.1rem;
+  margin-bottom: 0.42rem;
+}
+
+.vibe-group-copy span {
+  color: var(--ink-900);
+  font-size: 0.82rem;
+  font-weight: 900;
+}
+
+.vibe-group-copy small {
+  color: var(--ink-500);
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+
 .tag {
   border: 1px solid var(--border);
   background: #ffffff;

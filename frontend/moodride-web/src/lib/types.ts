@@ -1,4 +1,29 @@
-export type Vibe = "coastal" | "mountain" | "forest" | "countryside" | "riverside" | "open_roads";
+export type Vibe =
+  | "coastal"
+  | "mountain"
+  | "forest"
+  | "countryside"
+  | "riverside"
+  | "open_roads"
+  | "relaxing"
+  | "winding_roads"
+  | "smooth_cruise"
+  | "quiet"
+  | "hidden_gems"
+  | "minimal_traffic"
+  | "loop_variety"
+  | "scenic"
+  | "clear_my_head"
+  | "date_night"
+  | "sunday_cruise"
+  | "adventure"
+  | "photo_run"
+  | "photo_worthy"
+  | "nature_escape"
+  | "scenic_reset"
+  | "golden_hour"
+  | "sunset"
+  | "sunrise";
 export type RouteMode = "drive" | "walk" | "bike";
 
 export interface RouteRequest {

@@ -69,21 +69,17 @@ class RoutePlannerTest {
     }
 
     @Test
-    void generateRouteUsesSyntheticHybridWhenTileRingHasNoCandidates() {
+    void generateRouteRejectsMissingScenicDataForRequestedVibe() {
         when(scenicScoreTileRepository.findByH3IndexIn(anyCollection())).thenReturn(List.of());
-        when(osrmTripClient.requestRoundTrip(anyList(), eq(RouteMode.DRIVE))).thenReturn(Optional.of(defaultTrip(25)));
 
-        RouteCandidate candidate = routePlanner.generateRoute(sampleJob(45));
-
-        assertThat(candidate.getAlgorithmVersion()).isEqualTo("hybrid_osrm_v1");
-        assertThat(candidate.getBeamCandidates()).isNull();
-        assertThat(candidate.getWaypoints()).hasSizeGreaterThan(1);
-        verify(osrmTripClient, atLeastOnce()).requestRoundTrip(anyList(), eq(RouteMode.DRIVE));
+        assertThatThrownBy(() -> routePlanner.generateRoute(sampleJob(45)))
+            .isInstanceOf(NoFeasibleRouteException.class)
+            .hasMessageContaining("No scenic data found near this start");
     }
 
     @Test
     void generateRouteRejectsOverBudgetHybridCandidatesWhenNoInBudgetOptionExists() {
-        when(scenicScoreTileRepository.findByH3IndexIn(anyCollection())).thenReturn(List.of());
+        when(scenicScoreTileRepository.findByH3IndexIn(anyCollection())).thenReturn(highScenicTilesAroundStart());
         when(osrmTripClient.requestRoundTrip(anyList(), eq(RouteMode.DRIVE))).thenReturn(Optional.of(defaultTrip(22)));
 
         assertThatThrownBy(() -> routePlanner.generateRoute(sampleJob(15)))
@@ -93,7 +89,7 @@ class RoutePlannerTest {
 
     @Test
     void generateRouteThrowsWhenNoHybridCandidateCanBeProduced() {
-        when(scenicScoreTileRepository.findByH3IndexIn(anyCollection())).thenReturn(List.of());
+        when(scenicScoreTileRepository.findByH3IndexIn(anyCollection())).thenReturn(highScenicTilesAroundStart());
         when(osrmTripClient.requestRoundTrip(anyList(), eq(RouteMode.DRIVE))).thenReturn(Optional.empty());
 
         assertThatThrownBy(() -> routePlanner.generateRoute(sampleJob(45)))
@@ -103,7 +99,7 @@ class RoutePlannerTest {
 
     @Test
     void generateRouteOptionsReturnsThreeDistinctProfilesWhenCandidatesExist() {
-        when(scenicScoreTileRepository.findByH3IndexIn(anyCollection())).thenReturn(List.of());
+        when(scenicScoreTileRepository.findByH3IndexIn(anyCollection())).thenReturn(highScenicTilesAroundStart());
         when(osrmTripClient.requestRoundTrip(anyList(), eq(RouteMode.DRIVE))).thenAnswer(invocation -> {
             @SuppressWarnings("unchecked")
             List<RoadNode> variant = invocation.getArgument(0);
@@ -129,6 +125,15 @@ class RoutePlannerTest {
     }
 
     @Test
+    void generateRouteRejectsWeakVibeAvailabilityWhenNearbyTilesDoNotFit() {
+        when(scenicScoreTileRepository.findByH3IndexIn(anyCollection())).thenReturn(lowWaterTilesAroundStart());
+
+        assertThatThrownBy(() -> routePlanner.generateRoute(sampleJob(45)))
+            .isInstanceOf(NoFeasibleRouteException.class)
+            .hasMessageContaining("No strong Coastal route found");
+    }
+
+    @Test
     void generateRouteFallsBackToDefaultH3ResolutionForScenicScoring() {
         when(scenicScoreTileRepository.findByH3IndexIn(anyCollection())).thenAnswer(invocation -> {
             @SuppressWarnings("unchecked")
@@ -139,8 +144,7 @@ class RoutePlannerTest {
                 return List.of();
             }
 
-            ScenicScoreTile tile = scenicTile(indexes.iterator().next(), 46.10, -64.77);
-            return List.of(tile);
+            return highScenicTilesAroundStart();
         });
         when(osrmTripClient.requestRoundTrip(anyList(), eq(RouteMode.DRIVE))).thenReturn(Optional.of(defaultTrip(25)));
 
@@ -156,6 +160,28 @@ class RoutePlannerTest {
         return job;
     }
 
+    private List<ScenicScoreTile> highScenicTilesAroundStart() {
+        return List.of(
+            scenicTile("test-1", 46.1100, -64.7800),
+            scenicTile("test-2", 46.1030, -64.7500),
+            scenicTile("test-3", 46.0800, -64.7420),
+            scenicTile("test-4", 46.0600, -64.7700),
+            scenicTile("test-5", 46.0720, -64.8120),
+            scenicTile("test-6", 46.1050, -64.8250),
+            scenicTile("test-7", 46.1250, -64.8000),
+            scenicTile("test-8", 46.1250, -64.7500)
+        );
+    }
+
+    private List<ScenicScoreTile> lowWaterTilesAroundStart() {
+        return List.of(
+            scenicTile("dry-1", 46.1100, -64.7800, 0.05, 0.70, 0.45, 0.70, 0.55, 0.20),
+            scenicTile("dry-2", 46.1030, -64.7500, 0.07, 0.75, 0.40, 0.72, 0.55, 0.20),
+            scenicTile("dry-3", 46.0800, -64.7420, 0.04, 0.65, 0.35, 0.68, 0.50, 0.20),
+            scenicTile("dry-4", 46.0600, -64.7700, 0.06, 0.72, 0.45, 0.76, 0.50, 0.20)
+        );
+    }
+
     private OsrmTripClient.TripResult defaultTrip(int durationMinutes) {
         return new OsrmTripClient.TripResult(
             List.of(
@@ -169,6 +195,18 @@ class RoutePlannerTest {
     }
 
     private ScenicScoreTile scenicTile(String h3Index, double latitude, double longitude) {
+        return scenicTile(h3Index, latitude, longitude, 0.95, 0.90, 0.80, 0.85, 0.88, 0.75);
+    }
+
+    private ScenicScoreTile scenicTile(String h3Index,
+                                       double latitude,
+                                       double longitude,
+                                       double waterScore,
+                                       double greenScore,
+                                       double elevationScore,
+                                       double solitudeScore,
+                                       double curveScore,
+                                       double poiScore) {
         GeometryFactory geometryFactory = new GeometryFactory();
         double latOffset = 0.01;
         double lngOffset = 0.01;
@@ -183,12 +221,12 @@ class RoutePlannerTest {
             new Coordinate(longitude - lngOffset, latitude - latOffset)
         }));
         tile.setScenicScore(0.90);
-        tile.setWaterScore(0.95);
-        tile.setGreenScore(0.90);
-        tile.setElevationScore(0.80);
-        tile.setSolitudeScore(0.85);
-        tile.setCurveScore(0.88);
-        tile.setPoiScore(0.75);
+        tile.setWaterScore(waterScore);
+        tile.setGreenScore(greenScore);
+        tile.setElevationScore(elevationScore);
+        tile.setSolitudeScore(solitudeScore);
+        tile.setCurveScore(curveScore);
+        tile.setPoiScore(poiScore);
         tile.setLastScored(Instant.now());
         return tile;
     }

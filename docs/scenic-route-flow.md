@@ -87,14 +87,15 @@ The route worker computes route-level scenic density by sampling the returned OS
 
 Vibes translate into default component weights:
 
-- `coastal`: high water, greenery, solitude
-- `riverside`: high water and greenery
-- `mountain`: high elevation, curves, solitude
-- `forest`: high greenery and solitude
-- `countryside`: balanced greenery, solitude, curves, water
-- `open_roads`: high curves/open-driving signal with moderate greenery
+- Core scenery tags remain the route-shaping base: `coastal`, `mountain`, `countryside`, `riverside`, `forest`, and `open_roads`.
+- Driving feel tags refine the route shape and stress level: `relaxing`, `winding_roads`, `smooth_cruise`, `quiet`, `hidden_gems`, `minimal_traffic`, and `loop_variety`.
+- Trip mood tags are presets that blend multiple components: `scenic`, `clear_my_head`, `date_night`, `sunday_cruise`, `adventure`, `photo_run`, `photo_worthy`, `nature_escape`, `scenic_reset`, `golden_hour`, `sunset`, and `sunrise`.
+
+The shared `VibeCatalog` normalizes user-facing labels and aliases such as "Date Night", "Winding Roads", and "Photo-Worthy" into canonical ids. Route submission, scenic-region previews, route scoring, and route-quality checks all use this same catalog.
 
 The optional `preferenceVector` overrides those defaults for `water`, `greenery`, `elevation`, `solitude`, `curves`, and `poi`.
+
+Before generating OSRM waypoint rings, the worker also checks local vibe availability. If nearby scenic tiles do not contain enough of the requested vibe's anchor signal, for example water for `coastal` or elevation/curves for `mountain`, the job fails with a no-feasible reason such as "No strong Coastal route found..." instead of returning a weak route that only matches the time budget.
 
 ## 6. Database Usage
 
@@ -155,8 +156,7 @@ The main optimizations in the current implementation are:
 The current implementation is intentionally simpler than the design spec.
 
 - It depends on OSRM trip behavior, so sparse road networks can still make small time budgets infeasible.
-- It does not yet expose "no good route for this vibe here" as a nuanced product state beyond job failure or low route score.
-- Vibe availability is implicit: if a user selects `coastal` in a non-water area, water-heavy scoring still runs but may only find weak candidates.
+- Vibe availability now has a first-pass quality gate, but the product still needs a richer UI state for alternatives such as "try Relaxing" or "increase to 60 minutes."
 - Route option diversity is improved but still needs live QA in universally scenic areas like Banff/Rockies.
 - Segment-level route scores in the response are synthetic presentation values.
 
@@ -179,7 +179,7 @@ MoodRide currently generates scenic driving loops by selecting scenic H3 waypoin
 
 3. Make routing preference-aware.
   - Use `preferenceVector` in the worker.
-  - Support multiple vibes instead of only the first one.
+  - Keep expanding the shared vibe catalog without adding one-off route logic.
   - Blend vibe weights into edge scoring.
 
 4. Fix ETA realism.

@@ -35,6 +35,7 @@ import com.moodride.eventmodels.DriveCompletedEvent;
 import com.moodride.eventmodels.RouteJobEvent;
 import com.moodride.eventmodels.RouteRatedEvent;
 import com.moodride.geo.H3Utils;
+import com.moodride.geo.VibeCatalog;
 import com.moodride.routeapi.dto.RouteDetailResponse;
 import com.moodride.routeapi.dto.RouteJobStatusResponse;
 import com.moodride.routeapi.dto.RouteOptionExplanationResponse;
@@ -54,14 +55,7 @@ import com.moodride.routeapi.repository.ScenicScoreTileRepository;
 @Transactional
 public class RouteService {
 
-    private static final Set<String> ALLOWED_VIBES = Set.of(
-        "coastal",
-        "mountain",
-        "countryside",
-        "forest",
-        "open_roads",
-        "riverside"
-    );
+    private static final Set<String> ALLOWED_VIBES = VibeCatalog.supportedVibes();
 
     private static final Set<RouteMode> ENABLED_ROUTE_MODES = Set.of(RouteMode.DRIVE);
 
@@ -99,15 +93,6 @@ public class RouteService {
     private static final int ROUTE_EXPLANATION_BASELINE_TILE_LIMIT = 1_000;
     private static final double ROUTE_EXPLANATION_LIFT_EPSILON = 0.003;
 
-    private static final Map<String, PreferenceWeights> VIBE_DEFAULTS = Map.of(
-        "coastal", new PreferenceWeights(0.90, 0.70, 0.30, 0.60, 0.45, 0.20),
-        "mountain", new PreferenceWeights(0.20, 0.55, 0.90, 0.70, 0.80, 0.20),
-        "forest", new PreferenceWeights(0.30, 0.90, 0.45, 0.80, 0.45, 0.20),
-        "countryside", new PreferenceWeights(0.40, 0.70, 0.45, 0.70, 0.60, 0.30),
-        "open_roads", new PreferenceWeights(0.25, 0.45, 0.35, 0.40, 0.90, 0.25),
-        "riverside", new PreferenceWeights(0.85, 0.75, 0.35, 0.65, 0.45, 0.25)
-    );
-    
     private final RouteJobRepository jobRepository;
     private final RouteRepository routeRepository;
     private final RouteWeightCalibrationRepository calibrationRepository;
@@ -903,10 +888,7 @@ public class RouteService {
         if (vibe == null || vibe.isBlank()) {
             throw new IllegalArgumentException("Vibe cannot be empty");
         }
-        return vibe.trim()
-            .toLowerCase(Locale.ROOT)
-            .replace('-', '_')
-            .replace(' ', '_');
+        return VibeCatalog.normalize(vibe);
     }
 
     private String serializeVibes(List<String> vibes) {
@@ -992,7 +974,7 @@ public class RouteService {
     }
 
     private PreferenceWeights blendVibeDefaults(List<String> vibes) {
-        List<String> activeVibes = (vibes == null || vibes.isEmpty()) ? List.of("countryside") : vibes;
+        List<String> activeVibes = (vibes == null || vibes.isEmpty()) ? List.of(VibeCatalog.defaultVibe()) : vibes;
         double water = 0.0;
         double greenery = 0.0;
         double elevation = 0.0;
@@ -1001,7 +983,7 @@ public class RouteService {
         double poi = 0.0;
 
         for (String vibe : activeVibes) {
-            PreferenceWeights defaults = VIBE_DEFAULTS.getOrDefault(vibe, VIBE_DEFAULTS.get("countryside"));
+            VibeCatalog.ComponentWeights defaults = VibeCatalog.weightsFor(vibe);
             water += defaults.water();
             greenery += defaults.greenery();
             elevation += defaults.elevation();

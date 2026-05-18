@@ -1,16 +1,13 @@
 package com.moodride.routeapi.service;
 
 import com.moodride.datamodels.ScenicScoreTile;
-import com.moodride.geo.VibeWeights;
+import com.moodride.geo.VibeCatalog;
 import com.moodride.routeapi.dto.BoundingBoxResponse;
 import com.moodride.routeapi.dto.ScenicRegionResponse;
 import com.moodride.routeapi.dto.ScenicRegionsResponse;
 import com.moodride.routeapi.repository.ScenicScoreTileRepository;
 import java.util.Comparator;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Locale;
-import java.util.Map;
 import org.locationtech.jts.geom.Point;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -35,7 +32,7 @@ public class ScenicRegionService {
         double sanitizedRadiusKm = Math.max(1.0, radiusKm);
         int sanitizedLimit = Math.max(1, Math.min(limit, 100));
         int candidateLimit = Math.min(Math.max(sanitizedLimit * 3, sanitizedLimit), 300);
-        VibeWeights.Vibe parsedVibe = normalizeVibe(vibe);
+        String parsedVibe = normalizeVibe(vibe);
 
         List<ScenicRegionResponse> regions = scenicScoreTileRepository
             .findTopScenicRegionsNearPoint(
@@ -69,7 +66,7 @@ public class ScenicRegionService {
         );
     }
 
-    private double scoreTile(ScenicScoreTile tile, VibeWeights.Vibe vibe) {
+    private double scoreTile(ScenicScoreTile tile, String vibe) {
         double water = resolveComponentScore(tile.getWaterScore(), tile.getWaterProximity());
         double elevation = normalizeElevation(resolveComponentScore(tile.getElevationScore(), tile.getElevationVariance()));
         double greenery = resolveComponentScore(tile.getGreenScore(), tile.getNaturalLandUse());
@@ -84,26 +81,21 @@ public class ScenicRegionService {
             return clamp01(tile.getScenicScore());
         }
 
-        Map<String, Double> signals = new HashMap<>();
-        signals.put("water_proximity", water);
-        signals.put("elevation", elevation);
-        signals.put("land_use", greenery);
-        signals.put("curvature", curves);
-        signals.put("traffic", solitude);
-        signals.put("poi", poi);
-        return VibeWeights.calculateCompositeScore(vibe, signals);
+        VibeCatalog.ComponentWeights weights = VibeCatalog.weightsFor(vibe);
+        double weighted = (water * weights.water())
+            + (greenery * weights.greenery())
+            + (elevation * weights.elevation())
+            + (solitude * weights.solitude())
+            + (curves * weights.curves())
+            + (poi * weights.poi());
+        return clamp01(weighted / weights.totalWeight());
     }
 
-    private VibeWeights.Vibe normalizeVibe(String vibe) {
+    private String normalizeVibe(String vibe) {
         if (vibe == null || vibe.isBlank()) {
             return null;
         }
-        try {
-            String normalized = vibe.trim().toUpperCase(Locale.ROOT).replace('-', '_').replace(' ', '_');
-            return VibeWeights.Vibe.valueOf(normalized);
-        } catch (IllegalArgumentException ex) {
-            return null;
-        }
+        return VibeCatalog.normalizeIfSupported(vibe).orElse(null);
     }
 
     private BoundingBoxResponse buildBoundingBox(double latitude, double longitude, double radiusKm) {

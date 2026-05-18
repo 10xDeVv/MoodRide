@@ -16,7 +16,26 @@ const VIBE_HIGHLIGHT_LINES: Record<string, string[]> = {
   mountain: ["Includes elevation changes with hill and ridge views"],
   forest: ["Routes through greener corridors and wooded areas"],
   countryside: ["Leans toward quieter roads and open rural scenery"],
-  open_roads: ["Prioritizes sweeping roads with fewer dense intersections"]
+  open_roads: ["Prioritizes sweeping roads with fewer dense intersections"],
+  relaxing: ["Biases toward low-stress roads and calmer scenery"],
+  winding_roads: ["Looks for more road shape, curves, and terrain drama"],
+  smooth_cruise: ["Keeps the route flowing with fewer sharp interruptions"],
+  quiet: ["Favors solitude and lower-density corridors"],
+  hidden_gems: ["Looks for quieter roads with smaller scenic points of interest"],
+  minimal_traffic: ["Biases away from busier built-up corridors"],
+  loop_variety: ["Tries to avoid repeated scenery and same-corridor loops"],
+  scenic: ["Balances the strongest local scenic signals"],
+  clear_my_head: ["Prioritizes peaceful green or rural stretches"],
+  date_night: ["Blends scenic views with relaxed, photo-friendly stops"],
+  sunday_cruise: ["Leans toward easy countryside and open-road cruising"],
+  adventure: ["Pushes toward terrain, curves, and stronger scenic contrast"],
+  photo_run: ["Looks for high-impact water, terrain, or landmark views"],
+  photo_worthy: ["Looks for high-impact water, terrain, or landmark views"],
+  nature_escape: ["Prioritizes forest, riverside, and low-density natural areas"],
+  scenic_reset: ["Balances scenic quality without making the drive intense"],
+  golden_hour: ["Looks for open water or elevation views that suit golden-hour light"],
+  sunset: ["Looks for open water or elevation views that suit sunset light"],
+  sunrise: ["Looks for open water or elevation views that suit sunrise light"]
 };
 
 export function ScenicHighlightsPanel({ route }: Props) {

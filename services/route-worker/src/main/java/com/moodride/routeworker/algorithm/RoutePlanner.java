@@ -6,6 +6,7 @@ import com.moodride.datamodels.RouteJob;
 import com.moodride.datamodels.ScenicScoreTile;
 import com.moodride.datamodels.RouteWeightCalibration;
 import com.moodride.geo.H3Utils;
+import com.moodride.geo.VibeCatalog;
 import com.moodride.routeworker.config.ApplicationConfiguration;
 import com.moodride.routeworker.graph.RoadNode;
 import com.moodride.routeworker.repository.RouteWeightCalibrationRepository;
@@ -39,6 +40,10 @@ public class RoutePlanner {
     private static final double MAX_EFFECTIVE_DURATION_OVERRUN_RATIO = 1.15;
     private static final double DIVERSE_ROUTE_SIMILARITY_THRESHOLD = 0.72;
     private static final int MAX_CORRIDOR_SIGNATURE_SAMPLES = 96;
+    private static final int MIN_VIBE_AVAILABILITY_TILES = 3;
+    private static final int VIBE_AVAILABILITY_TOP_N = 12;
+    private static final double MIN_VIBE_BEST_FIT_SCORE = 0.32;
+    private static final double MIN_VIBE_AVG_FIT_SCORE = 0.26;
 
     private static final List<Integer> WAYPOINT_VARIANTS = List.of(8, 6, 4);
     private static final Map<String, String> PREFERENCE_KEY_ALIASES = Map.of(
@@ -50,15 +55,6 @@ public class RoutePlanner {
         "curves", "curves",
         "curve", "curves",
         "poi", "poi"
-    );
-
-    private static final Map<String, PreferenceWeights> VIBE_DEFAULTS = Map.of(
-        "coastal", new PreferenceWeights(0.90, 0.70, 0.30, 0.60, 0.45, 0.20),
-        "mountain", new PreferenceWeights(0.20, 0.55, 0.90, 0.70, 0.80, 0.20),
-        "forest", new PreferenceWeights(0.30, 0.90, 0.45, 0.80, 0.45, 0.20),
-        "countryside", new PreferenceWeights(0.40, 0.70, 0.45, 0.70, 0.60, 0.30),
-        "open_roads", new PreferenceWeights(0.25, 0.45, 0.35, 0.40, 0.90, 0.25),
-        "riverside", new PreferenceWeights(0.85, 0.75, 0.35, 0.65, 0.45, 0.25)
     );
 
     private final ScenicScoreTileRepository scenicScoreTileRepository;
@@ -89,6 +85,7 @@ public class RoutePlanner {
         PreferenceWeights preferences = resolvePreferenceWeights(requestVibes, job.getPreferenceVector());
 
         List<TileCandidate> scoredTiles = scoreNearbyTiles(start, job.getTimeBudgetMinutes(), preferences);
+        validateVibeAvailability(job, requestVibes, scoredTiles);
         List<List<RoadNode>> waypointVariants = buildWaypointRings(start, scoredTiles, job.getTimeBudgetMinutes());
         List<RouteCandidate> hybridCandidates = collectHybridCandidates(job, waypointVariants, preferences);
         if (hybridCandidates.isEmpty() || hybridCandidates.size() < ROUTE_OPTION_COUNT) {
@@ -535,6 +532,92 @@ public class RoutePlanner {
             .toList();
     }
 
+    private void validateVibeAvailability(RouteJob job, List<String> vibes, List<TileCandidate> scoredTiles) {
+        if (scoredTiles == null || scoredTiles.size() < MIN_VIBE_AVAILABILITY_TILES) {
+            throw new NoFeasibleRouteException(
+                "No scenic data found near this start for " + VibeCatalog.displayList(vibes)
+                    + " within your " + job.getTimeBudgetMinutes()
+                    + "-minute budget. Try a broader vibe like Scenic or Relaxing, or choose a nearby start point."
+            );
+        }
+
+        List<Double> fitScores = scoredTiles.stream()
+            .map(candidate -> vibeFitScore(candidate.tile(), vibes))
+            .sorted(Comparator.reverseOrder())
+            .toList();
+        double bestFit = fitScores.getFirst();
+        double avgTopFit = fitScores.stream()
+            .limit(VIBE_AVAILABILITY_TOP_N)
+            .mapToDouble(Double::doubleValue)
+            .average()
+            .orElse(0.0);
+
+        if (bestFit < MIN_VIBE_BEST_FIT_SCORE || avgTopFit < MIN_VIBE_AVG_FIT_SCORE) {
+            throw new NoFeasibleRouteException(
+                "No strong " + VibeCatalog.displayList(vibes)
+                    + " route found near this start within your " + job.getTimeBudgetMinutes()
+                    + "-minute budget. Try Scenic, Relaxing, Countryside, or increase the time budget."
+            );
+        }
+    }
+
+    private double vibeFitScore(ScenicScoreTile tile, List<String> vibes) {
+        List<String> activeVibes = (vibes == null || vibes.isEmpty()) ? List.of(VibeCatalog.defaultVibe()) : vibes;
+        return activeVibes.stream()
+            .mapToDouble(vibe -> singleVibeFitScore(tile, vibe))
+            .average()
+            .orElse(DEFAULT_SCENIC_FALLBACK);
+    }
+
+    private double singleVibeFitScore(ScenicScoreTile tile, String vibe) {
+        ComponentScores components = componentScores(tile);
+        return switch (VibeCatalog.normalize(vibe)) {
+            case "coastal", "riverside" -> components.water();
+            case "mountain" -> average(components.elevation(), components.curves());
+            case "forest", "nature_escape" -> average(components.greenery(), components.solitude());
+            case "open_roads" -> average(components.curves(), components.solitude());
+            case "relaxing", "smooth_cruise", "quiet", "minimal_traffic", "clear_my_head", "countryside", "sunday_cruise" ->
+                average(components.greenery(), components.solitude());
+            case "winding_roads", "adventure" -> average(components.curves(), components.elevation());
+            case "sunset", "sunrise", "golden_hour", "date_night" -> Math.max(components.water(), components.elevation());
+            case "photo_worthy", "photo_run" -> average(Math.max(components.water(), components.elevation()), components.poi());
+            case "hidden_gems" -> average(components.solitude(), components.curves(), components.poi());
+            case "loop_variety", "scenic", "scenic_reset" -> average(
+                components.water(),
+                components.greenery(),
+                components.elevation(),
+                components.solitude(),
+                components.curves()
+            );
+            default -> average(components.greenery(), components.solitude());
+        };
+    }
+
+    private ComponentScores componentScores(ScenicScoreTile tile) {
+        return new ComponentScores(
+            resolveComponentScore(tile.getWaterScore(), tile.getWaterProximity()),
+            resolveComponentScore(tile.getGreenScore(), tile.getNaturalLandUse()),
+            normalizeElevation(resolveComponentScore(tile.getElevationScore(), tile.getElevationVariance())),
+            resolveComponentScore(
+                tile.getSolitudeScore(),
+                (1.0 - clamp01(tile.getRoadDensity()) + clamp01(tile.getTrafficSignalScore())) / 2.0
+            ),
+            resolveComponentScore(tile.getCurveScore(), tile.getVisualComplexity()),
+            resolveComponentScore(tile.getPoiScore(), tile.getPoiDensity())
+        );
+    }
+
+    private double average(double... values) {
+        if (values == null || values.length == 0) {
+            return 0.0;
+        }
+        double sum = 0.0;
+        for (double value : values) {
+            sum += clamp01(value);
+        }
+        return sum / values.length;
+    }
+
     private List<ScenicScoreTile> findTilesNearStart(RoadNode start, int ringSize, int resolution) {
         String centerCell = H3Utils.getH3Index(start.getLatitude(), start.getLongitude(), resolution);
         List<String> nearbyCells = H3Utils.getKRing(centerCell, ringSize);
@@ -874,7 +957,7 @@ public class RoutePlanner {
                     continue;
                 }
                 String normalizedVibe = normalizeVibe(vibe);
-                if (VIBE_DEFAULTS.containsKey(normalizedVibe) && seen.add(normalizedVibe)) {
+                if (VibeCatalog.isSupported(normalizedVibe) && seen.add(normalizedVibe)) {
                     normalized.add(normalizedVibe);
                 }
             }
@@ -886,7 +969,7 @@ public class RoutePlanner {
     }
 
     private PreferenceWeights blendVibeDefaults(List<String> vibes) {
-        List<String> activeVibes = (vibes == null || vibes.isEmpty()) ? List.of("countryside") : vibes;
+        List<String> activeVibes = (vibes == null || vibes.isEmpty()) ? List.of(VibeCatalog.defaultVibe()) : vibes;
         double water = 0.0;
         double greenery = 0.0;
         double elevation = 0.0;
@@ -895,7 +978,7 @@ public class RoutePlanner {
         double poi = 0.0;
 
         for (String vibe : activeVibes) {
-            PreferenceWeights defaults = VIBE_DEFAULTS.getOrDefault(vibe, VIBE_DEFAULTS.get("countryside"));
+            VibeCatalog.ComponentWeights defaults = VibeCatalog.weightsFor(vibe);
             water += defaults.water();
             greenery += defaults.greenery();
             elevation += defaults.elevation();
@@ -1003,9 +1086,10 @@ public class RoutePlanner {
 
     private String normalizeVibe(String vibe) {
         if (vibe == null || vibe.isBlank()) {
-            return "countryside";
+            return VibeCatalog.defaultVibe();
         }
-        return vibe.trim().toLowerCase(Locale.ROOT).replace('-', '_').replace(' ', '_');
+        String normalized = VibeCatalog.normalize(vibe);
+        return normalized.isBlank() ? VibeCatalog.defaultVibe() : normalized;
     }
 
     private double scoreTile(ScenicScoreTile tile, PreferenceWeights preferences) {
@@ -1065,6 +1149,14 @@ public class RoutePlanner {
                                  RoadNode center,
                                  double scenicScore,
                                  double distanceKm) {
+    }
+
+    private record ComponentScores(double water,
+                                   double greenery,
+                                   double elevation,
+                                   double solitude,
+                                   double curves,
+                                   double poi) {
     }
 
     private record PreferenceWeights(double water,

@@ -17,7 +17,23 @@ import type {
 import { RouteMap } from "@/components/RouteMap";
 import { ScenicHighlightsPanel } from "@/components/ScenicHighlightsPanel";
 
-const VIBES: Vibe[] = ["coastal", "mountain", "countryside", "riverside", "forest", "open_roads"];
+const VIBE_GROUPS: Array<{ title: string; description: string; options: Vibe[] }> = [
+  {
+    title: "Browse by scenery",
+    description: "What the drive should look like.",
+    options: ["coastal", "mountain", "countryside", "riverside", "forest", "open_roads"]
+  },
+  {
+    title: "Refine by feel",
+    description: "How the road should behave.",
+    options: ["relaxing", "winding_roads", "smooth_cruise", "quiet", "hidden_gems", "minimal_traffic"]
+  },
+  {
+    title: "Quick presets",
+    description: "Pick a mood and let MoodRide blend the weights.",
+    options: ["scenic", "sunset", "photo_worthy", "nature_escape", "sunday_cruise", "adventure"]
+  }
+];
 const TIME_BUDGET_OPTIONS = [30, 60, 90, 120] as const;
 const ROUTE_MODES: Array<{ value: RouteMode; label: string; status: string; enabled: boolean }> = [
   { value: "drive", label: "Drive", status: "Canada live", enabled: true },
@@ -35,7 +51,26 @@ const VIBE_DISPLAY_NAMES: Record<string, string> = {
   countryside: "Countryside",
   riverside: "Riverside",
   forest: "Forest",
-  open_roads: "Open Roads"
+  open_roads: "Open Roads",
+  relaxing: "Relaxing",
+  winding_roads: "Winding Roads",
+  smooth_cruise: "Smooth Cruise",
+  quiet: "Quiet",
+  hidden_gems: "Hidden Gems",
+  minimal_traffic: "Minimal Traffic",
+  loop_variety: "Loop Variety",
+  scenic: "Scenic",
+  clear_my_head: "Clear My Head",
+  date_night: "Date Night",
+  sunday_cruise: "Sunday Cruise",
+  adventure: "Adventure",
+  photo_run: "Photo Run",
+  photo_worthy: "Photo-Worthy",
+  nature_escape: "Nature Escape",
+  scenic_reset: "Scenic Reset",
+  golden_hour: "Golden Hour",
+  sunset: "Sunset",
+  sunrise: "Sunrise"
 };
 const VIBE_PREFERENCE_DEFAULTS: Record<string, Record<string, number>> = {
   coastal: { water: 0.9, greenery: 0.7, elevation: 0.3, solitude: 0.6, curves: 0.45, poi: 0.2 },
@@ -43,7 +78,26 @@ const VIBE_PREFERENCE_DEFAULTS: Record<string, Record<string, number>> = {
   countryside: { water: 0.4, greenery: 0.7, elevation: 0.45, solitude: 0.7, curves: 0.6, poi: 0.3 },
   riverside: { water: 0.85, greenery: 0.75, elevation: 0.35, solitude: 0.65, curves: 0.45, poi: 0.25 },
   forest: { water: 0.3, greenery: 0.9, elevation: 0.45, solitude: 0.8, curves: 0.45, poi: 0.2 },
-  open_roads: { water: 0.25, greenery: 0.45, elevation: 0.35, solitude: 0.4, curves: 0.9, poi: 0.25 }
+  open_roads: { water: 0.25, greenery: 0.45, elevation: 0.35, solitude: 0.4, curves: 0.9, poi: 0.25 },
+  relaxing: { water: 0.45, greenery: 0.65, elevation: 0.25, solitude: 0.85, curves: 0.3, poi: 0.25 },
+  winding_roads: { water: 0.35, greenery: 0.45, elevation: 0.65, solitude: 0.55, curves: 0.95, poi: 0.15 },
+  smooth_cruise: { water: 0.35, greenery: 0.5, elevation: 0.25, solitude: 0.6, curves: 0.25, poi: 0.2 },
+  quiet: { water: 0.3, greenery: 0.7, elevation: 0.35, solitude: 0.95, curves: 0.35, poi: 0.1 },
+  hidden_gems: { water: 0.45, greenery: 0.7, elevation: 0.55, solitude: 0.8, curves: 0.65, poi: 0.45 },
+  minimal_traffic: { water: 0.25, greenery: 0.6, elevation: 0.3, solitude: 0.95, curves: 0.4, poi: 0.1 },
+  loop_variety: { water: 0.55, greenery: 0.6, elevation: 0.5, solitude: 0.55, curves: 0.7, poi: 0.35 },
+  scenic: { water: 0.65, greenery: 0.7, elevation: 0.6, solitude: 0.65, curves: 0.55, poi: 0.3 },
+  clear_my_head: { water: 0.35, greenery: 0.75, elevation: 0.35, solitude: 0.95, curves: 0.25, poi: 0.1 },
+  date_night: { water: 0.75, greenery: 0.55, elevation: 0.45, solitude: 0.65, curves: 0.35, poi: 0.55 },
+  sunday_cruise: { water: 0.35, greenery: 0.65, elevation: 0.3, solitude: 0.7, curves: 0.45, poi: 0.25 },
+  adventure: { water: 0.4, greenery: 0.55, elevation: 0.9, solitude: 0.7, curves: 0.9, poi: 0.25 },
+  photo_run: { water: 0.75, greenery: 0.65, elevation: 0.75, solitude: 0.55, curves: 0.6, poi: 0.5 },
+  photo_worthy: { water: 0.75, greenery: 0.65, elevation: 0.75, solitude: 0.55, curves: 0.6, poi: 0.5 },
+  nature_escape: { water: 0.45, greenery: 0.9, elevation: 0.55, solitude: 0.9, curves: 0.45, poi: 0.15 },
+  scenic_reset: { water: 0.55, greenery: 0.7, elevation: 0.45, solitude: 0.8, curves: 0.4, poi: 0.2 },
+  golden_hour: { water: 0.75, greenery: 0.5, elevation: 0.55, solitude: 0.55, curves: 0.35, poi: 0.35 },
+  sunset: { water: 0.75, greenery: 0.5, elevation: 0.55, solitude: 0.55, curves: 0.35, poi: 0.35 },
+  sunrise: { water: 0.7, greenery: 0.55, elevation: 0.55, solitude: 0.6, curves: 0.35, poi: 0.3 }
 };
 const COMPONENT_DISPLAY_NAMES: Record<string, string> = {
   water: "Water",
@@ -766,20 +820,31 @@ export function RoutePlanner() {
           </select>
 
           <label>Vibes (max 3)</label>
-          <div className="tag-list">
-            {VIBES.map((vibe) => {
-              const active = vibes.includes(vibe);
-              return (
-                <button
-                  type="button"
-                  className={`tag ${active ? "active" : ""}`}
-                  key={vibe}
-                  onClick={() => toggleVibe(vibe)}
-                >
-                  {formatVibe(vibe)}
-                </button>
-              );
-            })}
+          <div className="vibe-groups" aria-label="Route vibes">
+            {VIBE_GROUPS.map((group) => (
+              <div className="vibe-group" key={group.title}>
+                <div className="vibe-group-copy">
+                  <span>{group.title}</span>
+                  <small>{group.description}</small>
+                </div>
+                <div className="tag-list compact">
+                  {group.options.map((vibe) => {
+                    const active = vibes.includes(vibe);
+                    return (
+                      <button
+                        type="button"
+                        className={`tag ${active ? "active" : ""}`}
+                        key={vibe}
+                        onClick={() => toggleVibe(vibe)}
+                        aria-pressed={active}
+                      >
+                        {formatVibe(vibe)}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            ))}
           </div>
 
           <button type="button" onClick={() => void submit()} disabled={!canSubmit}>
