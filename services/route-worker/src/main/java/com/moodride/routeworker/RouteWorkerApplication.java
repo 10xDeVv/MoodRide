@@ -10,7 +10,7 @@ import org.springframework.scheduling.annotation.EnableScheduling;
 /**
  * MoodRide Route Worker Service
  * 
- * Background service that processes route generation jobs using beam search algorithm.
+ * Background service that processes route generation jobs using hybrid OSRM routing.
  * Consumes jobs from Kafka, generates scenic routes, and publishes completion events.
  * 
  * Port: 8081

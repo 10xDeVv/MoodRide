@@ -82,14 +82,13 @@ class RoutePlannerTest {
     }
 
     @Test
-    void generateRouteReturnsBestOverBudgetHybridCandidateWhenNoInBudgetOptionExists() {
+    void generateRouteRejectsOverBudgetHybridCandidatesWhenNoInBudgetOptionExists() {
         when(scenicScoreTileRepository.findByH3IndexIn(anyCollection())).thenReturn(List.of());
         when(osrmTripClient.requestRoundTrip(anyList(), eq(RouteMode.DRIVE))).thenReturn(Optional.of(defaultTrip(22)));
 
-        RouteCandidate candidate = routePlanner.generateRoute(sampleJob(15));
-
-        assertThat(candidate.getEstimatedMinutes()).isEqualTo(22);
-        assertThat(candidate.getAlgorithmVersion()).isEqualTo("hybrid_osrm_v1");
+        assertThatThrownBy(() -> routePlanner.generateRoute(sampleJob(15)))
+            .isInstanceOf(NoFeasibleRouteException.class)
+            .hasMessageContaining("No feasible route found within 15 minutes");
     }
 
     @Test
@@ -98,8 +97,8 @@ class RoutePlannerTest {
         when(osrmTripClient.requestRoundTrip(anyList(), eq(RouteMode.DRIVE))).thenReturn(Optional.empty());
 
         assertThatThrownBy(() -> routePlanner.generateRoute(sampleJob(45)))
-            .isInstanceOf(IllegalStateException.class)
-            .hasMessageContaining("Hybrid routing did not produce a valid candidate");
+            .isInstanceOf(NoFeasibleRouteException.class)
+            .hasMessageContaining("No feasible route found within 45 minutes");
     }
 
     @Test

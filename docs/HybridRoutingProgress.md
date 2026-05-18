@@ -1,6 +1,6 @@
 # Hybrid Routing Progress Tracker
 
-Last updated: 2026-04-25 (route-worker scenic score differentiation fix)
+Last updated: 2026-05-18 (route-worker time-budget and option-diversity tuning)
 Source plan: `docs/Hybrid Routing Execution.md`
 
 ## Current Status
@@ -28,6 +28,21 @@ Source plan: `docs/Hybrid Routing Execution.md`
 - [x] Replace hardcoded route algorithm metadata (`beam_v1`) with persisted generation metadata
 
 ## Completed In This Iteration
+- Hardened route-worker time-budget behavior:
+  - route generation now uses a hard effective duration cap of at most `15%` over the requested budget
+  - over-budget-only candidate sets are rejected instead of being returned to users
+  - added smaller budget-rescue waypoint rings before failing a request
+  - reduced `moodride.algorithm.max-duration-overrun-ratio` default/config from `1.25` to `1.15`
+  - added `NoFeasibleRouteException` for valid "no good route available within this budget" outcomes
+  - route-worker marks no-feasible jobs failed without retrying the same impossible generation
+- Improved route-option selection:
+  - `most_scenic`, `balanced`, and `shorter` now use profile-specific scoring functions instead of simple sorted comparators
+  - route selection applies corridor similarity, duration-gap, and distance-gap checks before picking the secondary options
+  - exact duplicates are still removed, but same-corridor candidates are now penalized or skipped when alternatives exist
+- Updated route-worker test coverage:
+  - over-budget-only candidates now assert `NoFeasibleRouteException`
+  - no-OSRM-candidate path now asserts the same no-feasible failure mode
+  - verification: `mvn '-Dmaven.repo.local=C:/Users/aadeb/OneDrive/Desktop/MoodRide/.m2/repository' -pl services/route-worker -am test` passed
 - Fixed hybrid option score flattening (`30.00` for all profiles):
   - root cause: route-worker used `h3-resolution=9` while scenic tiles are stored at resolution `7`, so corridor tile lookups often missed and fell back to constant `0.30`
   - route-worker now falls back to H3 resolution `7` for tile selection and corridor scoring when configured resolution misses
@@ -103,14 +118,14 @@ Source plan: `docs/Hybrid Routing Execution.md`
   - response contained `code=Ok`, `trips=1`, with distance/duration values
 - Removed beam fallback execution from `RoutePlanner`; route generation now fails fast when no hybrid candidate is available.
 - Updated `RoutePlanner` hybrid selection flow:
-  - when no in-budget route exists, it now returns the best over-budget hybrid candidate instead of immediately falling back
-  - when no hybrid route can be produced (tile-derived or synthetic), route generation fails without loading graph/beam components
+  - when no in-budget route exists, it now tries smaller budget-rescue variants and then fails cleanly if the request is still infeasible
+  - when no hybrid route can be produced within the hard budget window, route generation fails without loading graph/beam components
 - Added synthetic waypoint fallback generation for hybrid mode:
   - if tile-derived waypoint rings produce no valid OSRM route, route-worker now attempts synthetic radial waypoint variants
   - successful synthetic fallback still persists `algorithmVersion=hybrid_osrm_v1` and keeps `beamCandidates` null
 - Added route-worker unit tests for `RoutePlanner` hybrid behavior:
   - synthetic fallback candidate generation path
-  - best over-budget hybrid candidate selection path
+  - over-budget-only candidate rejection path
   - failure path when OSRM produces no candidates
   - verified passing with `mvn --% -Dmaven.repo.local=... -pl services/route-worker -am -Dtest=RoutePlannerTest -Dsurefire.failIfNoSpecifiedTests=false test`
 - Added route-worker Kafka consumer flexibility for local recovery runs:
@@ -157,4 +172,6 @@ Source plan: `docs/Hybrid Routing Execution.md`
 - Execution-plan checklist items are completed.
 - UX proof is complete for multi-option rendering and completed-state flows.
 - Remaining quality hardening:
-  - Re-run live route job after worker restart and confirm option cards show differentiated scenic scores across profiles.
+  - Re-run live route jobs after worker deploy and confirm short budgets do not return large over-budget loops.
+  - Re-run Banff/Rockies release QA and confirm route-option spread improves versus the previous `1.19-1.55` point spread.
+  - If Banff spread is still too low, add waypoint-sector exclusion per profile so secondary options are forced into different bearings/corridors.

@@ -2,6 +2,7 @@ package com.moodride.routeworker.consumer;
 
 import com.moodride.datamodels.RouteJob;
 import com.moodride.eventmodels.RouteJobEvent;
+import com.moodride.routeworker.algorithm.NoFeasibleRouteException;
 import com.moodride.routeworker.producer.RouteCompletionProducer;
 import com.moodride.routeworker.producer.RouteJobDlqProducer;
 import com.moodride.routeworker.repository.RouteJobRepository;
@@ -98,6 +99,10 @@ public class RouteJobConsumer {
             // Acknowledge message on success
             acknowledgment.acknowledge();
             
+        } catch (NoFeasibleRouteException e) {
+            logger.warn("No feasible route for job {}: {}", jobId, e.getMessage());
+            handleNonRetryableFailure(jobId, e.getMessage());
+            acknowledgment.acknowledge();
         } catch (Exception e) {
             logger.error("Error processing route job {}: {}", jobId, e.getMessage(), e);
             
@@ -125,6 +130,18 @@ public class RouteJobConsumer {
             });
         } catch (Exception ex) {
             logger.error("Failed to increment retry count for job {}: {}", jobId, ex.getMessage());
+        }
+    }
+
+    private void handleNonRetryableFailure(UUID jobId, String reason) {
+        try {
+            jobRepository.findById(jobId).ifPresent(job -> {
+                job.markFailed(reason);
+                jobRepository.save(job);
+                completionProducer.publishFailure(job.getId(), job.getUserId(), job.getFailureReason());
+            });
+        } catch (Exception ex) {
+            logger.error("Failed to mark non-retryable failure for job {}: {}", jobId, ex.getMessage());
         }
     }
 }

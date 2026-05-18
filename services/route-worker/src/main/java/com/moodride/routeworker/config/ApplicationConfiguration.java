@@ -16,7 +16,7 @@ public class ApplicationConfiguration {
     private int tileSelectionLimit = 120;
     private int sectorCount = 8;
     private int corridorSampleMeters = 500;
-    private double maxDurationOverrunRatio = 1.25;
+    private double maxDurationOverrunRatio = 1.15;
     
     public int getBeamWidth() {
         return beamWidth;

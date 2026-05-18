@@ -15,11 +15,19 @@ The frontend submits a payload shaped like this:
   "lng": -122.6784,
   "timeBudgetMinutes": 90,
   "vibes": ["coastal", "mountain"],
-  "preferenceVector": { "avoidTolls": false }
+  "routeMode": "drive",
+  "preferenceVector": {
+    "water": 0.8,
+    "greenery": 0.6,
+    "elevation": 0.4,
+    "solitude": 0.5,
+    "curves": 0.5,
+    "poi": 0.2
+  }
 }
 ```
 
-`RouteRequest` accepts either `vibes[]` or a single `vibe`, but the API only stores the first validated vibe in the job.
+`RouteRequest` accepts either `vibes[]` or a single `vibe`. The API stores the first validated vibe in `route_jobs.vibe` for legacy compatibility and stores the full list in `route_jobs.vibes_json`.
 
 ## 2. Service Flow
 
@@ -27,42 +35,32 @@ The frontend submits a payload shaped like this:
 2. [RouteService](../services/route-api/src/main/java/com/moodride/routeapi/service/RouteService.java) validates vibes, creates a `route_jobs` row, and marks it `QUEUED`.
 3. The route API publishes the job id to Kafka on `RouteJobEvent.TOPIC`.
 4. [RouteJobConsumer](../services/route-worker/src/main/java/com/moodride/routeworker/consumer/RouteJobConsumer.java) consumes the job, loads the `RouteJob`, marks it `PROCESSING`, and invokes [RouteGenerationService](../services/route-worker/src/main/java/com/moodride/routeworker/service/RouteGenerationService.java).
-5. `RouteGenerationService` calls [RoutePlanner](../services/route-worker/src/main/java/com/moodride/routeworker/algorithm/RoutePlanner.java), which delegates to [BeamSearchSolver](../services/route-worker/src/main/java/com/moodride/routeworker/algorithm/BeamSearchSolver.java).
-6. The worker persists the completed `routes` and `route_waypoints` rows.
+5. `RouteGenerationService` calls [RoutePlanner](../services/route-worker/src/main/java/com/moodride/routeworker/algorithm/RoutePlanner.java), which builds scenic waypoint rings and asks OSRM for real driving loops.
+6. The worker persists up to three completed `routes` and `route_waypoints` rows for `most_scenic`, `balanced`, and `shorter`.
 7. The worker publishes a completion event on `RouteCompletionEvent.TOPIC`.
 8. The frontend polls `GET /api/routes/{jobId}` and then fetches `GET /api/routes/route/{routeId}` once the job completes.
 
 ## 3. Route Generation Logic
 
-The current implementation does not call Mapbox, OSRM, or another external routing service.
+The current implementation uses OSRM's trip endpoint against the local Canada OSRM dataset.
 
-The route worker builds a local road graph from `road_segments` and performs a beam-search-style expansion:
+The route worker:
 
-- start at the road node nearest to the requested `lat`/`lng`
-- expand outgoing road edges
-- keep candidates whose estimated time stays within the budget
-- return the highest scenic-score candidate in the current frontier
+- scores nearby H3 scenic tiles using the selected vibes and numeric `preferenceVector`
+- divides nearby candidate tiles into directional sectors
+- builds waypoint rings from the best tile per sector
+- asks OSRM for a round trip from the start through those waypoints
+- samples the returned OSRM geometry and computes scenic density from nearby H3 tiles
+- filters out candidates that exceed the hard effective time budget
+- selects up to three route options with profile-specific scoring and diversity penalties
 
-The key logic is in [BeamSearchSolver](../services/route-worker/src/main/java/com/moodride/routeworker/algorithm/BeamSearchSolver.java):
-
-```java
-int newTime = candidate.getEstimatedMinutes() + (int)(edge.getLengthMeters() / 83.33);
-double newDistance = candidate.getTotalDistanceKm() + (edge.getLengthMeters() / 1000.0);
-double newScore = candidate.getTotalScenicScore() + (edge.getScenicScore() / 100.0);
-```
-
-There is no explicit loop-closing step back to the starting point in the current code.
+The current hard budget cap is at most `15%` over the requested time. If no route can be generated inside that window, the job fails with a no-feasible-route reason instead of returning a misleading over-budget route.
 
 ## 4. Waypoint / Candidate Selection
 
-Intermediate points are not chosen from scenic tiles directly. Scenic tiles are used to annotate road segments with scenic scores when the graph is built.
+Intermediate waypoints are chosen from scenic tiles directly.
 
-[GraphService](../services/route-worker/src/main/java/com/moodride/routeworker/service/GraphService.java) does this in two steps:
-
-1. load all `road_segments`
-2. load matching `scenic_score_tiles` by H3 index
-
-The H3 score is then attached to each road edge in the graph. Waypoints are simply the node sequence produced by the beam search.
+[RoutePlanner](../services/route-worker/src/main/java/com/moodride/routeworker/algorithm/RoutePlanner.java) selects nearby candidate tiles by H3 ring, scores them with the request's effective component weights, groups them by sector, and builds waypoint rings. If tile-derived rings do not produce enough valid OSRM routes, it falls back to synthetic radial rings and then smaller budget-rescue rings.
 
 ## 5. Scenic Scoring
 
@@ -85,13 +83,18 @@ The tile recompute pipeline sources values from `road_segments`, water/land-use 
 
 ### Route scoring
 
-The route worker does not compute a complex route-level scenic objective. It sums scenic edge reward as it expands the path:
+The route worker computes route-level scenic density by sampling the returned OSRM path, mapping samples to H3 scenic tiles, and averaging the request-weighted tile scores. The stored `Route.scenicScore` is a normalized decimal and is later rendered as a percentage in the API response.
 
-```java
-newScore = candidate.getTotalScenicScore() + (edge.getScenicScore() / 100.0);
-```
+Vibes translate into default component weights:
 
-The final `Route.scenicScore` is stored as a small decimal value and is later rendered as a percentage in the API response.
+- `coastal`: high water, greenery, solitude
+- `riverside`: high water and greenery
+- `mountain`: high elevation, curves, solitude
+- `forest`: high greenery and solitude
+- `countryside`: balanced greenery, solitude, curves, water
+- `open_roads`: high curves/open-driving signal with moderate greenery
+
+The optional `preferenceVector` overrides those defaults for `water`, `greenery`, `elevation`, `solitude`, `curves`, and `poi`.
 
 ## 6. Database Usage
 
@@ -106,8 +109,6 @@ Route generation currently touches these tables:
 Typical access patterns:
 
 ```sql
-SELECT * FROM road_segments;
-
 SELECT *
 FROM scenic_score_tiles
 WHERE h3_index IN (?, ?, ?, ...);
@@ -136,6 +137,8 @@ Once complete, `GET /api/routes/route/{routeId}` returns a `RouteDetailResponse`
 - scenic score
 - quality tier
 - waypoints and generated highlights
+- route options with `most_scenic`, `balanced`, and `shorter` profile metadata
+- route-option explanations based on local baseline lift and weighted component contribution
 - created and expiration timestamps
 
 ## 8. Performance Notes
@@ -143,7 +146,6 @@ Once complete, `GET /api/routes/route/{routeId}` returns a `RouteDetailResponse`
 The main optimizations in the current implementation are:
 
 - asynchronous job handling through Kafka
-- cached graph construction in `GraphService`
 - batch scenic tile lookup by H3 index
 - route detail caching in `route-api`
 - cache invalidation when scenic tiles are refreshed or changed
@@ -152,18 +154,15 @@ The main optimizations in the current implementation are:
 
 The current implementation is intentionally simpler than the design spec.
 
-- It does not generate a true scenic loop back to the start.
-- It does not call Mapbox, OSRM, or any other external routing provider.
-- `preferenceVector` is accepted by the API but not used by the worker.
-- Only the first vibe is persisted in the job.
-- The estimated travel time uses a fixed speed heuristic.
-- The solver does not use the edge weight defined on `RoadSegmentEdge`.
+- It depends on OSRM trip behavior, so sparse road networks can still make small time budgets infeasible.
+- It does not yet expose "no good route for this vibe here" as a nuanced product state beyond job failure or low route score.
+- Vibe availability is implicit: if a user selects `coastal` in a non-water area, water-heavy scoring still runs but may only find weak candidates.
+- Route option diversity is improved but still needs live QA in universally scenic areas like Banff/Rockies.
 - Segment-level route scores in the response are synthetic presentation values.
-- Route scoring is additive, not normalized for route efficiency or scenic density.
 
 ## Bottom Line
 
-MoodRide currently generates a scenic route by building a local road graph, attaching precomputed H3 scenic tile scores to edges, and using a time-bounded beam search to maximize scenic reward. The result is asynchronous, cache-aware, and data-driven, but it is not yet a full loop optimizer or preference-aware routing engine.
+MoodRide currently generates scenic driving loops by selecting scenic H3 waypoint candidates, asking local OSRM for real Canada driving loops, scoring returned corridors with request-weighted scenic tiles, and returning up to three diversified route options. The result is asynchronous, cache-aware, data-driven, and preference-aware, but it still needs stronger product handling for vibe mismatch and low-quality areas.
 
 ## 10. Implementation Roadmap
 
@@ -227,9 +226,9 @@ MoodRide currently generates a scenic route by building a local road graph, atta
 12. Cache subgraphs by region.
    - Use H3 clusters or similar partitioning.
 
-13. Tune beam search.
-   - Use dynamic beam width.
-   - Prune aggressively when the candidate set grows too large.
+13. Tune hybrid candidate generation.
+   - Generate more profile-specific waypoint sectors.
+   - Prune same-corridor candidates earlier before OSRM calls when possible.
 
 ### Final Missing Piece
 
