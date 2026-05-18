@@ -4,14 +4,18 @@ Use this after app/data deploys to verify route quality and endpoint health acro
 
 ## Scope
 
-- 3 regions:
+- 6 regions:
   - Ontario (Toronto)
+  - Ontario/Quebec (Ottawa-Gatineau)
   - British Columbia (Vancouver)
+  - Alberta (Banff/Rockies)
+  - Saskatchewan (Regina/Prairie)
   - Maritimes (Fredericton)
-- 3 vibe profiles per region:
+- 4 vibe profiles per region:
   - `countryside`
   - `coastal`
   - `mountain`
+  - `forest`
 - Checks:
   - `GET /api/scenic-regions`
   - `POST /api/routes`
@@ -39,8 +43,11 @@ Outputs:
 - All scenarios complete (`status=COMPLETED`)
 - No `FAILED` or `TIMEOUT` jobs
 - Route options returned for each completed scenario
+- Score spread is non-zero for most completed scenarios
+- Regional differences are plausible: Rockies/coastal/Atlantic should generally score higher than flat prairie and dense urban areas
 
 ## Notes
 
 - For PowerShell web requests, use this script or `curl.exe` to avoid browser-parsing prompts from `curl` alias behavior.
 - Keep each output artifact as a baseline record for regressions between releases.
+- The route request uses the current numeric `preferenceVector` schema (`water`, `greenery`, `elevation`, `solitude`, `curves`, `poi`).

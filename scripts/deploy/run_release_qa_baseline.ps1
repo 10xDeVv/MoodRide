@@ -86,10 +86,28 @@ $regions = @(
         lng = -79.3832
     },
     @{
+        id = "ontario-ottawa-gatineau"
+        label = "Ontario/Quebec (Ottawa-Gatineau)"
+        lat = 45.4215
+        lng = -75.6972
+    },
+    @{
         id = "bc-vancouver"
         label = "British Columbia (Vancouver)"
         lat = 49.2827
         lng = -123.1207
+    },
+    @{
+        id = "alberta-banff"
+        label = "Alberta (Banff/Rockies)"
+        lat = 51.1784
+        lng = -115.5708
+    },
+    @{
+        id = "saskatchewan-regina"
+        label = "Saskatchewan (Regina/Prairie)"
+        lat = 50.4452
+        lng = -104.6189
     },
     @{
         id = "maritimes-fredericton"
@@ -100,9 +118,26 @@ $regions = @(
 )
 
 $vibeProfiles = @(
-    @("countryside"),
-    @("coastal"),
-    @("mountain")
+    @{
+        id = "countryside"
+        vibes = @("countryside")
+        preferenceVector = @{ water = 0.4; greenery = 0.7; elevation = 0.45; solitude = 0.7; curves = 0.6; poi = 0.3 }
+    },
+    @{
+        id = "coastal"
+        vibes = @("coastal")
+        preferenceVector = @{ water = 0.9; greenery = 0.7; elevation = 0.3; solitude = 0.6; curves = 0.45; poi = 0.2 }
+    },
+    @{
+        id = "mountain"
+        vibes = @("mountain")
+        preferenceVector = @{ water = 0.2; greenery = 0.55; elevation = 0.9; solitude = 0.7; curves = 0.8; poi = 0.2 }
+    },
+    @{
+        id = "forest"
+        vibes = @("forest")
+        preferenceVector = @{ water = 0.3; greenery = 0.9; elevation = 0.45; solitude = 0.8; curves = 0.45; poi = 0.2 }
+    }
 )
 
 $startedAt = Get-Date
@@ -135,7 +170,7 @@ foreach ($region in $regions) {
     }
 
     foreach ($profile in $vibeProfiles) {
-        $profileId = ($profile -join "+")
+        $profileId = [string]$profile.id
         Write-Host "==> Route job: $($region.id) [$profileId]"
 
         $submitBody = @{
@@ -143,8 +178,8 @@ foreach ($region in $regions) {
             lat = $region.lat
             lng = $region.lng
             timeBudgetMinutes = $TimeBudgetMinutes
-            vibes = $profile
-            preferenceVector = @{ avoidTolls = $false }
+            vibes = $profile.vibes
+            preferenceVector = $profile.preferenceVector
         }
         $submission = Invoke-ApiJson -Method "POST" -Uri "$BaseUrl/api/routes" -Body $submitBody
 
@@ -192,7 +227,8 @@ foreach ($region in $regions) {
             regionLabel = $region.label
             lat = $region.lat
             lng = $region.lng
-            vibes = $profile
+            vibes = $profile.vibes
+            preferenceVector = $profile.preferenceVector
             scenicTop10 = $scenicSummary
             jobId = $jobId
             status = $finalStatus
