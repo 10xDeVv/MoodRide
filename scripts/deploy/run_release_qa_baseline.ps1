@@ -16,12 +16,10 @@ function Invoke-ApiJson {
         [Parameter()][object]$Body
     )
 
-    $statusCode = 0
     $args = @{
         Method = $Method
         Uri = $Uri
-        StatusCodeVariable = "statusCode"
-        SkipHttpErrorCheck = $true
+        UseBasicParsing = $true
         Headers = @{ "Accept" = "application/json" }
     }
 
@@ -30,12 +28,34 @@ function Invoke-ApiJson {
         $args.Body = ($Body | ConvertTo-Json -Depth 10 -Compress)
     }
 
-    $raw = Invoke-RestMethod @args
+    $statusCode = 0
+    $content = $null
+    try {
+        $response = Invoke-WebRequest @args
+        $statusCode = [int]$response.StatusCode
+        $content = [string]$response.Content
+    } catch {
+        $webResponse = $_.Exception.Response
+        if ($null -eq $webResponse) {
+            throw
+        }
+        $statusCode = [int]$webResponse.StatusCode
+        try {
+            $reader = New-Object System.IO.StreamReader($webResponse.GetResponseStream())
+            $content = $reader.ReadToEnd()
+        } finally {
+            if ($reader) { $reader.Dispose() }
+        }
+    }
+
     if ($statusCode -lt 200 -or $statusCode -ge 300) {
-        $payload = try { $raw | ConvertTo-Json -Depth 10 -Compress } catch { [string]$raw }
+        $payload = if ($content) { $content } else { "<empty response>" }
         throw "HTTP $statusCode for $Method $Uri :: $payload"
     }
-    return $raw
+    if (-not $content) {
+        return $null
+    }
+    return $content | ConvertFrom-Json
 }
 
 function Get-PrimaryRouteId {
