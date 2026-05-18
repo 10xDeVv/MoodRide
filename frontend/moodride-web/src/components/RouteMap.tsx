@@ -6,12 +6,13 @@ import type { RouteDetailResponse } from "@/lib/types";
 
 interface Props {
   route: RouteDetailResponse | null;
+  theme?: "dark" | "light";
 }
 
 const PROFILE_COLORS: Record<string, string> = {
-  most_scenic: "#0D78FF",
-  balanced: "#118AB2",
-  shorter: "#1E5AA6"
+  most_scenic: "#00E5FF",
+  balanced: "#39FF57",
+  shorter: "#FF7C2A"
 };
 
 type LngLat = [number, number];
@@ -62,7 +63,7 @@ function buildSchematicPoints(coordinates: LngLat[], width: number, height: numb
     .join(" ");
 }
 
-export function RouteMap({ route }: Props) {
+export function RouteMap({ route, theme = "dark" }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<MapboxMap | null>(null);
   const [mapReady, setMapReady] = useState(false);
@@ -94,7 +95,7 @@ export function RouteMap({ route }: Props) {
 
       const map = new mapboxgl.Map({
         container: containerRef.current,
-        style: "mapbox://styles/mapbox/streets-v12",
+        style: theme === "dark" ? "mapbox://styles/mapbox/dark-v11" : "mapbox://styles/mapbox/outdoors-v12",
         center: [route.startLng, route.startLat],
         zoom: 11
       });
@@ -191,7 +192,7 @@ export function RouteMap({ route }: Props) {
         mapRef.current = null;
       }
     };
-  }, [route]);
+  }, [route, theme]);
 
   if (!route) {
     return <div className="map map-placeholder small">Route map appears here after job completion.</div>;
