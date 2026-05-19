@@ -550,6 +550,7 @@ public class RouteService {
         boolean liftBased = weightedLifts.values().stream().anyMatch(value -> value > ROUTE_EXPLANATION_LIFT_EPSILON);
         Map<String, Double> rankingSignals = buildExplanationRankingSignals(
             liftBased ? weightedLifts : weightedContributions,
+            weightedContributions,
             componentLifts,
             componentWeights,
             liftBased
@@ -683,6 +684,7 @@ public class RouteService {
 
     private Map<String, Double> buildExplanationRankingSignals(
         Map<String, Double> baseSignals,
+        Map<String, Double> fallbackSignals,
         Map<String, Double> componentLifts,
         Map<String, Double> componentWeights,
         boolean liftBased
@@ -729,7 +731,16 @@ public class RouteService {
         boolean hasNonPoiSignal = rankingSignals.entrySet().stream()
             .anyMatch(entry -> !"poi".equals(entry.getKey()) && entry.getValue() > ROUTE_EXPLANATION_LIFT_EPSILON);
         if (!hasNonPoiSignal) {
-            return Map.copyOf(baseSignals);
+            if (liftBased && fallbackSignals != null && !fallbackSignals.isEmpty()) {
+                return buildExplanationRankingSignals(
+                    fallbackSignals,
+                    Map.of(),
+                    componentLifts,
+                    componentWeights,
+                    false
+                );
+            }
+            return Map.copyOf(rankingSignals);
         }
         return Map.copyOf(rankingSignals);
     }
