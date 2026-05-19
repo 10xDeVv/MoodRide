@@ -23,6 +23,7 @@ import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -113,7 +114,7 @@ class RoutePlannerTest {
         assertThat(options).hasSize(3);
         assertThat(options.stream().map(RouteCandidate::getAlgorithmVersion).collect(Collectors.toSet()))
             .containsExactly("hybrid_osrm_v1");
-        assertThat(options.stream().map(candidate -> candidate.getWaypoints().size()).collect(Collectors.toSet()))
+        assertThat(options.stream().map(this::pathSignature).collect(Collectors.toSet()))
             .hasSizeGreaterThanOrEqualTo(2);
         assertThat(options.stream().map(RouteCandidate::getTotalScenicScore).collect(Collectors.toSet()))
             .hasSizeGreaterThan(1);
@@ -122,6 +123,27 @@ class RoutePlannerTest {
             .max()
             .orElse(0.0);
         assertThat(options.getFirst().getTotalScenicScore()).isEqualTo(maxScenicScore);
+    }
+
+    @Test
+    void shorterProfilePrefersUsefulShortRouteInsteadOfTinyRescueLoop() {
+        when(scenicScoreTileRepository.findByH3IndexIn(anyCollection())).thenReturn(highScenicTilesAroundStart());
+        int[] durations = {60, 56, 20, 47, 45, 50, 22, 48, 52, 24, 44, 40, 38, 35};
+        AtomicInteger callIndex = new AtomicInteger();
+        when(osrmTripClient.requestRoundTrip(anyList(), eq(RouteMode.DRIVE))).thenAnswer(invocation -> {
+            @SuppressWarnings("unchecked")
+            List<RoadNode> variant = invocation.getArgument(0);
+            int index = callIndex.getAndIncrement();
+            int durationMinutes = durations[Math.min(index, durations.length - 1)];
+            double distanceKm = durationMinutes * 0.75;
+            return Optional.of(new OsrmTripClient.TripResult(variant, distanceKm, durationMinutes));
+        });
+
+        List<RouteCandidate> options = routePlanner.generateRouteOptions(sampleJob(60));
+
+        assertThat(options).hasSize(3);
+        RouteCandidate shorter = options.get(2);
+        assertThat(shorter.getEstimatedMinutes()).isBetween(36, 55);
     }
 
     @Test
@@ -158,6 +180,12 @@ class RoutePlannerTest {
         RouteJob job = new RouteJob(UUID.randomUUID(), 46.0945, -64.7809, timeBudgetMinutes, "coastal");
         job.setId(UUID.randomUUID());
         return job;
+    }
+
+    private String pathSignature(RouteCandidate candidate) {
+        return candidate.getWaypoints().stream()
+            .map(node -> "%.4f,%.4f".formatted(node.getLatitude(), node.getLongitude()))
+            .collect(Collectors.joining("|"));
     }
 
     private List<ScenicScoreTile> highScenicTilesAroundStart() {

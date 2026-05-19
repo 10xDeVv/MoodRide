@@ -369,6 +369,55 @@ class RouteServiceTest {
     }
 
     @Test
+    void routeOptionExplanationKeepsPoiAsSupportingSignalWhenNotRequested() {
+        UUID jobId = UUID.randomUUID();
+        UUID userId = UUID.randomUUID();
+
+        RouteJob job = new RouteJob(userId, 43.6532, -79.3832, 60, "coastal");
+        job.setId(jobId);
+        job.setStatus(RouteJob.JobStatus.COMPLETED);
+
+        GeometryFactory geometryFactory = new GeometryFactory();
+        LineString lineString = geometryFactory.createLineString(new Coordinate[] {
+            new Coordinate(-79.3832, 43.6532),
+            new Coordinate(-79.3300, 43.6600)
+        });
+
+        Route route = new Route();
+        route.setId(UUID.randomUUID());
+        route.setJobId(jobId);
+        route.setRouteProfile("most_scenic");
+        route.setGeometry(lineString);
+        route.setScenicScore(0.78);
+        route.setTotalDistanceKm(24.0);
+        route.setEstimatedDurationMinutes(58);
+        route.setGeneratedAt(Instant.parse("2026-04-02T14:30:05Z"));
+
+        List<ScenicScoreTile> routeTiles = List.of(
+            scenicTile(H3Utils.getH3Index(43.6532, -79.3832, H3Utils.DEFAULT_RESOLUTION), 0.22, 0.42, 0.20, 0.38, 0.28, 1.00),
+            scenicTile(H3Utils.getH3Index(43.6600, -79.3300, H3Utils.DEFAULT_RESOLUTION), 0.20, 0.44, 0.22, 0.36, 0.30, 0.98)
+        );
+        List<ScenicScoreTile> baselineTiles = List.of(
+            scenicTile("baseline-c", 0.02, 0.40, 0.20, 0.35, 0.25, 0.96),
+            scenicTile("baseline-d", 0.02, 0.42, 0.21, 0.37, 0.25, 0.95)
+        );
+
+        lenient().when(jobRepository.findById(jobId)).thenReturn(Optional.of(job));
+        lenient().when(routeRepository.findByJobIdOrderByGeneratedAtAsc(jobId)).thenReturn(List.of(route));
+        lenient().when(scenicScoreTileRepository.findByH3IndexIn(anyCollection())).thenReturn(routeTiles);
+        lenient().when(scenicScoreTileRepository.findScenicTilesNearPoint(anyDouble(), anyDouble(), anyDouble(), anyInt()))
+            .thenReturn(baselineTiles);
+
+        RouteJobStatusResponse response = routeService.getRouteJobStatus(jobId);
+
+        var explanation = response.routeOptions().getFirst().explanation();
+        assertThat(explanation).isNotNull();
+        assertThat(explanation.leadingComponents().getFirst()).isEqualTo("water");
+        assertThat(explanation.leadingComponents().getFirst()).isNotEqualTo("poi");
+        assertThat(explanation.weightedContributions().get("poi")).isGreaterThan(explanation.weightedContributions().get("water"));
+    }
+
+    @Test
     void getRouteJobStatusUsesPersistedProfilesOverGeneratedOrder() {
         UUID jobId = UUID.randomUUID();
         UUID userId = UUID.randomUUID();

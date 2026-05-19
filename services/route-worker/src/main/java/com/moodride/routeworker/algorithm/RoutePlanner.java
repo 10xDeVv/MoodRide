@@ -39,6 +39,8 @@ public class RoutePlanner {
     private static final int ROUTE_OPTION_COUNT = 3;
     private static final double MAX_EFFECTIVE_DURATION_OVERRUN_RATIO = 1.15;
     private static final double DIVERSE_ROUTE_SIMILARITY_THRESHOLD = 0.72;
+    private static final double SHORTER_PROFILE_TARGET_RATIO = 0.78;
+    private static final double SHORTER_PROFILE_MIN_USEFUL_RATIO = 0.60;
     private static final int MAX_CORRIDOR_SIGNATURE_SAMPLES = 96;
     private static final int MIN_VIBE_AVAILABILITY_TILES = 3;
     private static final int VIBE_AVAILABILITY_TOP_N = 12;
@@ -256,16 +258,29 @@ public class RoutePlanner {
     }
 
     private ToDoubleFunction<RouteCandidate> shorterProfileScorer(List<RouteCandidate> candidates, int targetMinutes) {
-        int maxMinutes = Math.max(1, candidates.stream().mapToInt(RouteCandidate::getEstimatedMinutes).max().orElse(1));
         double maxDistance = Math.max(0.1, candidates.stream().mapToDouble(RouteCandidate::getTotalDistanceKm).max().orElse(0.1));
         return candidate -> {
-            double shorterTime = 1.0 - clamp01((double) candidate.getEstimatedMinutes() / maxMinutes);
             double shorterDistance = 1.0 - clamp01(candidate.getTotalDistanceKm() / maxDistance);
-            return (shorterTime * 0.42)
-                + (shorterDistance * 0.24)
-                + (candidate.getTotalScenicScore() * 0.22)
-                + (budgetFitScore(candidate, targetMinutes) * 0.12);
+            double usefulShorterFit = shorterProfileBudgetFitScore(candidate, targetMinutes);
+            return (usefulShorterFit * 0.46)
+                + (candidate.getTotalScenicScore() * 0.28)
+                + (budgetFitScore(candidate, targetMinutes) * 0.14)
+                + (shorterDistance * 0.08)
+                + (estimateCurvatureScore(candidate.getWaypoints()) * 0.04);
         };
+    }
+
+    private double shorterProfileBudgetFitScore(RouteCandidate candidate, int targetMinutes) {
+        double safeTarget = Math.max(1.0, targetMinutes);
+        double ratio = candidate.getEstimatedMinutes() / safeTarget;
+        double targetFit = 1.0 - clamp01(Math.abs(ratio - SHORTER_PROFILE_TARGET_RATIO) / 0.28);
+        if (ratio < SHORTER_PROFILE_MIN_USEFUL_RATIO) {
+            targetFit *= clamp01(ratio / SHORTER_PROFILE_MIN_USEFUL_RATIO) * 0.55;
+        }
+        if (ratio > 1.0) {
+            targetFit *= Math.max(0.35, 1.0 - ((ratio - 1.0) * 2.0));
+        }
+        return clamp01(targetFit);
     }
 
     private double budgetFitScore(RouteCandidate candidate, int targetMinutes) {

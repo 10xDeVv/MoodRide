@@ -92,6 +92,10 @@ public class RouteService {
     private static final double ROUTE_EXPLANATION_BASELINE_RADIUS_METERS = 50_000.0;
     private static final int ROUTE_EXPLANATION_BASELINE_TILE_LIMIT = 1_000;
     private static final double ROUTE_EXPLANATION_LIFT_EPSILON = 0.003;
+    private static final double ROUTE_EXPLANATION_POI_SUPPORT_MULTIPLIER = 0.18;
+    private static final double ROUTE_EXPLANATION_POI_REQUESTED_MULTIPLIER = 0.62;
+    private static final double ROUTE_EXPLANATION_POI_REQUESTED_WEIGHT = 0.12;
+    private static final double ROUTE_EXPLANATION_POI_EXCEPTIONAL_LIFT = 0.12;
 
     private final RouteJobRepository jobRepository;
     private final RouteRepository routeRepository;
@@ -544,7 +548,12 @@ public class RouteService {
         Map<String, Double> weightedContributions = buildWeightedContributions(averages, componentWeights);
         Map<String, Double> weightedLifts = buildWeightedLifts(componentLifts, componentWeights);
         boolean liftBased = weightedLifts.values().stream().anyMatch(value -> value > ROUTE_EXPLANATION_LIFT_EPSILON);
-        Map<String, Double> rankingSignals = liftBased ? weightedLifts : weightedContributions;
+        Map<String, Double> rankingSignals = buildExplanationRankingSignals(
+            liftBased ? weightedLifts : weightedContributions,
+            componentLifts,
+            componentWeights,
+            liftBased
+        );
 
         List<String> leadingComponents = rankingSignals.entrySet().stream()
             .sorted(Map.Entry.<String, Double>comparingByValue().reversed())
@@ -670,6 +679,46 @@ public class RouteService {
             weightedLifts.put(component, roundComponent(positiveLift * componentWeights.getOrDefault(component, 0.0)));
         }
         return Map.copyOf(weightedLifts);
+    }
+
+    private Map<String, Double> buildExplanationRankingSignals(
+        Map<String, Double> baseSignals,
+        Map<String, Double> componentLifts,
+        Map<String, Double> componentWeights,
+        boolean liftBased
+    ) {
+        if (baseSignals == null || baseSignals.isEmpty()) {
+            return Map.of();
+        }
+
+        Map<String, Double> rankingSignals = new LinkedHashMap<>();
+        for (String component : SUPPORTED_PREFERENCE_KEYS) {
+            double signal = baseSignals.getOrDefault(component, 0.0);
+            double weight = componentWeights == null ? 0.0 : componentWeights.getOrDefault(component, 0.0);
+            double lift = componentLifts == null ? 0.0 : componentLifts.getOrDefault(component, 0.0);
+
+            if ("poi".equals(component)) {
+                boolean requestedPoi = weight >= ROUTE_EXPLANATION_POI_REQUESTED_WEIGHT;
+                boolean exceptionalPoi = lift >= ROUTE_EXPLANATION_POI_EXCEPTIONAL_LIFT;
+                signal *= (requestedPoi || exceptionalPoi)
+                    ? ROUTE_EXPLANATION_POI_REQUESTED_MULTIPLIER
+                    : ROUTE_EXPLANATION_POI_SUPPORT_MULTIPLIER;
+            } else if (weight >= 0.16) {
+                signal *= 1.08;
+            }
+
+            if (liftBased && lift <= ROUTE_EXPLANATION_LIFT_EPSILON && !"poi".equals(component)) {
+                signal *= 0.40;
+            }
+            rankingSignals.put(component, roundComponent(signal));
+        }
+
+        boolean hasNonPoiSignal = rankingSignals.entrySet().stream()
+            .anyMatch(entry -> !"poi".equals(entry.getKey()) && entry.getValue() > ROUTE_EXPLANATION_LIFT_EPSILON);
+        if (!hasNonPoiSignal) {
+            return Map.copyOf(baseSignals);
+        }
+        return Map.copyOf(rankingSignals);
     }
 
     private String buildRouteExplanationSummary(
