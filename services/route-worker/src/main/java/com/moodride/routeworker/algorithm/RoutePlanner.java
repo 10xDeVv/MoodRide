@@ -740,7 +740,7 @@ public class RoutePlanner {
         double baseRadiusKm = Math.max(1.2, Math.min(10.0, timeBudgetMinutes / 14.0));
         List<Double> radii = List.of(baseRadiusKm * 0.75, baseRadiusKm, baseRadiusKm * 1.25);
         List<Integer> waypointCounts = List.of(6, 4, 3, 2);
-        List<Double> bearingOffsets = List.of(0.0, 30.0, 60.0);
+        List<Double> bearingOffsets = List.of(0.0);
 
         List<List<RoadNode>> variants = new ArrayList<>();
         for (double radiusKm : radii) {
