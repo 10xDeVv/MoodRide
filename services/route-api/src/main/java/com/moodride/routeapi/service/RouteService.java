@@ -92,10 +92,10 @@ public class RouteService {
     private static final double ROUTE_EXPLANATION_BASELINE_RADIUS_METERS = 50_000.0;
     private static final int ROUTE_EXPLANATION_BASELINE_TILE_LIMIT = 1_000;
     private static final double ROUTE_EXPLANATION_LIFT_EPSILON = 0.003;
-    private static final double ROUTE_EXPLANATION_POI_SUPPORT_MULTIPLIER = 0.18;
+    private static final double ROUTE_EXPLANATION_POI_SUPPORT_MULTIPLIER = 0.04;
     private static final double ROUTE_EXPLANATION_POI_REQUESTED_MULTIPLIER = 0.62;
-    private static final double ROUTE_EXPLANATION_POI_REQUESTED_WEIGHT = 0.12;
-    private static final double ROUTE_EXPLANATION_POI_EXCEPTIONAL_LIFT = 0.12;
+    private static final double ROUTE_EXPLANATION_POI_REQUESTED_WEIGHT = 0.30;
+    private static final double ROUTE_EXPLANATION_POI_SUPPORT_CAP_RATIO = 0.82;
 
     private final RouteJobRepository jobRepository;
     private final RouteRepository routeRepository;
@@ -692,15 +692,15 @@ public class RouteService {
         }
 
         Map<String, Double> rankingSignals = new LinkedHashMap<>();
+        boolean requestedPoi = false;
         for (String component : SUPPORTED_PREFERENCE_KEYS) {
             double signal = baseSignals.getOrDefault(component, 0.0);
             double weight = componentWeights == null ? 0.0 : componentWeights.getOrDefault(component, 0.0);
             double lift = componentLifts == null ? 0.0 : componentLifts.getOrDefault(component, 0.0);
 
             if ("poi".equals(component)) {
-                boolean requestedPoi = weight >= ROUTE_EXPLANATION_POI_REQUESTED_WEIGHT;
-                boolean exceptionalPoi = lift >= ROUTE_EXPLANATION_POI_EXCEPTIONAL_LIFT;
-                signal *= (requestedPoi || exceptionalPoi)
+                requestedPoi = weight >= ROUTE_EXPLANATION_POI_REQUESTED_WEIGHT;
+                signal *= requestedPoi
                     ? ROUTE_EXPLANATION_POI_REQUESTED_MULTIPLIER
                     : ROUTE_EXPLANATION_POI_SUPPORT_MULTIPLIER;
             } else if (weight >= 0.16) {
@@ -711,6 +711,19 @@ public class RouteService {
                 signal *= 0.40;
             }
             rankingSignals.put(component, roundComponent(signal));
+        }
+
+        double maxNonPoiSignal = rankingSignals.entrySet().stream()
+            .filter(entry -> !"poi".equals(entry.getKey()))
+            .mapToDouble(Map.Entry::getValue)
+            .max()
+            .orElse(0.0);
+        if (!requestedPoi && maxNonPoiSignal > ROUTE_EXPLANATION_LIFT_EPSILON) {
+            double cappedPoiSignal = Math.min(
+                rankingSignals.getOrDefault("poi", 0.0),
+                maxNonPoiSignal * ROUTE_EXPLANATION_POI_SUPPORT_CAP_RATIO
+            );
+            rankingSignals.put("poi", roundComponent(cappedPoiSignal));
         }
 
         boolean hasNonPoiSignal = rankingSignals.entrySet().stream()

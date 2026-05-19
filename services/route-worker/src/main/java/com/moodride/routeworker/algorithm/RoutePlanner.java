@@ -90,7 +90,7 @@ public class RoutePlanner {
         validateVibeAvailability(job, requestVibes, scoredTiles);
         List<List<RoadNode>> waypointVariants = buildWaypointRings(start, scoredTiles, job.getTimeBudgetMinutes());
         List<RouteCandidate> hybridCandidates = collectHybridCandidates(job, waypointVariants, preferences);
-        if (hybridCandidates.isEmpty() || hybridCandidates.size() < ROUTE_OPTION_COUNT) {
+        if (hybridCandidates.isEmpty() || !hasDiverseCandidatePool(hybridCandidates, job.getTimeBudgetMinutes())) {
             List<List<RoadNode>> syntheticVariants = buildSyntheticWaypointRings(start, job.getTimeBudgetMinutes());
             List<RouteCandidate> syntheticCandidates = collectHybridCandidates(job, syntheticVariants, preferences);
             if (hybridCandidates.isEmpty()) {
@@ -224,6 +224,24 @@ public class RoutePlanner {
         }
 
         return List.copyOf(selected);
+    }
+
+    private boolean hasDiverseCandidatePool(List<RouteCandidate> candidates, int targetMinutes) {
+        if (candidates == null || candidates.size() < ROUTE_OPTION_COUNT) {
+            return false;
+        }
+
+        List<RouteCandidate> diverse = new ArrayList<>();
+        candidates.stream()
+            .sorted(Comparator.comparingDouble((RouteCandidate candidate) -> mostScenicProfileScore(candidate, targetMinutes)).reversed())
+            .forEach(candidate -> {
+                boolean duplicate = diverse.stream()
+                    .anyMatch(existing -> candidateSignature(existing).equals(candidateSignature(candidate)));
+                if (!duplicate && isMeaningfullyDifferent(candidate, diverse, targetMinutes)) {
+                    diverse.add(candidate);
+                }
+            });
+        return diverse.size() >= ROUTE_OPTION_COUNT;
     }
 
     private RouteCandidate pickBestCandidate(List<RouteCandidate> candidates,
@@ -722,17 +740,20 @@ public class RoutePlanner {
         double baseRadiusKm = Math.max(1.2, Math.min(10.0, timeBudgetMinutes / 14.0));
         List<Double> radii = List.of(baseRadiusKm * 0.75, baseRadiusKm, baseRadiusKm * 1.25);
         List<Integer> waypointCounts = List.of(6, 4, 3, 2);
+        List<Double> bearingOffsets = List.of(0.0, 30.0, 60.0);
 
         List<List<RoadNode>> variants = new ArrayList<>();
         for (double radiusKm : radii) {
-            for (int waypointCount : waypointCounts) {
-                List<RoadNode> ring = new ArrayList<>();
-                ring.add(start);
-                for (int i = 0; i < waypointCount; i++) {
-                    double bearing = (360.0 / waypointCount) * i;
-                    ring.add(offsetNode(start, radiusKm, bearing));
+            for (double bearingOffset : bearingOffsets) {
+                for (int waypointCount : waypointCounts) {
+                    List<RoadNode> ring = new ArrayList<>();
+                    ring.add(start);
+                    for (int i = 0; i < waypointCount; i++) {
+                        double bearing = bearingOffset + ((360.0 / waypointCount) * i);
+                        ring.add(offsetNode(start, radiusKm, bearing));
+                    }
+                    variants.add(List.copyOf(ring));
                 }
-                variants.add(List.copyOf(ring));
             }
         }
 
