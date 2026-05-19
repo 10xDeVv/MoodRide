@@ -1,32 +1,36 @@
 :root {
   color-scheme: dark;
-  --font-heading: var(--font-display), "Bebas Neue", sans-serif;
-  --font-body: var(--font-space), "Space Grotesk", "Avenir Next", sans-serif;
+  --font-display-large: var(--font-display), "Bebas Neue", sans-serif;
+  --font-heading: var(--font-space), "Space Grotesk", "Avenir Next", sans-serif;
+  --font-body: var(--font-manrope), "Manrope", "Avenir Next", sans-serif;
   --font-label: var(--font-mono), "JetBrains Mono", monospace;
   --heading-transform: uppercase;
-  --heading-spacing: 0.015em;
+  --heading-spacing: 0.02em;
+  --display-spacing: -0.01em;
+  --display-transform: uppercase;
   --bg: #0a0a0a;
   --surface: #111111;
   --surface-muted: #161616;
-  --surface-blue: rgba(0, 229, 255, 0.08);
-  --surface-warm: rgba(255, 124, 42, 0.08);
-  --surface-green: rgba(57, 255, 87, 0.07);
-  --panel-bg: rgba(17, 17, 17, 0.94);
-  --hero-bg: rgba(12, 12, 12, 0.96);
-  --nav-bg: rgba(10, 10, 10, 0.96);
+  --surface-blue: rgba(0, 229, 255, 0.052);
+  --surface-warm: rgba(255, 124, 42, 0.052);
+  --surface-green: rgba(57, 255, 87, 0.045);
+  --panel-bg: #111111;
+  --hero-bg: #0a0a0a;
+  --nav-bg: rgba(10, 10, 10, 0.94);
   --input-bg: #111111;
-  --option-bg: #121212;
-  --option-hover-bg: #171717;
+  --option-bg: #111111;
+  --option-hover-bg: #181818;
   --tag-bg: #111111;
-  --tag-active-bg: rgba(0, 229, 255, 0.12);
+  --tag-active-bg: rgba(0, 229, 255, 0.10);
   --chip-bg: #111111;
   --border: #222222;
-  --border-strong: #2f2f2f;
-  --ink-900: #ffffff;
-  --ink-700: #e0e0e0;
-  --ink-500: #777777;
+  --border-strong: #2a2a2a;
+  --ink-900: #f7f7f7;
+  --ink-700: #d7d8dc;
+  --ink-500: #9ba0aa;
+  --ink-400: #676c76;
   --brand: #00e5ff;
-  --brand-dark: #89f3ff;
+  --brand-dark: #7cf4ff;
   --button-text: #050505;
   --blue: #7b6dfa;
   --blue-dark: #a9a2ff;
@@ -41,17 +45,23 @@
   --route-casing: #02080c;
   --marker-stroke: #050505;
   --grain-opacity: 0.038;
-  --radius: 8px;
-  --shadow: 0 24px 60px -42px rgba(0, 0, 0, 0.95);
+  --page-glow-1: rgba(0, 229, 255, 0.055);
+  --page-glow-2: rgba(255, 124, 42, 0.035);
+  --page-grid: transparent;
+  --radius: 6px;
+  --shadow: 0 20px 55px -44px rgba(0, 0, 0, 0.95);
 }
 
 :root[data-theme="light"] {
   color-scheme: light;
-  --font-heading: var(--font-serif), "Playfair Display", Georgia, serif;
-  --font-body: var(--font-mono), "JetBrains Mono", monospace;
+  --font-display-large: var(--font-serif), "Playfair Display", Georgia, serif;
+  --font-heading: var(--font-space), "Space Grotesk", "Avenir Next", sans-serif;
+  --font-body: var(--font-manrope), "Manrope", "Avenir Next", sans-serif;
   --font-label: var(--font-mono), "JetBrains Mono", monospace;
-  --heading-transform: none;
-  --heading-spacing: -0.025em;
+  --heading-transform: uppercase;
+  --heading-spacing: 0.04em;
+  --display-spacing: -0.025em;
+  --display-transform: none;
   --bg: #f8f5ef;
   --surface: #ffffff;
   --surface-muted: #f2ede5;
@@ -72,6 +82,7 @@
   --ink-900: #141210;
   --ink-700: #38322e;
   --ink-500: #6b6560;
+  --ink-400: #827b73;
   --brand: #1a3a6a;
   --brand-dark: #102a4d;
   --button-text: #ffffff;
@@ -88,6 +99,9 @@
   --route-casing: #141210;
   --marker-stroke: #fffdf8;
   --grain-opacity: 0.018;
+  --page-glow-1: rgba(26, 58, 106, 0.10);
+  --page-glow-2: rgba(106, 58, 26, 0.07);
+  --page-grid: rgba(26, 58, 106, 0.045);
   --shadow: 0 18px 45px -34px rgba(33, 25, 16, 0.34);
 }
 
@@ -111,13 +125,14 @@ body {
   font-family: var(--font-body);
   color: var(--ink-900);
   background:
-    radial-gradient(circle at top right, rgba(0, 229, 255, 0.10), transparent 30rem),
-    radial-gradient(circle at 18% 8%, rgba(255, 124, 42, 0.08), transparent 24rem),
-    linear-gradient(var(--map-grid) 1px, transparent 1px),
-    linear-gradient(90deg, var(--map-grid) 1px, transparent 1px),
+    radial-gradient(circle at 88% 0%, var(--page-glow-1), transparent 30rem),
+    radial-gradient(circle at 12% 3%, var(--page-glow-2), transparent 25rem),
+    linear-gradient(var(--page-grid) 1px, transparent 1px),
+    linear-gradient(90deg, var(--page-grid) 1px, transparent 1px),
     var(--bg);
   background-size: auto, auto, 44px 44px, 44px 44px, auto;
   -webkit-font-smoothing: antialiased;
+  text-rendering: geometricPrecision;
 }
 
 body::after {
@@ -156,12 +171,34 @@ p {
 }
 
 .product-hero {
+  position: relative;
   border: 1px solid var(--border);
   background: var(--hero-bg);
   box-shadow: var(--shadow);
   border-radius: var(--radius);
   padding: 0;
   overflow: hidden;
+}
+
+.product-hero::before {
+  content: "MOOD";
+  position: absolute;
+  right: clamp(-2rem, -2vw, -0.4rem);
+  top: 3.25rem;
+  z-index: 0;
+  color: color-mix(in srgb, var(--ink-900) 4%, transparent);
+  font-family: var(--font-display-large);
+  font-size: clamp(5.5rem, 16vw, 13rem);
+  letter-spacing: -0.04em;
+  line-height: 0.8;
+  pointer-events: none;
+  text-transform: var(--display-transform);
+  user-select: none;
+}
+
+.product-hero > * {
+  position: relative;
+  z-index: 1;
 }
 
 .product-nav {
@@ -177,12 +214,13 @@ p {
 }
 
 .brand-mark {
-  font-family: var(--font-heading);
+  font-family: var(--font-display-large);
   font-weight: 900;
-  font-size: 1.24rem;
-  letter-spacing: var(--heading-spacing);
+  font-size: 1.42rem;
+  letter-spacing: var(--display-spacing);
   color: var(--ink-900);
-  text-transform: var(--heading-transform);
+  line-height: 0.95;
+  text-transform: var(--display-transform);
 }
 
 .nav-actions {
@@ -197,6 +235,7 @@ p {
 .planner-eyebrow {
   display: inline-flex;
   align-items: center;
+  gap: 0.42rem;
   width: fit-content;
   border: 1px solid var(--border-strong);
   border-radius: 999px;
@@ -208,6 +247,16 @@ p {
   letter-spacing: 0.06em;
   padding: 0.3rem 0.58rem;
   font-family: var(--font-label);
+}
+
+.planner-eyebrow::before {
+  content: "";
+  width: 0.43rem;
+  height: 0.43rem;
+  border-radius: 999px;
+  background: var(--brand);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--brand) 12%, transparent);
+  animation: blink 1400ms step-end infinite;
 }
 
 .theme-switch {
@@ -259,17 +308,21 @@ p {
 }
 
 .planner-title {
+  font-family: var(--font-display-large);
   font-size: clamp(2rem, 4vw, 4.25rem);
   line-height: 0.9;
+  letter-spacing: var(--display-spacing);
   max-width: 760px;
   color: var(--ink-900);
+  text-transform: var(--display-transform);
 }
 
 .planner-subtitle {
   max-width: 660px;
   color: var(--ink-700);
-  line-height: 1.55;
+  line-height: 1.62;
   font-size: 1rem;
+  font-weight: 500;
 }
 
 .hero-stats {
@@ -300,6 +353,7 @@ p {
   font-weight: 800;
   text-transform: uppercase;
   letter-spacing: 0.06em;
+  font-family: var(--font-label);
 }
 
 .hero-stat-value {
@@ -332,6 +386,7 @@ p {
 
 .panel-title-row h2 {
   font-size: 1.02rem;
+  font-weight: 800;
 }
 
 .grid {
@@ -518,9 +573,9 @@ button:disabled {
 }
 
 .vibe-group {
-  border: 1px solid rgba(119, 143, 125, 0.32);
+  border: 1px solid var(--border);
   border-radius: calc(var(--radius) * 0.9);
-  background: linear-gradient(135deg, var(--surface-muted), color-mix(in srgb, var(--surface) 72%, var(--brand) 8%));
+  background: var(--surface-muted);
   padding: 0.58rem;
 }
 
@@ -534,12 +589,15 @@ button:disabled {
   color: var(--ink-900);
   font-size: 0.82rem;
   font-weight: 900;
+  font-family: var(--font-heading);
+  letter-spacing: 0.01em;
 }
 
 .vibe-group-copy small {
   color: var(--ink-500);
   font-size: 0.72rem;
-  font-weight: 700;
+  font-weight: 600;
+  line-height: 1.35;
 }
 
 .tag {
@@ -548,9 +606,11 @@ button:disabled {
   color: var(--ink-700);
   border-radius: 999px;
   padding: 0.37rem 0.7rem;
-  font-size: 0.86rem;
+  font-size: 0.78rem;
   font-family: var(--font-label);
-  letter-spacing: 0.02em;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
 }
 
 .tag.active {
@@ -633,6 +693,7 @@ button:disabled {
   background: var(--surface-blue);
   padding: 0.62rem 0.72rem;
   font-size: 0.9rem;
+  line-height: 1.45;
   color: var(--blue-dark);
   animation: message-fade-in 220ms ease;
 }
@@ -673,6 +734,8 @@ button:disabled {
 .route-option-title {
   font-weight: 900;
   font-size: 0.96rem;
+  font-family: var(--font-heading);
+  letter-spacing: 0.01em;
 }
 
 .route-option-reasons {
@@ -680,6 +743,8 @@ button:disabled {
   color: var(--brand-dark);
   font-size: 0.76rem;
   font-weight: 900;
+  font-family: var(--font-label);
+  letter-spacing: 0.04em;
   overflow-wrap: anywhere;
 }
 
@@ -687,7 +752,8 @@ button:disabled {
   display: block;
   color: var(--ink-700);
   font-size: 0.82rem;
-  line-height: 1.45;
+  line-height: 1.52;
+  font-weight: 500;
 }
 
 .route-option.active {
@@ -702,8 +768,9 @@ button:disabled {
 
 .route-story {
   border: 1px solid var(--border);
+  border-left: 3px solid var(--brand);
   border-radius: var(--radius);
-  background: linear-gradient(135deg, var(--surface-blue), color-mix(in srgb, var(--surface) 76%, var(--amber) 8%));
+  background: var(--surface-muted);
   padding: 0.72rem;
   display: grid;
   gap: 0.25rem;
@@ -713,8 +780,8 @@ button:disabled {
 .route-story p:last-child {
   color: var(--ink-900);
   font-size: 1rem;
-  font-weight: 800;
-  line-height: 1.45;
+  font-weight: 700;
+  line-height: 1.52;
 }
 
 .detail-metrics {
@@ -745,6 +812,7 @@ button:disabled {
   font-weight: 800;
   text-transform: uppercase;
   letter-spacing: 0.05em;
+  font-family: var(--font-label);
 }
 
 .detail-metric-value {
@@ -771,7 +839,8 @@ button:disabled {
 .route-explanation-summary {
   color: var(--ink-700);
   font-size: 0.92rem;
-  line-height: 1.45;
+  line-height: 1.55;
+  font-weight: 500;
 }
 
 .component-bars {
@@ -797,7 +866,7 @@ button:disabled {
 .component-label small {
   color: var(--ink-500);
   font-size: 0.68rem;
-  font-weight: 800;
+  font-weight: 700;
   line-height: 1.2;
 }
 
@@ -806,7 +875,7 @@ button:disabled {
   height: 0.52rem;
   overflow: hidden;
   border-radius: 999px;
-  background: var(--surface-muted);
+  background: color-mix(in srgb, var(--surface-muted) 84%, var(--ink-900) 8%);
 }
 
 .component-fill {
@@ -1071,6 +1140,16 @@ button:disabled {
   }
   50% {
     box-shadow: 0 0 0 6px rgba(190, 122, 42, 0.13);
+  }
+}
+
+@keyframes blink {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.28;
   }
 }
 
