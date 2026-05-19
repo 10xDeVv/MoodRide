@@ -20,6 +20,8 @@ import org.springframework.cache.annotation.CacheEvict;
 import org.springframework.cache.annotation.Cacheable;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.transaction.annotation.Transactional;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
@@ -135,7 +137,7 @@ public class RouteService {
         job.setPreferenceVector(serializePreferenceVector(normalizePreferenceVector(request.preferenceVector())));
         jobRepository.save(job);
 
-        kafkaTemplate.send(RouteJobEvent.TOPIC, job.getId().toString(), job.getId().toString());
+        publishRouteJobAfterCommit(job.getId());
 
         return new RouteSubmissionResponse(
             job.getId(),
@@ -147,6 +149,21 @@ public class RouteService {
             job.getRetryCount(),
             job.getMaxRetries()
         );
+    }
+
+    private void publishRouteJobAfterCommit(UUID jobId) {
+        Runnable publish = () -> kafkaTemplate.send(RouteJobEvent.TOPIC, jobId.toString(), jobId.toString());
+        if (!TransactionSynchronizationManager.isActualTransactionActive()) {
+            publish.run();
+            return;
+        }
+
+        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+            @Override
+            public void afterCommit() {
+                publish.run();
+            }
+        });
     }
 
     public RouteJobStatusResponse getRouteJobStatus(UUID jobId) {
