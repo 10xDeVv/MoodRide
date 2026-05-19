@@ -511,7 +511,109 @@ public class RouteService {
             ));
         }
 
-        return List.copyOf(options);
+        return diversifyRouteOptionExplanations(options);
+    }
+
+    private List<RouteOptionResponse> diversifyRouteOptionExplanations(List<RouteOptionResponse> options) {
+        if (options == null || options.size() < 2) {
+            return options == null ? List.of() : List.copyOf(options);
+        }
+
+        Set<String> uniqueLeadingComponents = new HashSet<>();
+        for (RouteOptionResponse option : options) {
+            RouteOptionExplanationResponse explanation = option.explanation();
+            if (explanation == null || explanation.leadingComponents() == null || explanation.leadingComponents().isEmpty()) {
+                return List.copyOf(options);
+            }
+            uniqueLeadingComponents.add(explanation.leadingComponents().getFirst());
+        }
+        if (uniqueLeadingComponents.size() != 1) {
+            return List.copyOf(options);
+        }
+
+        Set<String> usedLeadingComponents = new HashSet<>();
+        List<RouteOptionResponse> diversified = new ArrayList<>(options.size());
+        for (RouteOptionResponse option : options) {
+            RouteOptionExplanationResponse explanation = option.explanation();
+            List<String> reorderedLeadingComponents = reorderLeadingComponentsForProfile(
+                option.profile(),
+                explanation,
+                usedLeadingComponents
+            );
+            if (reorderedLeadingComponents.isEmpty()) {
+                diversified.add(option);
+                continue;
+            }
+
+            usedLeadingComponents.add(reorderedLeadingComponents.getFirst());
+            boolean liftBased = explanation.componentLifts().getOrDefault(reorderedLeadingComponents.getFirst(), 0.0)
+                > ROUTE_EXPLANATION_LIFT_EPSILON;
+            RouteOptionExplanationResponse diversifiedExplanation = new RouteOptionExplanationResponse(
+                explanation.componentAverages(),
+                explanation.baselineAverages(),
+                explanation.componentLifts(),
+                explanation.componentWeights(),
+                explanation.weightedContributions(),
+                reorderedLeadingComponents,
+                buildRouteExplanationSummary(
+                    reorderedLeadingComponents,
+                    explanation.componentLifts(),
+                    explanation.weightedContributions(),
+                    liftBased
+                ),
+                explanation.sampleTileCount(),
+                explanation.baselineTileCount()
+            );
+            diversified.add(new RouteOptionResponse(
+                option.profile(),
+                option.routeId(),
+                option.routeUrl(),
+                option.scenicScore(),
+                option.totalDistanceKm(),
+                option.estimatedDurationMinutes(),
+                diversifiedExplanation
+            ));
+        }
+        return List.copyOf(diversified);
+    }
+
+    private List<String> reorderLeadingComponentsForProfile(
+        String profile,
+        RouteOptionExplanationResponse explanation,
+        Set<String> usedLeadingComponents
+    ) {
+        List<String> leadingComponents = explanation.leadingComponents();
+        if (leadingComponents == null || leadingComponents.isEmpty()) {
+            return List.of();
+        }
+
+        String normalizedProfile = normalizeRouteProfile(profile);
+        List<String> profilePreference;
+        if ("balanced".equals(normalizedProfile)) {
+            profilePreference = List.of("solitude", "greenery", "curves", "elevation", "water", "poi");
+        } else if ("shorter".equals(normalizedProfile)) {
+            profilePreference = List.of("curves", "elevation", "solitude", "greenery", "water", "poi");
+        } else {
+            profilePreference = leadingComponents;
+        }
+
+        String preferred = profilePreference.stream()
+            .filter(leadingComponents::contains)
+            .filter(component -> !usedLeadingComponents.contains(component))
+            .findFirst()
+            .orElseGet(() -> leadingComponents.stream()
+                .filter(component -> !usedLeadingComponents.contains(component))
+                .findFirst()
+                .orElse(leadingComponents.getFirst()));
+
+        List<String> reordered = new ArrayList<>();
+        reordered.add(preferred);
+        for (String component : leadingComponents) {
+            if (!component.equals(preferred)) {
+                reordered.add(component);
+            }
+        }
+        return List.copyOf(reordered);
     }
 
     private RouteOptionExplanationResponse buildRouteOptionExplanation(

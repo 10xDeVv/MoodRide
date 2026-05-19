@@ -418,6 +418,45 @@ class RouteServiceTest {
     }
 
     @Test
+    void routeOptionExplanationsDiversifyLeadingComponentsWhenAllOptionsMatch() {
+        UUID jobId = UUID.randomUUID();
+        UUID userId = UUID.randomUUID();
+
+        RouteJob job = new RouteJob(userId, 43.6532, -79.3832, 60, "coastal");
+        job.setId(jobId);
+        job.setStatus(RouteJob.JobStatus.COMPLETED);
+
+        GeometryFactory geometryFactory = new GeometryFactory();
+        List<Route> routes = List.of(
+            route(jobId, "most_scenic", geometryFactory, -79.3832, 43.6532, -79.3300, 43.6600, 0.78, 58, 24.0),
+            route(jobId, "balanced", geometryFactory, -79.3832, 43.6532, -79.3400, 43.6650, 0.76, 55, 22.0),
+            route(jobId, "shorter", geometryFactory, -79.3832, 43.6532, -79.3500, 43.6500, 0.74, 48, 18.0)
+        );
+        List<ScenicScoreTile> routeTiles = List.of(
+            scenicTile(H3Utils.getH3Index(43.6532, -79.3832, H3Utils.DEFAULT_RESOLUTION), 1.00, 0.42, 0.48, 0.55, 0.36, 0.20),
+            scenicTile(H3Utils.getH3Index(43.6600, -79.3300, H3Utils.DEFAULT_RESOLUTION), 0.98, 0.44, 0.46, 0.57, 0.34, 0.18)
+        );
+        List<ScenicScoreTile> baselineTiles = List.of(
+            scenicTile("baseline-e", 0.97, 0.40, 0.44, 0.50, 0.30, 0.18),
+            scenicTile("baseline-f", 0.96, 0.42, 0.43, 0.51, 0.31, 0.19)
+        );
+
+        lenient().when(jobRepository.findById(jobId)).thenReturn(Optional.of(job));
+        lenient().when(routeRepository.findByJobIdOrderByGeneratedAtAsc(jobId)).thenReturn(routes);
+        lenient().when(scenicScoreTileRepository.findByH3IndexIn(anyCollection())).thenReturn(routeTiles);
+        lenient().when(scenicScoreTileRepository.findScenicTilesNearPoint(anyDouble(), anyDouble(), anyDouble(), anyInt()))
+            .thenReturn(baselineTiles);
+
+        RouteJobStatusResponse response = routeService.getRouteJobStatus(jobId);
+
+        assertThat(response.routeOptions()).hasSize(3);
+        assertThat(response.routeOptions().stream()
+            .map(option -> option.explanation().leadingComponents().getFirst())
+            .toList())
+            .doesNotHaveDuplicates();
+    }
+
+    @Test
     void getRouteJobStatusUsesPersistedProfilesOverGeneratedOrder() {
         UUID jobId = UUID.randomUUID();
         UUID userId = UUID.randomUUID();
@@ -469,6 +508,31 @@ class RouteServiceTest {
     @SuppressWarnings("unchecked")
     private static Map<String, Object> castMap(Object value) {
         return (Map<String, Object>) value;
+    }
+
+    private static Route route(UUID jobId,
+                               String profile,
+                               GeometryFactory geometryFactory,
+                               double startLng,
+                               double startLat,
+                               double endLng,
+                               double endLat,
+                               double scenicScore,
+                               int durationMinutes,
+                               double distanceKm) {
+        Route route = new Route();
+        route.setId(UUID.randomUUID());
+        route.setJobId(jobId);
+        route.setRouteProfile(profile);
+        route.setGeometry(geometryFactory.createLineString(new Coordinate[] {
+            new Coordinate(startLng, startLat),
+            new Coordinate(endLng, endLat)
+        }));
+        route.setScenicScore(scenicScore);
+        route.setTotalDistanceKm(distanceKm);
+        route.setEstimatedDurationMinutes(durationMinutes);
+        route.setGeneratedAt(Instant.parse("2026-04-02T14:30:05Z"));
+        return route;
     }
 
     private static ScenicScoreTile scenicTile(

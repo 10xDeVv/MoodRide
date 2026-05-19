@@ -39,9 +39,11 @@ public class RoutePlanner {
     private static final int ROUTE_OPTION_COUNT = 3;
     private static final double MAX_EFFECTIVE_DURATION_OVERRUN_RATIO = 1.15;
     private static final double DIVERSE_ROUTE_SIMILARITY_THRESHOLD = 0.72;
+    private static final double ROUTE_OPTION_MIN_SEPARATION_KM = 0.35;
     private static final double SHORTER_PROFILE_TARGET_RATIO = 0.78;
     private static final double SHORTER_PROFILE_MIN_USEFUL_RATIO = 0.60;
     private static final int MAX_CORRIDOR_SIGNATURE_SAMPLES = 96;
+    private static final int MAX_GEOMETRY_SEPARATION_SAMPLES = 80;
     private static final int MIN_VIBE_AVAILABILITY_TILES = 3;
     private static final int VIBE_AVAILABILITY_TOP_N = 12;
     private static final double MIN_VIBE_BEST_FIT_SCORE = 0.32;
@@ -112,7 +114,23 @@ public class RoutePlanner {
         }
         if (!hybridCandidates.isEmpty()) {
             List<RouteCandidate> differentiated = differentiateFlatScenicScores(hybridCandidates, job.getTimeBudgetMinutes());
-            return selectRouteOptions(differentiated, job.getTimeBudgetMinutes());
+            List<RouteCandidate> selected = selectRouteOptions(differentiated, job.getTimeBudgetMinutes());
+            if (selected.size() >= ROUTE_OPTION_COUNT && minRouteSeparationKm(selected) < ROUTE_OPTION_MIN_SEPARATION_KM) {
+                List<RouteCandidate> rescueCandidates = collectHybridCandidates(
+                    job,
+                    buildDiversityRescueWaypointRings(start, job.getTimeBudgetMinutes()),
+                    preferences
+                );
+                if (!rescueCandidates.isEmpty()) {
+                    List<RouteCandidate> expanded = differentiateFlatScenicScores(
+                        combineCandidates(differentiated, rescueCandidates),
+                        job.getTimeBudgetMinutes()
+                    );
+                    selected = selectRouteOptions(expanded, job.getTimeBudgetMinutes());
+                    logger.info("Hybrid routing used diversity-rescue waypoint variants for job {}", job.getId());
+                }
+            }
+            return selected;
         }
 
         int maxAllowedMinutes = maxAllowedMinutes(job.getTimeBudgetMinutes());
@@ -218,7 +236,7 @@ public class RoutePlanner {
         if (selected.size() < ROUTE_OPTION_COUNT) {
             candidates.stream()
                 .filter(candidate -> selected.stream().noneMatch(existing -> candidateSignature(existing).equals(candidateSignature(candidate))))
-                .sorted(Comparator.comparingDouble((RouteCandidate candidate) -> mostScenicProfileScore(candidate, targetMinutes)).reversed())
+                .sorted(Comparator.comparingDouble((RouteCandidate candidate) -> fallbackOptionScore(candidate, selected, targetMinutes)).reversed())
                 .limit(ROUTE_OPTION_COUNT - selected.size())
                 .forEach(selected::add);
         }
@@ -316,6 +334,11 @@ public class RoutePlanner {
     private double diversityPenalty(RouteCandidate candidate, List<RouteCandidate> selected, int targetMinutes) {
         double penalty = 0.0;
         for (RouteCandidate existing : selected) {
+            double separationKm = geometrySeparationKm(candidate, existing);
+            if (separationKm < ROUTE_OPTION_MIN_SEPARATION_KM) {
+                penalty = Math.max(penalty, (ROUTE_OPTION_MIN_SEPARATION_KM - separationKm) * 0.65);
+            }
+
             double similarity = routeSimilarity(candidate, existing);
             if (similarity > DIVERSE_ROUTE_SIMILARITY_THRESHOLD) {
                 penalty = Math.max(penalty, 0.28 + (similarity - DIVERSE_ROUTE_SIMILARITY_THRESHOLD));
@@ -332,8 +355,26 @@ public class RoutePlanner {
         return penalty;
     }
 
+    private double fallbackOptionScore(RouteCandidate candidate, List<RouteCandidate> selected, int targetMinutes) {
+        double minSeparationKm = selected.isEmpty()
+            ? ROUTE_OPTION_MIN_SEPARATION_KM
+            : selected.stream()
+                .mapToDouble(existing -> geometrySeparationKm(candidate, existing))
+                .min()
+                .orElse(0.0);
+        double separationScore = clamp01(minSeparationKm / ROUTE_OPTION_MIN_SEPARATION_KM);
+        return mostScenicProfileScore(candidate, targetMinutes)
+            + (separationScore * 0.30)
+            + (budgetFitScore(candidate, targetMinutes) * 0.10)
+            - diversityPenalty(candidate, selected, targetMinutes);
+    }
+
     private boolean isMeaningfullyDifferent(RouteCandidate candidate, List<RouteCandidate> selected, int targetMinutes) {
         for (RouteCandidate existing : selected) {
+            if (geometrySeparationKm(candidate, existing) < ROUTE_OPTION_MIN_SEPARATION_KM) {
+                return false;
+            }
+
             double similarity = routeSimilarity(candidate, existing);
             if (similarity > DIVERSE_ROUTE_SIMILARITY_THRESHOLD) {
                 return false;
@@ -348,6 +389,63 @@ public class RoutePlanner {
             }
         }
         return true;
+    }
+
+    private double minRouteSeparationKm(List<RouteCandidate> candidates) {
+        if (candidates == null || candidates.size() < 2) {
+            return ROUTE_OPTION_MIN_SEPARATION_KM;
+        }
+
+        double minSeparationKm = Double.POSITIVE_INFINITY;
+        for (int i = 0; i < candidates.size(); i++) {
+            for (int j = i + 1; j < candidates.size(); j++) {
+                minSeparationKm = Math.min(minSeparationKm, geometrySeparationKm(candidates.get(i), candidates.get(j)));
+            }
+        }
+        return Double.isInfinite(minSeparationKm) ? ROUTE_OPTION_MIN_SEPARATION_KM : minSeparationKm;
+    }
+
+    private double geometrySeparationKm(RouteCandidate left, RouteCandidate right) {
+        List<RoadNode> leftSamples = sampledGeometryPoints(left.getWaypoints());
+        List<RoadNode> rightSamples = sampledGeometryPoints(right.getWaypoints());
+        if (leftSamples.isEmpty() || rightSamples.isEmpty()) {
+            return ROUTE_OPTION_MIN_SEPARATION_KM;
+        }
+
+        double forward = averageNearestDistanceKm(leftSamples, rightSamples);
+        double reverse = averageNearestDistanceKm(rightSamples, leftSamples);
+        return (forward + reverse) / 2.0;
+    }
+
+    private List<RoadNode> sampledGeometryPoints(List<RoadNode> points) {
+        if (points == null || points.isEmpty()) {
+            return List.of();
+        }
+        if (points.size() <= MAX_GEOMETRY_SEPARATION_SAMPLES) {
+            return points;
+        }
+
+        List<RoadNode> sampled = new ArrayList<>(MAX_GEOMETRY_SEPARATION_SAMPLES);
+        int lastIndex = points.size() - 1;
+        for (int i = 0; i < MAX_GEOMETRY_SEPARATION_SAMPLES; i++) {
+            int index = (int) Math.round((i * lastIndex) / (double) Math.max(1, MAX_GEOMETRY_SEPARATION_SAMPLES - 1));
+            sampled.add(points.get(index));
+        }
+        return sampled;
+    }
+
+    private double averageNearestDistanceKm(List<RoadNode> fromPoints, List<RoadNode> toPoints) {
+        double sum = 0.0;
+        for (RoadNode point : fromPoints) {
+            double minDistanceKm = Double.POSITIVE_INFINITY;
+            for (RoadNode candidate : toPoints) {
+                minDistanceKm = Math.min(minDistanceKm, distanceKm(point, candidate));
+            }
+            if (!Double.isInfinite(minDistanceKm)) {
+                sum += minDistanceKm;
+            }
+        }
+        return sum / Math.max(1, fromPoints.size());
     }
 
     private int minDurationSeparationMinutes(int targetMinutes) {
@@ -788,6 +886,22 @@ public class RoutePlanner {
             }
         }
 
+        return deduplicateRings(variants);
+    }
+
+    private List<List<RoadNode>> buildDiversityRescueWaypointRings(RoadNode start, int timeBudgetMinutes) {
+        double baseRadiusKm = Math.max(1.5, Math.min(9.0, timeBudgetMinutes / 12.0));
+        List<Double> bearings = List.of(45.0, 135.0, 225.0, 315.0);
+
+        List<List<RoadNode>> variants = new ArrayList<>();
+        for (double bearing : bearings) {
+            variants.add(List.of(
+                start,
+                offsetNode(start, baseRadiusKm, bearing),
+                offsetNode(start, baseRadiusKm * 1.15, bearing + 35.0),
+                offsetNode(start, baseRadiusKm, bearing + 70.0)
+            ));
+        }
         return deduplicateRings(variants);
     }
 
