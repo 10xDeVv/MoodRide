@@ -1,0 +1,137 @@
+[
+  {
+    "id": "toronto-coastal-30",
+    "city": "Toronto",
+    "region": "Ontario",
+    "lat": 43.6532,
+    "lng": -79.3832,
+    "timeBudgetMinutes": 30,
+    "vibes": ["coastal"]
+  },
+  {
+    "id": "toronto-mountain-mismatch-60",
+    "city": "Toronto",
+    "region": "Ontario",
+    "lat": 43.6532,
+    "lng": -79.3832,
+    "timeBudgetMinutes": 60,
+    "vibes": ["mountain"]
+  },
+  {
+    "id": "vancouver-coastal-60",
+    "city": "Vancouver",
+    "region": "British Columbia",
+    "lat": 49.2827,
+    "lng": -123.1207,
+    "timeBudgetMinutes": 60,
+    "vibes": ["coastal"]
+  },
+  {
+    "id": "vancouver-nature-escape-90",
+    "city": "Vancouver",
+    "region": "British Columbia",
+    "lat": 49.2827,
+    "lng": -123.1207,
+    "timeBudgetMinutes": 90,
+    "vibes": ["nature_escape"]
+  },
+  {
+    "id": "banff-mountain-winding-90",
+    "city": "Banff",
+    "region": "Alberta",
+    "lat": 51.1784,
+    "lng": -115.5708,
+    "timeBudgetMinutes": 90,
+    "vibes": ["mountain", "winding_roads"]
+  },
+  {
+    "id": "banff-coastal-mismatch-60",
+    "city": "Banff",
+    "region": "Alberta",
+    "lat": 51.1784,
+    "lng": -115.5708,
+    "timeBudgetMinutes": 60,
+    "vibes": ["coastal"]
+  },
+  {
+    "id": "regina-open-roads-60",
+    "city": "Regina",
+    "region": "Saskatchewan",
+    "lat": 50.4452,
+    "lng": -104.6189,
+    "timeBudgetMinutes": 60,
+    "vibes": ["open_roads"]
+  },
+  {
+    "id": "regina-mountain-mismatch-60",
+    "city": "Regina",
+    "region": "Saskatchewan",
+    "lat": 50.4452,
+    "lng": -104.6189,
+    "timeBudgetMinutes": 60,
+    "vibes": ["mountain"]
+  },
+  {
+    "id": "fredericton-riverside-relaxing-60",
+    "city": "Fredericton",
+    "region": "New Brunswick",
+    "lat": 45.9636,
+    "lng": -66.6431,
+    "timeBudgetMinutes": 60,
+    "vibes": ["riverside", "relaxing"]
+  },
+  {
+    "id": "halifax-coastal-60",
+    "city": "Halifax",
+    "region": "Nova Scotia",
+    "lat": 44.6488,
+    "lng": -63.5752,
+    "timeBudgetMinutes": 60,
+    "vibes": ["coastal"]
+  },
+  {
+    "id": "quebec-city-photo-worthy-60",
+    "city": "Quebec City",
+    "region": "Quebec",
+    "lat": 46.8139,
+    "lng": -71.208,
+    "timeBudgetMinutes": 60,
+    "vibes": ["photo_worthy"]
+  },
+  {
+    "id": "montreal-date-night-45",
+    "city": "Montreal",
+    "region": "Quebec",
+    "lat": 45.5017,
+    "lng": -73.5673,
+    "timeBudgetMinutes": 45,
+    "vibes": ["date_night"]
+  },
+  {
+    "id": "winnipeg-quiet-open-roads-60",
+    "city": "Winnipeg",
+    "region": "Manitoba",
+    "lat": 49.8951,
+    "lng": -97.1384,
+    "timeBudgetMinutes": 60,
+    "vibes": ["quiet", "open_roads"]
+  },
+  {
+    "id": "calgary-countryside-60",
+    "city": "Calgary",
+    "region": "Alberta",
+    "lat": 51.0447,
+    "lng": -114.0719,
+    "timeBudgetMinutes": 60,
+    "vibes": ["countryside"]
+  },
+  {
+    "id": "st-johns-coastal-60",
+    "city": "St. John's",
+    "region": "Newfoundland and Labrador",
+    "lat": 47.5615,
+    "lng": -52.7126,
+    "timeBudgetMinutes": 60,
+    "vibes": ["coastal"]
+  }
+]

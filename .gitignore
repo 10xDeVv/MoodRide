@@ -109,6 +109,7 @@ coverage/
 .nyc_output/
 
 # Generated files
+artifacts/
 generated/
 **/generated/
 
