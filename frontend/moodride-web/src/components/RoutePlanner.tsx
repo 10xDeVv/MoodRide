@@ -109,15 +109,6 @@ const COMPONENT_DISPLAY_NAMES: Record<string, string> = {
 };
 const COMPONENT_ORDER = ["water", "greenery", "elevation", "solitude", "curves", "poi"];
 const IOS_DEVICE_REGEX = /iPad|iPhone|iPod/;
-type ThemePreference = "dark" | "light" | "system";
-type ResolvedTheme = "dark" | "light";
-
-const THEME_STORAGE_KEY = "moodride-theme";
-const THEME_OPTIONS: Array<{ value: ThemePreference; label: string; title: string }> = [
-  { value: "dark", label: "Night", title: "Use cinematic dark mode" },
-  { value: "light", label: "Day", title: "Use editorial light mode" },
-  { value: "system", label: "Auto", title: "Follow system theme" }
-];
 const GOOGLE_TRAVEL_MODES: Record<RouteMode, string> = {
   drive: "driving",
   walk: "walking",
@@ -282,133 +273,9 @@ function requestBrowserLocation(
 }
 
 type JobPhase = "idle" | "submitting" | "tracking" | "completed" | "failed";
+
 function staggerStyle(index: number): CSSProperties {
   return { ["--stagger-index" as const]: index } as CSSProperties;
-}
-
-function normalizeThemePreference(value: string | null): ThemePreference {
-  return value === "light" || value === "system" || value === "dark" ? value : "dark";
-}
-
-function readStoredThemePreference(): ThemePreference {
-  if (typeof window === "undefined") {
-    return "dark";
-  }
-  return normalizeThemePreference(window.localStorage.getItem(THEME_STORAGE_KEY));
-}
-
-function resolveSystemTheme(): ResolvedTheme {
-  if (typeof window === "undefined") {
-    return "dark";
-  }
-  return window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
-}
-
-function uniqueList(values: string[]): string[] {
-  return values.filter((value, index, list) => value.length > 0 && list.indexOf(value) === index);
-}
-
-function joinHumanList(values: string[]): string {
-  const uniqueValues = uniqueList(values);
-  if (uniqueValues.length === 0) {
-    return "balanced scenic texture";
-  }
-  if (uniqueValues.length === 1) {
-    return uniqueValues[0];
-  }
-  return `${uniqueValues.slice(0, -1).join(", ")} and ${uniqueValues[uniqueValues.length - 1]}`;
-}
-
-function componentStoryPhrase(component: string, value: number | undefined): string {
-  const score = typeof value === "number" && Number.isFinite(value) ? value : 0;
-  switch (component) {
-    case "water":
-      return score >= 0.72 ? "strong water views" : "water views";
-    case "greenery":
-      return score >= 0.58 ? "green corridors" : "open space";
-    case "elevation":
-      return score >= 0.5 ? "stronger elevation" : "gentle terrain changes";
-    case "solitude":
-      return score >= 0.58 ? "quiet roads" : "calmer stretches";
-    case "curves":
-      return score >= 0.34 ? "winding segments" : "light curves";
-    case "poi":
-      return "a few scenic pull-offs";
-    default:
-      return "balanced scenic texture";
-  }
-}
-
-function fallbackVibePhrases(vibes: string[]): string[] {
-  const active = new Set(vibes);
-  const phrases: string[] = [];
-  if (active.has("coastal") || active.has("riverside") || active.has("sunset") || active.has("photo_worthy")) {
-    phrases.push("water views");
-  }
-  if (active.has("mountain") || active.has("adventure") || active.has("winding_roads")) {
-    phrases.push("terrain and curves");
-  }
-  if (active.has("forest") || active.has("nature_escape")) {
-    phrases.push("forest cover");
-  }
-  if (active.has("countryside") || active.has("open_roads") || active.has("sunday_cruise")) {
-    phrases.push("open space");
-  }
-  if (active.has("relaxing") || active.has("smooth_cruise") || active.has("quiet") || active.has("minimal_traffic")) {
-    phrases.push("easy cruising");
-  }
-  if (active.has("hidden_gems")) {
-    phrases.push("off-main-road character");
-  }
-  return phrases;
-}
-
-function rankedExplanationComponents(option: RouteOptionResponse | undefined): string[] {
-  const explanation = option?.explanation;
-  if (!explanation) {
-    return [];
-  }
-  if (Array.isArray(explanation.leadingComponents) && explanation.leadingComponents.length > 0) {
-    return explanation.leadingComponents;
-  }
-  return Object.entries(explanation.weightedContributions ?? {})
-    .sort((left, right) => right[1] - left[1])
-    .map(([component]) => component);
-}
-
-function resolveRouteStoryPrefix(option: RouteOptionResponse | undefined, vibes: string[], rankedComponents: string[]): string {
-  const active = new Set(vibes);
-  const profile = option?.profile ?? "";
-  if (profile === "shorter") {
-    return "Compact scenic loop";
-  }
-  if (active.has("adventure") || active.has("winding_roads") || active.has("mountain") || rankedComponents.includes("curves")) {
-    return "More adventurous route";
-  }
-  if (active.has("relaxing") || active.has("smooth_cruise") || active.has("quiet")) {
-    return "Best for a smooth cruise";
-  }
-  if (active.has("countryside") || active.has("open_roads") || rankedComponents.includes("solitude")) {
-    return "Quiet rural loop";
-  }
-  if (active.has("sunset") || active.has("photo_worthy") || active.has("photo_run") || active.has("date_night")) {
-    return "Photo-ready scenic loop";
-  }
-  if (profile === "balanced") {
-    return "Balanced scenic loop";
-  }
-  return "Curated scenic loop";
-}
-
-function buildRouteOptionStory(option: RouteOptionResponse | undefined, vibes: string[]): string {
-  const rankedComponents = rankedExplanationComponents(option);
-  const averages = option?.explanation?.componentAverages ?? {};
-  const componentPhrases = rankedComponents
-    .slice(0, 3)
-    .map((component) => componentStoryPhrase(component, averages[component]))
-    .filter(Boolean);
-  const qualities = uniqueList([...componentPhrases, ...fallbackVibePhrases(vibes)]).slice(0, 3);
-  return `${resolveRouteStoryPrefix(option, vibes, rankedComponents)} with ${joinHumanList(qualities)}.`;
 }
 
 export function RoutePlanner() {
@@ -432,9 +299,6 @@ export function RoutePlanner() {
   const [selectedRating, setSelectedRating] = useState<number | null>(null);
   const [ratingSubmitted, setRatingSubmitted] = useState(false);
   const [showDebug, setShowDebug] = useState(false);
-  const [themePreference, setThemePreference] = useState<ThemePreference>("dark");
-  const [resolvedTheme, setResolvedTheme] = useState<ResolvedTheme>(() => resolveSystemTheme());
-  const [themeReady, setThemeReady] = useState(false);
 
   const stopWsRef = useRef<null | (() => void)>(null);
   const pollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -520,35 +384,6 @@ export function RoutePlanner() {
   };
 
   const routeOptions = Array.isArray(route?.routeOptions) ? route.routeOptions : [];
-
-  useEffect(() => {
-    setThemePreference(readStoredThemePreference());
-    setThemeReady(true);
-  }, []);
-
-  useEffect(() => {
-    if (!themeReady || typeof window === "undefined") {
-      return;
-    }
-
-    const mediaQuery = window.matchMedia("(prefers-color-scheme: dark)");
-    const applyTheme = () => {
-      const nextTheme: ResolvedTheme = themePreference === "system" ? (mediaQuery.matches ? "dark" : "light") : themePreference;
-      setResolvedTheme(nextTheme);
-      document.documentElement.dataset.theme = nextTheme;
-      document.documentElement.dataset.themePreference = themePreference;
-      document.documentElement.style.colorScheme = nextTheme;
-      window.localStorage.setItem(THEME_STORAGE_KEY, themePreference);
-    };
-
-    applyTheme();
-    if (themePreference !== "system") {
-      return;
-    }
-
-    mediaQuery.addEventListener("change", applyTheme);
-    return () => mediaQuery.removeEventListener("change", applyTheme);
-  }, [themePreference, themeReady]);
 
   useEffect(() => {
     if (!route) {
@@ -855,8 +690,6 @@ export function RoutePlanner() {
   const activeRouteProfile = activeRouteOption?.profile;
   const activeExplanation = activeRouteOption?.explanation;
   const activeProfileLabel = activeRouteProfile ? formatRouteProfile(activeRouteProfile) : "Route";
-  const currentRouteVibes = route && Array.isArray(route.vibes) && route.vibes.length > 0 ? route.vibes : vibes;
-  const activeRouteStory = route ? buildRouteOptionStory(activeRouteOption, currentRouteVibes) : "";
   const routeModeLabel = route?.routeMode === "walk" ? "Walk" : route?.routeMode === "bike" ? "Ride" : "Drive";
   const submitLabel = phase === "submitting" || phase === "tracking" ? "Generating Route..." : `Generate ${activeMode.label}`;
 
@@ -865,23 +698,7 @@ export function RoutePlanner() {
       <section className="product-hero panel-stagger" style={staggerStyle(0)}>
         <nav className="product-nav" aria-label="MoodRide">
           <span className="brand-mark">MoodRide</span>
-          <div className="nav-actions">
-            <span className="nav-pill">Canada scenic beta</span>
-            <div className="theme-switch" role="group" aria-label="Theme">
-              {THEME_OPTIONS.map((option) => (
-                <button
-                  type="button"
-                  key={option.value}
-                  className={themePreference === option.value ? "active" : ""}
-                  onClick={() => setThemePreference(option.value)}
-                  aria-pressed={themePreference === option.value}
-                  title={option.title}
-                >
-                  {option.label}
-                </button>
-              ))}
-            </div>
-          </div>
+          <span className="nav-pill">Canada scenic beta</span>
         </nav>
         <div className="hero-layout">
           <div className="hero-copy">
@@ -1081,7 +898,7 @@ export function RoutePlanner() {
               <h2>Route Map</h2>
               {route && <span className="small">{activeProfileLabel}</span>}
             </div>
-            <RouteMap route={route} theme={resolvedTheme} />
+            <RouteMap route={route} />
           </div>
 
           <div className="panel panel-stagger" style={staggerStyle(3)}>
@@ -1110,9 +927,6 @@ export function RoutePlanner() {
                               {formatNumber(option.totalDistanceKm, 1)} km · {option.estimatedDurationMinutes} min ·
                               score {formatNumber(option.scenicScore, 2)}
                             </span>
-                            <span className="route-option-human">
-                              {buildRouteOptionStory(option, currentRouteVibes)}
-                            </span>
                             {option.explanation?.leadingComponents?.length ? (
                               <span className="route-option-reasons">
                                 {option.explanation.leadingComponents.slice(0, 3).map(formatComponent).join(" · ")}
@@ -1122,12 +936,6 @@ export function RoutePlanner() {
                         );
                       })}
                     </div>
-                  </div>
-                )}
-                {activeRouteStory && (
-                  <div className="route-story">
-                    <p className="detail-metric-label">Route Read</p>
-                    <p>{activeRouteStory}</p>
                   </div>
                 )}
                 <div className="detail-metrics">
