@@ -150,6 +150,7 @@ SELECT
     solitude_score,
     curve_score,
     poi_score,
+    park_score,
     natural_land_use,
     elevation_variance,
     last_scored,
