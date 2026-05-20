@@ -88,7 +88,8 @@ public class ScenicRegionService {
             + (solitude * weights.solitude())
             + (curves * weights.curves())
             + (poi * weights.poi());
-        return clamp01(weighted / weights.totalWeight());
+        double baseScore = clamp01(weighted / weights.totalWeight());
+        return tile.applyParkBoost(baseScore);
     }
 
     private String normalizeVibe(String vibe) {

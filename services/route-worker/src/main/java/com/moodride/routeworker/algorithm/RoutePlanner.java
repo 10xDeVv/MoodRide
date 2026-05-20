@@ -1260,7 +1260,8 @@ public class RoutePlanner {
             + (curves * preferences.curves())
             + (poi * preferences.poi());
 
-        return clamp01(weighted / preferences.totalWeight());
+        double baseScore = clamp01(weighted / preferences.totalWeight());
+        return tile.applyParkBoost(baseScore);
     }
 
     private double normalizeElevation(double value) {

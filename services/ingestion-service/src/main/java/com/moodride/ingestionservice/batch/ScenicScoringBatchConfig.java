@@ -67,6 +67,8 @@ public class ScenicScoringBatchConfig {
     private static final double H3_RES7_TILE_AREA_SQ_KM = 5.16;
     private static final double WATER_SEARCH_RADIUS_METERS = 5000.0;
     private static final double POI_LINK_RADIUS_METERS = 250.0;
+    private static final double PARK_NEAR_DISTANCE_METERS = 2000.0;
+    private static final double PARK_FAR_DISTANCE_METERS = 5000.0;
     private static final int[] NLCD_NATURAL_CLASSES = {
         41, 42, 43, // forest
         52, // shrub/scrub
@@ -107,6 +109,8 @@ public class ScenicScoringBatchConfig {
     private volatile boolean trafficSchemaDetected = false;
     private boolean trafficTableExists;
     private boolean trafficScoreColumnExists;
+    private volatile boolean protectedAreasSchemaDetected = false;
+    private boolean protectedAreasTableExists;
 
     /**
      * Main job for scenic scoring.
@@ -252,7 +256,10 @@ public class ScenicScoringBatchConfig {
             // 5. POI density (from OSM)
             double poiScore = computePoiDensity(tileData.h3Index);
 
-            // 6. Visual complexity (derived)
+            // 6. Protected areas (parks)
+            double parkScore = computeParkScore(tileData.geometry);
+
+            // 7. Visual complexity (derived)
             double visualScore = scoringProcessor.scoreVisualComplexity(elevScore, landUseScore);
 
             // Create and return scored tile
@@ -267,6 +274,8 @@ public class ScenicScoringBatchConfig {
                 poiScore,
                 visualScore
             );
+            tile.setParkScore(parkScore);
+            tile.calculateScenicScore();
 
             tile.setScoringVersion("2.1-traffic-signals");
 
@@ -295,6 +304,7 @@ public class ScenicScoringBatchConfig {
                 solitude_score,
                 poi_density,
                 poi_score,
+                park_score,
                 traffic_signal_score,
                 visual_complexity,
                 curve_score,
@@ -302,7 +312,7 @@ public class ScenicScoringBatchConfig {
                 scoring_version
             )
             VALUES (
-                ?, ST_GeomFromText(?, 4326), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                ?, ST_GeomFromText(?, 4326), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
             )
             ON CONFLICT (h3_index) DO UPDATE SET
                 geometry = EXCLUDED.geometry,
@@ -317,6 +327,7 @@ public class ScenicScoringBatchConfig {
                 solitude_score = EXCLUDED.solitude_score,
                 poi_density = EXCLUDED.poi_density,
                 poi_score = EXCLUDED.poi_score,
+                park_score = EXCLUDED.park_score,
                 visual_complexity = EXCLUDED.visual_complexity,
                 curve_score = EXCLUDED.curve_score,
                 traffic_signal_score = EXCLUDED.traffic_signal_score,
@@ -347,6 +358,7 @@ public class ScenicScoringBatchConfig {
                         tile.getSolitudeScore(),
                         tile.getPoiDensity(),
                         tile.getPoiScore(),
+                        tile.getParkScore(),
                         tile.getTrafficSignalScore(),
                         tile.getVisualComplexity(),
                         tile.getCurveScore(),
@@ -531,6 +543,65 @@ public class ScenicScoringBatchConfig {
             return scoringProcessor.scorePoiDensity(poiCount == null ? 0 : poiCount, H3_RES7_TILE_AREA_SQ_KM);
         } catch (Exception e) {
             return 0.5;
+        }
+    }
+
+    private double computeParkScore(Polygon tileGeometry) {
+        if (tileGeometry == null || tileGeometry.isEmpty()) {
+            return 0.0;
+        }
+        ensureProtectedAreasMetadata();
+        if (!protectedAreasTableExists) {
+            return 0.0;
+        }
+
+        String sql = """
+                SELECT CASE
+                    WHEN EXISTS (
+                        SELECT 1
+                        FROM protected_areas pa
+                        WHERE ST_Intersects(pa.geometry, ST_GeomFromText(?, 4326))
+                    ) THEN 1.0
+                    WHEN EXISTS (
+                        SELECT 1
+                        FROM protected_areas pa
+                        WHERE ST_DWithin(pa.geometry::geography, ST_GeomFromText(?, 4326)::geography, ?)
+                    ) THEN 0.6
+                    WHEN EXISTS (
+                        SELECT 1
+                        FROM protected_areas pa
+                        WHERE ST_DWithin(pa.geometry::geography, ST_GeomFromText(?, 4326)::geography, ?)
+                    ) THEN 0.3
+                    ELSE 0.0
+                END
+                """;
+
+        try {
+            Double score = jdbcTemplate.queryForObject(
+                    sql,
+                    Double.class,
+                    tileGeometry.toText(),
+                    tileGeometry.toText(),
+                    PARK_NEAR_DISTANCE_METERS,
+                    tileGeometry.toText(),
+                    PARK_FAR_DISTANCE_METERS
+            );
+            return clamp01(score == null ? 0.0 : score);
+        } catch (Exception e) {
+            return 0.0;
+        }
+    }
+
+    private void ensureProtectedAreasMetadata() {
+        if (protectedAreasSchemaDetected) {
+            return;
+        }
+        synchronized (this) {
+            if (protectedAreasSchemaDetected) {
+                return;
+            }
+            protectedAreasTableExists = tableExists("protected_areas");
+            protectedAreasSchemaDetected = true;
         }
     }
 

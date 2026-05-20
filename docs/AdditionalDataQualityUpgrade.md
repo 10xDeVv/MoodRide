@@ -117,6 +117,8 @@ Option B is simpler and doesn't require rebalancing all weights. Start with B.
 - [ ] Update composite score calculation
 - [ ] Validate: tiles inside known national parks should score significantly higher
 
+**Automation:** use `scripts/setup/data-quality-parks-v29.sql` to compute `park_score` in batches and apply the park boost multiplier to `scenic_score` (`2.9-protected-areas-enrichment`).
+
 **Effort:** 3-4 hours
 
 ---

@@ -15,6 +15,7 @@ import java.time.Instant;
     @Index(name = "idx_scenic_geom", columnList = "geometry")
 })
 public class ScenicScoreTile {
+    private static final double PARK_SCORE_MULTIPLIER = 0.30;
 
     @Id
     @Column(length = 15)
@@ -67,6 +68,9 @@ public class ScenicScoreTile {
     @Column(name = "poi_score", nullable = false)
     private double poiScore;
 
+    @Column(name = "park_score", nullable = false)
+    private double parkScore;
+
     @Column(nullable = false)
     private Instant lastScored;
 
@@ -104,14 +108,23 @@ public class ScenicScoreTile {
             poi = clamp(poiDensity);
         }
 
-        this.scenicScore = clamp(
+        double baseScore = clamp(
             water * 0.25 +
-            elevation * 0.20 +
-            green * 0.20 +
-            solitude * 0.10 +
-            poi * 0.15 +
-            curves * 0.10
+            green * 0.22 +
+            elevation * 0.15 +
+            solitude * 0.12 +
+            curves * 0.11 +
+            poi * 0.15
         );
+        this.scenicScore = applyParkBoost(baseScore);
+    }
+
+    public double applyParkBoost(double baseScore) {
+        double park = clamp(parkScore);
+        if (park <= 0.0) {
+            return clamp(baseScore);
+        }
+        return clamp(baseScore * (1.0 + (park * PARK_SCORE_MULTIPLIER)));
     }
 
     public void syncComponentScoresFromLegacySignals() {
@@ -160,6 +173,9 @@ public class ScenicScoreTile {
 
     public double getPoiScore() { return poiScore; }
     public void setPoiScore(double poiScore) { this.poiScore = poiScore; }
+
+    public double getParkScore() { return parkScore; }
+    public void setParkScore(double parkScore) { this.parkScore = parkScore; }
 
     public double getTrafficSignalScore() { return trafficSignalScore; }
     public void setTrafficSignalScore(double trafficSignalScore) { this.trafficSignalScore = trafficSignalScore; }

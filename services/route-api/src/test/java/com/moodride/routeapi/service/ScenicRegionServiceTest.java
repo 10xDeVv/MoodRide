@@ -59,4 +59,50 @@ class ScenicRegionServiceTest {
         assertThat(coastal.boundingBox()).isNotNull();
         assertThat(coastal.totalRegions()).isEqualTo(1);
     }
+
+    @Test
+    void getScenicRegionsBoostsParkTilesForVibe() {
+        GeometryFactory geometryFactory = new GeometryFactory();
+        Polygon polygon = geometryFactory.createPolygon(new Coordinate[] {
+            new Coordinate(-122.80, 45.40),
+            new Coordinate(-122.75, 45.40),
+            new Coordinate(-122.75, 45.45),
+            new Coordinate(-122.80, 45.45),
+            new Coordinate(-122.80, 45.40)
+        });
+
+        ScenicScoreTile base = new ScenicScoreTile();
+        base.setH3Index("872a1070bfffff0");
+        base.setGeometry(polygon);
+        base.setWaterScore(0.40);
+        base.setGreenScore(0.55);
+        base.setElevationScore(0.35);
+        base.setSolitudeScore(0.45);
+        base.setCurveScore(0.30);
+        base.setPoiScore(0.25);
+        base.setScenicScore(0.45);
+
+        ScenicScoreTile park = new ScenicScoreTile();
+        park.setH3Index("872a1070bfffff1");
+        park.setGeometry(polygon);
+        park.setWaterScore(0.40);
+        park.setGreenScore(0.55);
+        park.setElevationScore(0.35);
+        park.setSolitudeScore(0.45);
+        park.setCurveScore(0.30);
+        park.setPoiScore(0.25);
+        park.setParkScore(1.0);
+        park.setScenicScore(0.45);
+
+        when(scenicScoreTileRepository.findTopScenicRegionsNearPoint(45.50, -122.70, 50000.0, 75))
+            .thenReturn(List.of(base, park));
+
+        ScenicRegionService service = new ScenicRegionService(scenicScoreTileRepository);
+        ScenicRegionsResponse response = service.getScenicRegions(45.50, -122.70, 50, 25, "scenic");
+
+        assertThat(response.regions()).hasSize(2);
+        assertThat(response.regions().getFirst().h3Index()).isEqualTo("872a1070bfffff1");
+        assertThat(response.regions().getFirst().compositeScore())
+            .isGreaterThan(response.regions().get(1).compositeScore());
+    }
 }
