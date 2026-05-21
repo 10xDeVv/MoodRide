@@ -147,6 +147,27 @@ class RoutePlannerTest {
     }
 
     @Test
+    void mostScenicProfileAvoidsTinyLoopsWhenLongerUsefulOptionsExist() {
+        when(scenicScoreTileRepository.findByH3IndexIn(anyCollection())).thenReturn(highScenicTilesAroundStart());
+        int[] durations = {32, 61, 46, 35, 58, 52, 34, 63, 44, 40, 55, 48, 36, 50};
+        AtomicInteger callIndex = new AtomicInteger();
+        when(osrmTripClient.requestRoundTrip(anyList(), eq(RouteMode.DRIVE))).thenAnswer(invocation -> {
+            @SuppressWarnings("unchecked")
+            List<RoadNode> variant = invocation.getArgument(0);
+            int index = callIndex.getAndIncrement();
+            int durationMinutes = durations[Math.min(index, durations.length - 1)];
+            double distanceKm = durationMinutes * 0.75;
+            return Optional.of(new OsrmTripClient.TripResult(variant, distanceKm, durationMinutes));
+        });
+
+        List<RouteCandidate> options = routePlanner.generateRouteOptions(sampleJob(60));
+
+        assertThat(options).hasSize(3);
+        RouteCandidate mostScenic = options.getFirst();
+        assertThat(mostScenic.getEstimatedMinutes()).isGreaterThanOrEqualTo(45);
+    }
+
+    @Test
     void generateRouteRejectsWeakVibeAvailabilityWhenNearbyTilesDoNotFit() {
         when(scenicScoreTileRepository.findByH3IndexIn(anyCollection())).thenReturn(lowWaterTilesAroundStart());
 
