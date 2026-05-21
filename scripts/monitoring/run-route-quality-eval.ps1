@@ -54,6 +54,7 @@ function Invoke-ApiJson {
             throw
         }
         $statusCode = [int]$webResponse.StatusCode
+        $reader = $null
         try {
             $reader = New-Object System.IO.StreamReader($webResponse.GetResponseStream())
             $content = $reader.ReadToEnd()
@@ -306,37 +307,63 @@ function Get-TargetComponentsForVibes {
     $targets = New-Object System.Collections.Generic.List[string]
     foreach ($vibe in $Vibes) {
         switch ($vibe) {
-            { $_ -in @("coastal", "riverside", "date_night", "photo_run", "photo_worthy", "golden_hour", "sunset", "sunrise") } {
+            { $_ -in @("coastal", "riverside") } {
                 $targets.Add("water")
                 break
             }
-            { $_ -in @("mountain", "adventure", "winding_roads") } {
+            "mountain" {
                 $targets.Add("elevation")
                 $targets.Add("curves")
                 break
             }
-            { $_ -in @("forest", "nature_escape", "clear_my_head") } {
+            { $_ -in @("forest", "nature_escape") } {
                 $targets.Add("greenery")
                 $targets.Add("solitude")
                 break
             }
-            { $_ -in @("countryside", "quiet", "open_roads", "relaxing", "sunday_cruise", "smooth_cruise", "minimal_traffic", "scenic_reset") } {
+            "open_roads" {
+                $targets.Add("curves")
+                $targets.Add("solitude")
+                break
+            }
+            { $_ -in @("countryside", "quiet", "relaxing", "sunday_cruise", "smooth_cruise", "minimal_traffic", "clear_my_head") } {
                 $targets.Add("solitude")
                 $targets.Add("greenery")
+                break
+            }
+            { $_ -in @("winding_roads", "adventure") } {
+                $targets.Add("curves")
+                $targets.Add("elevation")
+                break
+            }
+            { $_ -in @("sunset", "sunrise", "golden_hour", "date_night") } {
+                $targets.Add("water")
+                $targets.Add("elevation")
+                break
+            }
+            { $_ -in @("photo_worthy", "photo_run") } {
+                $targets.Add("water")
+                $targets.Add("elevation")
+                $targets.Add("poi")
                 break
             }
             "hidden_gems" {
-                $targets.Add("poi")
                 $targets.Add("solitude")
+                $targets.Add("curves")
+                $targets.Add("poi")
                 break
             }
-            "loop_variety" {
-                $targets.Add("curves")
+            { $_ -in @("loop_variety", "scenic", "scenic_reset") } {
+                $targets.Add("water")
                 $targets.Add("greenery")
+                $targets.Add("elevation")
+                $targets.Add("solitude")
+                $targets.Add("curves")
                 break
             }
             default {
                 $targets.Add("greenery")
+                $targets.Add("solitude")
                 break
             }
         }
@@ -430,6 +457,7 @@ function Get-BudgetFlags {
 function Get-ScenarioFlags {
     param(
         [string]$Status,
+        [Parameter()][string]$FailureReason,
         [int]$BudgetMinutes,
         [Parameter()][object[]]$OptionDetails,
         [Parameter()][object]$DiversityStats,
@@ -440,6 +468,14 @@ function Get-ScenarioFlags {
     $flags = New-Object System.Collections.Generic.List[string]
 
     if ($Status -ne "COMPLETED") {
+        if ($FailureReason -and $FailureReason.StartsWith("No strong ")) {
+            $flags.Add("vibe_unavailable")
+            return @($flags)
+        }
+        if ($FailureReason -and $FailureReason.StartsWith("No scenic data found")) {
+            $flags.Add("scenic_data_unavailable")
+            return @($flags)
+        }
         $flags.Add("job_not_completed")
         return @($flags)
     }
@@ -672,7 +708,7 @@ foreach ($scenario in $selectedScenarios) {
     $scores = @($optionDetails | ForEach-Object { $_.scenicScore } | Where-Object { $null -ne $_ })
     $diversityStats = Get-PairwiseGeometryStats -OptionDetails $optionDetails
     $budgetStats = Get-BudgetFlags -BudgetMinutes $timeBudgetMinutes -OptionDetails $optionDetails
-    $flags = Get-ScenarioFlags -Status $finalStatus -BudgetMinutes $timeBudgetMinutes -OptionDetails $optionDetails -DiversityStats $diversityStats -BudgetStats $budgetStats -TargetComponents $targetComponents
+    $flags = Get-ScenarioFlags -Status $finalStatus -FailureReason $failureReason -BudgetMinutes $timeBudgetMinutes -OptionDetails $optionDetails -DiversityStats $diversityStats -BudgetStats $budgetStats -TargetComponents $targetComponents
 
     $scoreSpread = if ($scores.Count -ge 2) { (($scores | Measure-Object -Maximum).Maximum - ($scores | Measure-Object -Minimum).Minimum) } else { $null }
     $durationSpread = if ($durations.Count -ge 2) { (($durations | Measure-Object -Maximum).Maximum - ($durations | Measure-Object -Minimum).Minimum) } else { $null }
