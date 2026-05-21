@@ -135,7 +135,10 @@ SELECT CASE
 END AS mismatched_count
 \gset
 
-\if :mismatched_count != 0
+SELECT (:mismatched_count::integer <> 0) AS has_mismatched_rows
+\gset
+
+\if :has_mismatched_rows
 \echo Scenic release scoring_version mismatch detected.
 \echo Expected: :expected_scoring_version
 \echo Mismatched rows: :mismatched_count
