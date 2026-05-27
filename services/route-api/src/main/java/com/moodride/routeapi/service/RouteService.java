@@ -33,6 +33,8 @@ import com.moodride.datamodels.RouteMode;
 import com.moodride.datamodels.RouteWaypoint;
 import com.moodride.datamodels.RouteWeightCalibration;
 import com.moodride.datamodels.ScenicScoreTile;
+import com.moodride.datamodels.scoring.ComponentScores;
+import com.moodride.datamodels.scoring.ScenicScoreCalculator;
 import com.moodride.eventmodels.DriveCompletedEvent;
 import com.moodride.eventmodels.RouteJobEvent;
 import com.moodride.eventmodels.RouteRatedEvent;
@@ -105,6 +107,7 @@ public class RouteService {
     private final ScenicScoreTileRepository scenicScoreTileRepository;
     private final KafkaTemplate<String, String> kafkaTemplate;
     private final ObjectMapper objectMapper;
+    private final ScenicScoreCalculator scenicScoreCalculator = new ScenicScoreCalculator();
     
     public RouteService(RouteJobRepository jobRepository,
                         RouteRepository routeRepository,
@@ -1216,20 +1219,6 @@ public class RouteService {
         return null;
     }
 
-    private double normalizeElevation(double value) {
-        if (value <= 1.0) {
-            return clamp01(value);
-        }
-        return clamp01(value / 40.0);
-    }
-
-    private double resolveComponentScore(double component, double legacyFallback) {
-        if (component > 0.0) {
-            return clamp01(component);
-        }
-        return clamp01(legacyFallback);
-    }
-
     private double roundComponent(double value) {
         return Math.round(clamp01(value) * 10_000.0) / 10_000.0;
     }
@@ -1252,15 +1241,13 @@ public class RouteService {
         private int count;
 
         private void add(ScenicScoreTile tile) {
-            water += resolveComponentScore(tile.getWaterScore(), tile.getWaterProximity());
-            greenery += resolveComponentScore(tile.getGreenScore(), tile.getNaturalLandUse());
-            elevation += normalizeElevation(resolveComponentScore(tile.getElevationScore(), tile.getElevationVariance()));
-            solitude += resolveComponentScore(
-                tile.getSolitudeScore(),
-                (1.0 - clamp01(tile.getRoadDensity()) + clamp01(tile.getTrafficSignalScore())) / 2.0
-            );
-            curves += resolveComponentScore(tile.getCurveScore(), tile.getVisualComplexity());
-            poi += resolveComponentScore(tile.getPoiScore(), tile.getPoiDensity());
+            ComponentScores scores = scenicScoreCalculator.componentScores(tile);
+            water += scores.water();
+            greenery += scores.greenery();
+            elevation += scores.elevation();
+            solitude += scores.solitude();
+            curves += scores.curves();
+            poi += scores.poi();
             count++;
         }
 

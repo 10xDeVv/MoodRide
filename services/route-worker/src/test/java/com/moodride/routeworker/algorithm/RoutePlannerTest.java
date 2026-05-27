@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.moodride.datamodels.RouteJob;
 import com.moodride.datamodels.RouteMode;
 import com.moodride.datamodels.ScenicScoreTile;
+import com.moodride.datamodels.scoring.ScenicScoreCalculator;
 import com.moodride.geo.H3Utils;
 import com.moodride.routeworker.config.ApplicationConfiguration;
 import com.moodride.routeworker.graph.RoadNode;
@@ -64,7 +65,8 @@ class RoutePlannerTest {
             routeWeightCalibrationRepository,
             osrmTripClient,
             config,
-            new ObjectMapper()
+            new ObjectMapper(),
+            new ScenicScoreCalculator()
         );
         when(routeWeightCalibrationRepository.findByVibeIn(anyCollection())).thenReturn(List.of());
     }

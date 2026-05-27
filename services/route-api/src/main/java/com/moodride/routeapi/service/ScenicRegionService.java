@@ -1,6 +1,8 @@
 package com.moodride.routeapi.service;
 
 import com.moodride.datamodels.ScenicScoreTile;
+import com.moodride.datamodels.scoring.PreferenceWeights;
+import com.moodride.datamodels.scoring.ScenicScoreCalculator;
 import com.moodride.geo.VibeCatalog;
 import com.moodride.routeapi.dto.BoundingBoxResponse;
 import com.moodride.routeapi.dto.ScenicRegionResponse;
@@ -17,6 +19,7 @@ import org.springframework.transaction.annotation.Transactional;
 public class ScenicRegionService {
 
     private final ScenicScoreTileRepository scenicScoreTileRepository;
+    private final ScenicScoreCalculator scenicScoreCalculator = new ScenicScoreCalculator();
 
     public ScenicRegionService(ScenicScoreTileRepository scenicScoreTileRepository) {
         this.scenicScoreTileRepository = scenicScoreTileRepository;
@@ -67,29 +70,22 @@ public class ScenicRegionService {
     }
 
     private double scoreTile(ScenicScoreTile tile, String vibe) {
-        double water = resolveComponentScore(tile.getWaterScore(), tile.getWaterProximity());
-        double elevation = normalizeElevation(resolveComponentScore(tile.getElevationScore(), tile.getElevationVariance()));
-        double greenery = resolveComponentScore(tile.getGreenScore(), tile.getNaturalLandUse());
-        double curves = resolveComponentScore(tile.getCurveScore(), tile.getVisualComplexity());
-        double solitude = resolveComponentScore(
-            tile.getSolitudeScore(),
-            (1.0 - clamp01(tile.getRoadDensity()) + clamp01(tile.getTrafficSignalScore())) / 2.0
-        );
-        double poi = resolveComponentScore(tile.getPoiScore(), tile.getPoiDensity());
-
         if (vibe == null) {
             return clamp01(tile.getScenicScore());
         }
 
         VibeCatalog.ComponentWeights weights = VibeCatalog.weightsFor(vibe);
-        double weighted = (water * weights.water())
-            + (greenery * weights.greenery())
-            + (elevation * weights.elevation())
-            + (solitude * weights.solitude())
-            + (curves * weights.curves())
-            + (poi * weights.poi());
-        double baseScore = clamp01(weighted / weights.totalWeight());
-        return tile.applyParkBoost(baseScore);
+        return scenicScoreCalculator.scoreTile(
+            tile,
+            new PreferenceWeights(
+                weights.water(),
+                weights.greenery(),
+                weights.elevation(),
+                weights.solitude(),
+                weights.curves(),
+                weights.poi()
+            )
+        );
     }
 
     private String normalizeVibe(String vibe) {
@@ -148,20 +144,6 @@ public class ScenicRegionService {
                 ) / 5.0
             )
         );
-    }
-
-    private double normalizeElevation(double value) {
-        if (value <= 1.0) {
-            return clamp01(value);
-        }
-        return clamp01(value / 40.0);
-    }
-
-    private double resolveComponentScore(double component, double legacyFallback) {
-        if (component > 0.0) {
-            return clamp01(component);
-        }
-        return clamp01(legacyFallback);
     }
 
     private double clamp01(double value) {

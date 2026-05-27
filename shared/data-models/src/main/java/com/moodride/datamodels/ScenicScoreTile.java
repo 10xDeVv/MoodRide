@@ -71,6 +71,18 @@ public class ScenicScoreTile {
     @Column(name = "park_score", nullable = false)
     private double parkScore;
 
+    @Column(name = "overture_poi_score", nullable = false)
+    private double overturePoiScore;
+
+    @Column(name = "building_density_score", nullable = false)
+    private double buildingDensityScore;
+
+    @Column(name = "darkness_score", nullable = false)
+    private double darknessScore;
+
+    @Column(name = "urban_penalty_score", nullable = false)
+    private double urbanPenaltyScore;
+
     @Column(nullable = false)
     private Instant lastScored;
 
@@ -99,7 +111,8 @@ public class ScenicScoreTile {
         double poi = clamp(poiScore);
 
         // Backward compatibility if component-score columns have not been populated yet.
-        if (water == 0.0 && green == 0.0 && elevation == 0.0 && solitude == 0.0 && curves == 0.0 && poi == 0.0) {
+        if (!hasAuthoritativeComponentScores()
+            && water == 0.0 && green == 0.0 && elevation == 0.0 && solitude == 0.0 && curves == 0.0 && poi == 0.0) {
             water = clamp(waterProximity);
             green = clamp(naturalLandUse);
             elevation = clamp(elevationVariance);
@@ -177,6 +190,18 @@ public class ScenicScoreTile {
     public double getParkScore() { return parkScore; }
     public void setParkScore(double parkScore) { this.parkScore = parkScore; }
 
+    public double getOverturePoiScore() { return overturePoiScore; }
+    public void setOverturePoiScore(double overturePoiScore) { this.overturePoiScore = overturePoiScore; }
+
+    public double getBuildingDensityScore() { return buildingDensityScore; }
+    public void setBuildingDensityScore(double buildingDensityScore) { this.buildingDensityScore = buildingDensityScore; }
+
+    public double getDarknessScore() { return darknessScore; }
+    public void setDarknessScore(double darknessScore) { this.darknessScore = darknessScore; }
+
+    public double getUrbanPenaltyScore() { return urbanPenaltyScore; }
+    public void setUrbanPenaltyScore(double urbanPenaltyScore) { this.urbanPenaltyScore = urbanPenaltyScore; }
+
     public double getTrafficSignalScore() { return trafficSignalScore; }
     public void setTrafficSignalScore(double trafficSignalScore) { this.trafficSignalScore = trafficSignalScore; }
 
@@ -193,6 +218,10 @@ public class ScenicScoreTile {
 
     public String getScoringVersion() { return scoringVersion; }
     public void setScoringVersion(String scoringVersion) { this.scoringVersion = scoringVersion; }
+
+    private boolean hasAuthoritativeComponentScores() {
+        return scoringVersion != null && scoringVersion.startsWith("3.0");
+    }
 
     private double clamp(double value) {
         return Math.max(0.0, Math.min(1.0, value));

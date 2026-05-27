@@ -5,6 +5,9 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.moodride.datamodels.RouteJob;
 import com.moodride.datamodels.ScenicScoreTile;
 import com.moodride.datamodels.RouteWeightCalibration;
+import com.moodride.datamodels.scoring.ComponentScores;
+import com.moodride.datamodels.scoring.PreferenceWeights;
+import com.moodride.datamodels.scoring.ScenicScoreCalculator;
 import com.moodride.geo.H3Utils;
 import com.moodride.geo.VibeCatalog;
 import com.moodride.routeworker.config.ApplicationConfiguration;
@@ -67,17 +70,20 @@ public class RoutePlanner {
     private final OsrmTripClient osrmTripClient;
     private final ApplicationConfiguration config;
     private final ObjectMapper objectMapper;
+    private final ScenicScoreCalculator scenicScoreCalculator;
 
     public RoutePlanner(ScenicScoreTileRepository scenicScoreTileRepository,
                         RouteWeightCalibrationRepository routeWeightCalibrationRepository,
                         OsrmTripClient osrmTripClient,
                         ApplicationConfiguration config,
-                        ObjectMapper objectMapper) {
+                        ObjectMapper objectMapper,
+                        ScenicScoreCalculator scenicScoreCalculator) {
         this.scenicScoreTileRepository = scenicScoreTileRepository;
         this.routeWeightCalibrationRepository = routeWeightCalibrationRepository;
         this.osrmTripClient = osrmTripClient;
         this.config = config;
         this.objectMapper = objectMapper;
+        this.scenicScoreCalculator = scenicScoreCalculator;
     }
 
     public RouteCandidate generateRoute(RouteJob job) {
@@ -753,17 +759,7 @@ public class RoutePlanner {
     }
 
     private ComponentScores componentScores(ScenicScoreTile tile) {
-        return new ComponentScores(
-            resolveComponentScore(tile.getWaterScore(), tile.getWaterProximity()),
-            resolveComponentScore(tile.getGreenScore(), tile.getNaturalLandUse()),
-            normalizeElevation(resolveComponentScore(tile.getElevationScore(), tile.getElevationVariance())),
-            resolveComponentScore(
-                tile.getSolitudeScore(),
-                (1.0 - clamp01(tile.getRoadDensity()) + clamp01(tile.getTrafficSignalScore())) / 2.0
-            ),
-            resolveComponentScore(tile.getCurveScore(), tile.getVisualComplexity()),
-            resolveComponentScore(tile.getPoiScore(), tile.getPoiDensity())
-        );
+        return scenicScoreCalculator.componentScores(tile);
     }
 
     private double average(double... values) {
@@ -1274,40 +1270,7 @@ public class RoutePlanner {
     }
 
     private double scoreTile(ScenicScoreTile tile, PreferenceWeights preferences) {
-        double water = resolveComponentScore(tile.getWaterScore(), tile.getWaterProximity());
-        double greenery = resolveComponentScore(tile.getGreenScore(), tile.getNaturalLandUse());
-        double elevation = normalizeElevation(resolveComponentScore(tile.getElevationScore(), tile.getElevationVariance()));
-        double solitude = resolveComponentScore(
-            tile.getSolitudeScore(),
-            (1.0 - clamp01(tile.getRoadDensity()) + clamp01(tile.getTrafficSignalScore())) / 2.0
-        );
-        double curves = resolveComponentScore(tile.getCurveScore(), tile.getVisualComplexity());
-        double poi = resolveComponentScore(tile.getPoiScore(), tile.getPoiDensity());
-
-        double weighted = (water * preferences.water())
-            + (greenery * preferences.greenery())
-            + (elevation * preferences.elevation())
-            + (solitude * preferences.solitude())
-            + (curves * preferences.curves())
-            + (poi * preferences.poi());
-
-        double baseScore = clamp01(weighted / preferences.totalWeight());
-        return tile.applyParkBoost(baseScore);
-    }
-
-    private double normalizeElevation(double value) {
-        if (value <= 1.0) {
-            return clamp01(value);
-        }
-        // Legacy rows may still store raw elevation variance values (> 1.0).
-        return clamp01(value / 40.0);
-    }
-
-    private double resolveComponentScore(double component, double legacyFallback) {
-        if (component > 0.0) {
-            return clamp01(component);
-        }
-        return clamp01(legacyFallback);
+        return scenicScoreCalculator.scoreTile(tile, preferences);
     }
 
     private double distanceKm(RoadNode from, RoadNode to) {
@@ -1331,35 +1294,5 @@ public class RoutePlanner {
                                  RoadNode center,
                                  double scenicScore,
                                  double distanceKm) {
-    }
-
-    private record ComponentScores(double water,
-                                   double greenery,
-                                   double elevation,
-                                   double solitude,
-                                   double curves,
-                                   double poi) {
-    }
-
-    private record PreferenceWeights(double water,
-                                     double greenery,
-                                     double elevation,
-                                     double solitude,
-                                     double curves,
-                                     double poi) {
-        private double totalWeight() {
-            return Math.max(0.0001, water + greenery + elevation + solitude + curves + poi);
-        }
-
-        private PreferenceWeights withOverrides(Map<String, Double> overrides) {
-            return new PreferenceWeights(
-                overrides.getOrDefault("water", water),
-                overrides.getOrDefault("greenery", greenery),
-                overrides.getOrDefault("elevation", elevation),
-                overrides.getOrDefault("solitude", solitude),
-                overrides.getOrDefault("curves", curves),
-                overrides.getOrDefault("poi", poi)
-            );
-        }
     }
 }
