@@ -80,7 +80,7 @@ moodride:
     corridor-sample-meters: 500
     max-duration-overrun-ratio: 1.15
   osrm:
-    base-url: ${MOODRIDE_OSRM_BASE_URL:http://localhost:5002}
+    base-url: ${MOODRIDE_OSRM_BASE_URL:http://127.0.0.1:5002}
     request-timeout-ms: 7000
   route:
     retry:

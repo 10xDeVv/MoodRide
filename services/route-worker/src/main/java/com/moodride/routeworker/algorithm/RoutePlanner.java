@@ -42,6 +42,7 @@ public class RoutePlanner {
     private static final double ROUTE_OPTION_MIN_SEPARATION_KM = 0.35;
     private static final double SHORTER_PROFILE_TARGET_RATIO = 0.78;
     private static final double SHORTER_PROFILE_MIN_USEFUL_RATIO = 0.60;
+    private static final double MIN_USEFUL_DURATION_RATIO = 0.55;
     private static final int MAX_CORRIDOR_SIGNATURE_SAMPLES = 96;
     private static final int MAX_GEOMETRY_SEPARATION_SAMPLES = 80;
     private static final int MIN_VIBE_AVAILABILITY_TILES = 3;
@@ -104,7 +105,7 @@ public class RoutePlanner {
                 logger.info("Hybrid routing used synthetic waypoint variants for job {}", job.getId());
             }
         }
-        if (hybridCandidates.size() < ROUTE_OPTION_COUNT) {
+        if (hybridCandidates.size() < ROUTE_OPTION_COUNT || needsBudgetRescue(hybridCandidates, job.getTimeBudgetMinutes())) {
             List<List<RoadNode>> budgetRescueVariants = buildBudgetRescueWaypointRings(start, job.getTimeBudgetMinutes());
             List<RouteCandidate> budgetRescueCandidates = collectHybridCandidates(job, budgetRescueVariants, preferences);
             if (!budgetRescueCandidates.isEmpty()) {
@@ -203,6 +204,10 @@ public class RoutePlanner {
         return Math.max(safeTarget, Math.min(ratioCap, safeTarget + absoluteSlack));
     }
 
+    private int minUsefulMinutes(int targetMinutes) {
+        return (int) Math.ceil(Math.max(10.0, Math.max(1, targetMinutes) * MIN_USEFUL_DURATION_RATIO));
+    }
+
     private List<RouteCandidate> combineCandidates(List<RouteCandidate> left, List<RouteCandidate> right) {
         if ((left == null || left.isEmpty()) && (right == null || right.isEmpty())) {
             return List.of();
@@ -242,6 +247,29 @@ public class RoutePlanner {
         }
 
         return List.copyOf(selected);
+    }
+
+    private boolean needsBudgetRescue(List<RouteCandidate> candidates, int targetMinutes) {
+        if (candidates == null || candidates.isEmpty()) {
+            return true;
+        }
+
+        int minUsefulMinutes = minUsefulMinutes(targetMinutes);
+        long usefulCandidates = candidates.stream()
+            .filter(candidate -> candidate.getEstimatedMinutes() >= minUsefulMinutes)
+            .count();
+        int maxDuration = candidates.stream()
+            .mapToInt(RouteCandidate::getEstimatedMinutes)
+            .max()
+            .orElse(0);
+        int minDuration = candidates.stream()
+            .mapToInt(RouteCandidate::getEstimatedMinutes)
+            .min()
+            .orElse(0);
+
+        return usefulCandidates < ROUTE_OPTION_COUNT
+            || maxDuration < minUsefulMinutes
+            || (maxDuration - minDuration) < minDurationSeparationMinutes(targetMinutes);
     }
 
     private boolean hasDiverseCandidatePool(List<RouteCandidate> candidates, int targetMinutes) {
@@ -773,9 +801,9 @@ public class RoutePlanner {
         }
 
         int sectorCount = Math.max(4, config.getSectorCount());
-        double targetRadiusKm = Math.max(2.5, timeBudgetMinutes / 7.0);
-        double minRadiusKm = targetRadiusKm * 0.6;
-        double maxRadiusKm = targetRadiusKm * 1.8;
+        double targetRadiusKm = Math.max(2.5, timeBudgetMinutes / 6.5);
+        double minRadiusKm = targetRadiusKm * 0.45;
+        double maxRadiusKm = targetRadiusKm * 2.0;
 
         Map<Integer, TileCandidate> bestBySector = new HashMap<>();
         for (TileCandidate candidate : scoredTiles) {
@@ -807,15 +835,18 @@ public class RoutePlanner {
                 continue;
             }
 
-            List<RoadNode> ring = new ArrayList<>();
-            ring.add(start);
-            for (int i = 0; i < waypointCount; i++) {
-                int index = (int) Math.floor((double) i * orderedSectorTiles.size() / waypointCount);
-                ring.add(orderedSectorTiles.get(index).center());
-            }
+            for (int rotation = 0; rotation < Math.min(orderedSectorTiles.size(), waypointCount); rotation++) {
+                List<RoadNode> ring = new ArrayList<>();
+                ring.add(start);
+                for (int i = 0; i < waypointCount; i++) {
+                    int index = (rotation + (int) Math.floor((double) i * orderedSectorTiles.size() / waypointCount))
+                        % orderedSectorTiles.size();
+                    ring.add(orderedSectorTiles.get(index).center());
+                }
 
-            if (ring.size() >= 3) {
-                variants.add(List.copyOf(ring));
+                if (ring.size() >= 3) {
+                    variants.add(List.copyOf(ring));
+                }
             }
         }
 
@@ -835,10 +866,10 @@ public class RoutePlanner {
     }
 
     private List<List<RoadNode>> buildSyntheticWaypointRings(RoadNode start, int timeBudgetMinutes) {
-        double baseRadiusKm = Math.max(1.2, Math.min(10.0, timeBudgetMinutes / 14.0));
-        List<Double> radii = List.of(baseRadiusKm * 0.75, baseRadiusKm, baseRadiusKm * 1.25);
-        List<Integer> waypointCounts = List.of(6, 4, 3, 2);
-        List<Double> bearingOffsets = List.of(0.0);
+        double baseRadiusKm = Math.max(2.0, Math.min(12.0, timeBudgetMinutes / 8.0));
+        List<Double> radii = List.of(baseRadiusKm * 0.50, baseRadiusKm * 0.65, baseRadiusKm * 0.80, baseRadiusKm, baseRadiusKm * 1.20);
+        List<Integer> waypointCounts = List.of(2, 3, 4, 6);
+        List<Double> bearingOffsets = List.of(0.0, 22.5, 45.0);
 
         List<List<RoadNode>> variants = new ArrayList<>();
         for (double radiusKm : radii) {
@@ -866,10 +897,10 @@ public class RoutePlanner {
     }
 
     private List<List<RoadNode>> buildBudgetRescueWaypointRings(RoadNode start, int timeBudgetMinutes) {
-        double baseRadiusKm = Math.max(0.6, Math.min(5.0, timeBudgetMinutes / 22.0));
-        List<Double> radii = List.of(baseRadiusKm * 0.45, baseRadiusKm * 0.65, baseRadiusKm * 0.85, baseRadiusKm);
-        List<Integer> waypointCounts = List.of(3, 2, 1);
-        List<Double> bearingOffsets = List.of(22.5, 67.5, 112.5);
+        double baseRadiusKm = Math.max(1.8, Math.min(14.0, timeBudgetMinutes / 7.0));
+        List<Double> radii = List.of(baseRadiusKm * 0.45, baseRadiusKm * 0.60, baseRadiusKm * 0.75, baseRadiusKm * 0.90, baseRadiusKm * 1.10);
+        List<Integer> waypointCounts = List.of(2, 3, 4, 6);
+        List<Double> bearingOffsets = List.of(0.0, 22.5, 45.0, 67.5, 90.0, 135.0);
 
         List<List<RoadNode>> variants = new ArrayList<>();
         for (double bearingOffset : bearingOffsets) {
@@ -890,8 +921,8 @@ public class RoutePlanner {
     }
 
     private List<List<RoadNode>> buildDiversityRescueWaypointRings(RoadNode start, int timeBudgetMinutes) {
-        double baseRadiusKm = Math.max(1.5, Math.min(9.0, timeBudgetMinutes / 12.0));
-        List<Double> bearings = List.of(45.0, 135.0, 225.0, 315.0);
+        double baseRadiusKm = Math.max(2.5, Math.min(14.0, timeBudgetMinutes / 7.0));
+        List<Double> bearings = List.of(30.0, 75.0, 120.0, 165.0, 210.0, 255.0, 300.0, 345.0);
 
         List<List<RoadNode>> variants = new ArrayList<>();
         for (double bearing : bearings) {
