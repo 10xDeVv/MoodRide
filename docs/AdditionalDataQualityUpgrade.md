@@ -123,9 +123,50 @@ Option B is simpler and doesn't require rebalancing all weights. Start with B.
 
 ---
 
-### 🔥 Priority 2: Light Pollution Data
+### 🔥 Priority 2: Overture Maps (Better POIs + Building Density)
 
-**Why second:** Single raster file, same processing pipeline as elevation/land cover, directly and significantly improves `solitude_score`. Dark areas feel remote. Bright areas feel suburban. This is a stronger signal than road density alone.
+**Why second:** The latest evals show that route generation works, but weak solitude/greenery signals still appear in some prairie and urban-adjacent scenarios. Overture places and buildings directly improve those weak points without adding runtime API dependencies.
+
+**Dataset:** Overture Maps
+
+**URL:** https://overturemaps.org/download/
+
+**Format:** GeoParquet, partitioned by theme (places, buildings, transportation, land use)
+
+**What to extract:**
+
+**Places (POIs):**
+- Scenic viewpoints, parks, beaches, waterfalls, historic sites
+- Restaurants, cafes, attractions, and stop-worthy places
+- Filter or down-weight non-scenic POIs
+
+**Buildings:**
+- Building footprint density per tile
+- High density = urban/suburban penalty
+- Low density = rural/open-road/quiet boost
+
+**How to use it:**
+
+Load Overture places and buildings into PostGIS, then compute per-H3 scores:
+
+```sql
+ALTER TABLE scenic_score_tiles
+    ADD COLUMN IF NOT EXISTS overture_poi_score DOUBLE PRECISION DEFAULT 0.0,
+    ADD COLUMN IF NOT EXISTS building_density_score DOUBLE PRECISION DEFAULT 0.0,
+    ADD COLUMN IF NOT EXISTS urban_penalty_score DOUBLE PRECISION DEFAULT 0.0;
+```
+
+Use Overture places to improve `poi_score`, and building density to refine `solitude_score`.
+
+**Automation:** use `scripts/setup/data-quality-enrichment-v30.sql` after loading `overture_places`, `overture_buildings`, and `light_pollution_raster`.
+
+**Effort:** 4-6 hours after source data is downloaded
+
+---
+
+### 🔥 Priority 3: Light Pollution Data
+
+**Why third:** Single raster file, same processing pipeline as elevation/land cover, directly and significantly improves `solitude_score`. Dark areas feel remote. Bright areas feel suburban. This is a stronger signal than road density alone.
 
 **Dataset:** World Atlas of Artificial Night Sky Brightness (Falchi et al. 2016) or VIIRS Nighttime Lights (NASA)
 
@@ -198,9 +239,9 @@ ALTER TABLE scenic_score_tiles ADD COLUMN IF NOT EXISTS darkness_score FLOAT DEF
 
 ---
 
-### ⚡ Priority 3: Photo Density (Flickr API)
+### ⚡ Priority 4: Photo Density (Flickr API)
 
-**Why third:** Crowdsourced scenic validation. Where people take photos = what people think is worth looking at. This is an independent signal that validates (or challenges) your geographic scoring.
+**Why fourth:** Crowdsourced scenic validation. Where people take photos = what people think is worth looking at. This is an independent signal that validates (or challenges) your geographic scoring.
 
 **API:** Flickr API — `flickr.photos.search` with bounding box
 
@@ -260,58 +301,6 @@ Log scale because photo counts follow a power law (a few tourist spots have thou
 - [ ] Integrate into composite score or use as validation signal
 
 **Effort:** 1-2 days (mostly waiting for API rate limits)
-
----
-
-### ⚡ Priority 4: Overture Maps (Better POIs + Building Density)
-
-**Why fourth:** Replaces your weakest data source (OSM POIs) with much richer data. Also provides building footprints for better solitude scoring.
-
-**URL:** https://overturemaps.org/download/
-
-**Format:** GeoParquet, partitioned by theme (places, buildings, transportation, land use)
-
-**Size:** Large — Canada extract will be multiple GB
-
-**What to extract:**
-
-**Places (POIs):**
-- Scenic viewpoints, parks, beaches, waterfalls, historic sites
-- Restaurants, cafes (nice stops along a scenic drive)
-- Filter out non-scenic POIs (gas stations, banks, etc.)
-
-**Buildings:**
-- Building footprint density per tile
-- High density = urban, low density = rural
-- Stronger signal for `solitude_score` than road density alone
-
-**How to process:**
-
-```bash
-# Download Overture places theme for Canada
-# Filter to relevant categories
-# Load into PostGIS
-
-# Using DuckDB to extract (Overture's recommended approach)
-duckdb -c "
-    COPY (
-        SELECT id, geometry, categories, names
-        FROM read_parquet('s3://overturemaps-us-west-2/release/2024-*/theme=places/type=place/*')
-        WHERE bbox.minX > -141 AND bbox.maxX < -52
-          AND bbox.minY > 41 AND bbox.maxY < 84
-    ) TO 'canada_places.parquet';
-"
-```
-
-**Checklist:**
-- [ ] Download Overture places + buildings themes for Canada
-- [ ] Filter places to scenic-relevant categories
-- [ ] Load into PostGIS
-- [ ] Compute improved `poi_score` from Overture places
-- [ ] Compute building density per tile for `solitude_score` refinement
-- [ ] Compare old vs new POI coverage
-
-**Effort:** 4-6 hours
 
 ---
 
@@ -378,9 +367,9 @@ GET https://api.open-meteo.com/v1/forecast
 | Priority | Source | When | Effort | Trigger |
 |---|---|---|---|---|
 | 1 | CPCAD Parks | First, after test matrix | 3-4 hours | Routes don't prefer obvious scenic areas (parks) |
-| 2 | Light Pollution | Second | 3-4 hours | Solitude preference doesn't meaningfully differentiate urban vs rural |
-| 3 | Flickr Photo Density | Third | 1-2 days | POI scores are flat, need independent scenic validation |
-| 4 | Overture Maps | Fourth | 4-6 hours | OSM POI coverage has obvious gaps |
+| 2 | Overture Maps | Second | 4-6 hours | POI coverage and building-density solitude signals need improvement |
+| 3 | Light Pollution | Third | 3-4 hours | Solitude preference doesn't meaningfully differentiate urban vs rural |
+| 4 | Flickr Photo Density | Fourth | 1-2 days | POI scores are flat, need independent scenic validation |
 | 5 | Weather API | Fifth | 3-4 hours | After all static scoring is solid, add real-time awareness |
 
 ---

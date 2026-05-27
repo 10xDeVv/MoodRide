@@ -93,6 +93,12 @@ echo "Applying scenic score updates"
 docker compose -f "$COMPOSE_FILE" --env-file "$ENV_FILE" exec -T postgres \
   psql -v ON_ERROR_STOP=1 -v expected_scoring_version="$EXPECTED_SCORING_VERSION" \
        -U "$POSTGRES_USER" -d "$POSTGRES_DB" <<'SQL'
+ALTER TABLE scenic_score_tiles
+    ADD COLUMN IF NOT EXISTS overture_poi_score DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+    ADD COLUMN IF NOT EXISTS building_density_score DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+    ADD COLUMN IF NOT EXISTS darkness_score DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+    ADD COLUMN IF NOT EXISTS urban_penalty_score DOUBLE PRECISION NOT NULL DEFAULT 0.0;
+
 CREATE TEMP TABLE scenic_release_updates (
     h3_index VARCHAR(15) PRIMARY KEY,
     scenic_score DOUBLE PRECISION,
@@ -103,6 +109,10 @@ CREATE TEMP TABLE scenic_release_updates (
     curve_score DOUBLE PRECISION,
     poi_score DOUBLE PRECISION,
     park_score DOUBLE PRECISION,
+    overture_poi_score DOUBLE PRECISION,
+    building_density_score DOUBLE PRECISION,
+    darkness_score DOUBLE PRECISION,
+    urban_penalty_score DOUBLE PRECISION,
     natural_land_use DOUBLE PRECISION,
     elevation_variance DOUBLE PRECISION,
     last_scored TIMESTAMP,
@@ -119,6 +129,10 @@ COPY scenic_release_updates (
     curve_score,
     poi_score,
     park_score,
+    overture_poi_score,
+    building_density_score,
+    darkness_score,
+    urban_penalty_score,
     natural_land_use,
     elevation_variance,
     last_scored,
@@ -155,6 +169,10 @@ WITH updated AS (
         curve_score = u.curve_score,
         poi_score = u.poi_score,
         park_score = COALESCE(u.park_score, sst.park_score),
+        overture_poi_score = COALESCE(u.overture_poi_score, sst.overture_poi_score),
+        building_density_score = COALESCE(u.building_density_score, sst.building_density_score),
+        darkness_score = COALESCE(u.darkness_score, sst.darkness_score),
+        urban_penalty_score = COALESCE(u.urban_penalty_score, sst.urban_penalty_score),
         natural_land_use = u.natural_land_use,
         elevation_variance = u.elevation_variance,
         last_scored = COALESCE(u.last_scored, CURRENT_TIMESTAMP),

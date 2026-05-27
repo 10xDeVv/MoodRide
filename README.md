@@ -17,6 +17,8 @@
 - **[Deployment Pipeline](docs/DeploymentPipeline.md)** - CI/CD and release flows
 - **[Release QA Baseline](docs/ReleaseQABaseline.md)** - Post-deploy validation script
 - **[Data Quality Upgrade](docs/DataQualityUpgrade.md)** - Land cover + DEM scoring plan
+- **[Data Enrichment 3.0 Plan](docs/DataEnrichment30Plan.md)** - Overture + light-pollution enrichment plan
+- **[Service Ownership](docs/ServiceOwnership.md)** - Active vs legacy service ownership
 - **[Hybrid Routing Progress](docs/HybridRoutingProgress.md)** - Current route-generation status
 - **[Route Export & UI Polish Progress](docs/RouteExportAndUIPolishProgress.md)** - UX polish status
 - **[API Alias Deprecation Plan](docs/ApiAliasDeprecationPlan.md)** - `/routes/*` sunset plan
@@ -80,9 +82,9 @@ MoodRide generates a loop route optimized for:
 | **route-api** | REST API, job management, route detail | Always-on |
 | **route-worker** | Hybrid OSRM loop generation + scoring | Always-on |
 | **notification-service** | WebSocket completion/failure updates | Always-on |
-| **scenic-scoring-service** | Batch scenic tile scoring/recompute | Offline/batch |
-| **ingestion-service** | OSM ingest → `road_segments` | Offline/batch |
-| **cdc-service** | Optional CDC cache invalidation | Optional/offline |
+| **scenic-scoring-service** | Targeted scenic tile recompute experiments | Offline/internal |
+
+`ingestion-service` and `cdc-service` were moved out of the active build and archived locally under `legacy/`. Current production data upgrades are script-driven batch/offline pipelines with versioned scenic releases.
 
 ---
 
@@ -206,9 +208,8 @@ MoodRide/
 │   ├── route-api/         # REST API (Port 8080)
 │   ├── route-worker/      # Hybrid OSRM worker (Port 8081)
 │   ├── scenic-scoring-service/
-│   ├── ingestion-service/
 │   ├── notification-service/
-│   └── cdc-service/
+│   └── ...
 ├── shared/                # Shared libraries
 │   ├── geo-commons/       # H3, JTS utilities
 │   ├── event-models/      # Kafka schemas
