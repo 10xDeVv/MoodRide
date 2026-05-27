@@ -31,7 +31,6 @@
         <h3.version>4.1.1</h3.version>
         <jgrapht.version>1.5.2</jgrapht.version>
         <redis.version>3.2.6</redis.version>
-        <debezium.version>2.7.0.Final</debezium.version>
         <mapbox.version>6.8.1</mapbox.version>
         <geotools.version>31.0</geotools.version>
         <resilience4j.version>2.2.0</resilience4j.version>
@@ -44,9 +43,7 @@
         <module>services/route-api</module>
         <module>services/route-worker</module>
         <module>services/scenic-scoring-service</module>
-        <module>services/ingestion-service</module>
         <module>services/notification-service</module>
-        <module>services/cdc-service</module>
 
         <!-- Shared libraries -->
         <module>shared/geo-commons</module>
@@ -99,14 +96,6 @@
                 <groupId>org.jgrapht</groupId>
                 <artifactId>jgrapht-core</artifactId>
                 <version>${jgrapht.version}</version>
-            </dependency>
-
-
-            <!-- Debezium -->
-            <dependency>
-                <groupId>io.debezium</groupId>
-                <artifactId>debezium-embedded</artifactId>
-                <version>${debezium.version}</version>
             </dependency>
 
             <!-- GeoTools for raster processing -->

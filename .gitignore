@@ -113,5 +113,8 @@ artifacts/
 generated/
 **/generated/
 
+# Local legacy service archive
+legacy/
+
 # Local tool caches
 .m2/

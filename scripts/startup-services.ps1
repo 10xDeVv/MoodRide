@@ -51,9 +51,9 @@ Write-Host "Build mode: SkipBuild=$SkipBuild ForceBuild=$ForceBuild"
 
 Set-Location $projectRoot
 
-$requiredInfra = @("postgres", "redis", "kafka", "zookeeper", "debezium", "osrm")
+$requiredInfra = @("postgres", "redis", "kafka", "zookeeper", "osrm")
 Write-Host "Ensuring required infrastructure services are running..."
-docker compose up -d postgres redis kafka zookeeper debezium debezium-init osrm | Out-Null
+docker compose up -d postgres redis kafka zookeeper osrm | Out-Null
 
 $infraWaitOk = $true
 for ($i = 0; $i -lt 10; $i++) {
@@ -132,10 +132,8 @@ if (Wait-ForHttpUp -Url "http://localhost:8080/actuator/health" -TimeoutSeconds 
 
 $servicePoms = @(
     @{ Name = "route-worker"; Pom = "services/route-worker/pom.xml"; Port = 8081 },
-    @{ Name = "cdc-service"; Pom = "services/cdc-service/pom.xml"; Port = 8082 },
     @{ Name = "notification-service"; Pom = "services/notification-service/pom.xml"; Port = 8084 },
-    @{ Name = "scenic-scoring-service"; Pom = "services/scenic-scoring-service/pom.xml"; Port = 8085 },
-    @{ Name = "ingestion-service"; Pom = "services/ingestion-service/pom.xml"; Port = 8086 }
+    @{ Name = "scenic-scoring-service"; Pom = "services/scenic-scoring-service/pom.xml"; Port = 8085 }
 )
 
 foreach ($svc in $servicePoms) {
