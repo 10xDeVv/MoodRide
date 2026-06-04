@@ -177,6 +177,14 @@ jobs:
         run: |
           ssh "${{ secrets.PROD_SSH_USER }}@${{ secrets.PROD_SSH_HOST }}" "mkdir -p /opt/moodride/scripts/deploy /opt/moodride/data/osrm"
 
+      - name: Log in to GHCR on server
+        env:
+          GHCR_USER: ${{ secrets.GHCR_USERNAME != '' && secrets.GHCR_USERNAME || github.repository_owner }}
+          GHCR_TOKEN: ${{ secrets.GHCR_PAT != '' && secrets.GHCR_PAT || secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          printf '%s' "$GHCR_TOKEN" | ssh "${{ secrets.PROD_SSH_USER }}@${{ secrets.PROD_SSH_HOST }}" "docker login ghcr.io -u '$GHCR_USER' --password-stdin"
+
       - name: Upload deployment files
         shell: bash
         run: |
