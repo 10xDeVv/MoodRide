@@ -11,7 +11,7 @@ Environment variables:
   COMPOSE_FILE    (default: docker-compose.prod.yml)
   ENV_FILE        (default: .env.prod)
   HEALTHCHECK_URL (default: https://app.moodrides.com/api/scenic-regions?lat=45.94&lng=-66.63&radius=1)
-  HEALTHCHECK_TIMEOUT_SECONDS (default: 120)
+  HEALTHCHECK_TIMEOUT_SECONDS (default: 360)
 EOF
 }
 
@@ -100,7 +100,7 @@ MOODRIDE_DIR=${MOODRIDE_DIR:-/opt/moodride}
 COMPOSE_FILE=${COMPOSE_FILE:-docker-compose.prod.yml}
 ENV_FILE=${ENV_FILE:-.env.prod}
 HEALTHCHECK_URL=${HEALTHCHECK_URL:-https://app.moodrides.com/api/scenic-regions?lat=45.94&lng=-66.63&radius=1}
-HEALTHCHECK_TIMEOUT_SECONDS=${HEALTHCHECK_TIMEOUT_SECONDS:-120}
+HEALTHCHECK_TIMEOUT_SECONDS=${HEALTHCHECK_TIMEOUT_SECONDS:-360}
 
 cd "$MOODRIDE_DIR"
 require_file "$COMPOSE_FILE"
