@@ -52,6 +52,9 @@ public class RoutePlanner {
     private static final int VIBE_AVAILABILITY_TOP_N = 12;
     private static final double MIN_VIBE_BEST_FIT_SCORE = 0.32;
     private static final double MIN_VIBE_AVG_FIT_SCORE = 0.26;
+    private static final int TARGET_ANCHOR_LIMIT = 14;
+    private static final int TARGET_ANCHOR_PAIR_LIMIT = 24;
+    private static final double TARGET_ANCHOR_MIN_SEPARATION_KM = 2.0;
 
     private static final List<Integer> WAYPOINT_VARIANTS = List.of(8, 6, 4);
     private static final Map<String, String> PREFERENCE_KEY_ALIASES = Map.of(
@@ -93,12 +96,30 @@ public class RoutePlanner {
     public List<RouteCandidate> generateRouteOptions(RouteJob job) {
         RoadNode start = new RoadNode(job.getStartLatitude(), job.getStartLongitude());
         List<String> requestVibes = resolveJobVibes(job);
+        VibeCatalog.BlendedVibeProfile vibeProfile = VibeCatalog.blendProfiles(requestVibes);
         PreferenceWeights preferences = resolvePreferenceWeights(requestVibes, job.getPreferenceVector());
 
-        List<TileCandidate> scoredTiles = scoreNearbyTiles(start, job.getTimeBudgetMinutes(), preferences);
-        validateVibeAvailability(job, requestVibes, scoredTiles);
-        List<List<RoadNode>> waypointVariants = buildWaypointRings(start, scoredTiles, job.getTimeBudgetMinutes());
+        List<TileCandidate> scoredTiles = scoreNearbyTiles(start, job.getTimeBudgetMinutes(), preferences, vibeProfile);
+        validateVibeAvailability(job, requestVibes, vibeProfile, scoredTiles);
+        List<List<RoadNode>> waypointVariants = buildWaypointRings(start, scoredTiles, job.getTimeBudgetMinutes(), vibeProfile);
         List<RouteCandidate> hybridCandidates = collectHybridCandidates(job, waypointVariants, preferences);
+        if (usesTargetAnchors(vibeProfile)) {
+            List<List<RoadNode>> targetAnchorVariants = buildTargetAnchorWaypointRings(
+                start,
+                scoredTiles,
+                job.getTimeBudgetMinutes(),
+                vibeProfile
+            );
+            List<RouteCandidate> targetAnchorCandidates = collectHybridCandidates(job, targetAnchorVariants, preferences);
+            if (!targetAnchorCandidates.isEmpty()) {
+                hybridCandidates = combineCandidates(hybridCandidates, targetAnchorCandidates);
+                logger.info(
+                    "Hybrid routing used {} target-anchor waypoint variant(s) for job {}",
+                    targetAnchorVariants.size(),
+                    job.getId()
+                );
+            }
+        }
         if (hybridCandidates.isEmpty() || !hasDiverseCandidatePool(hybridCandidates, job.getTimeBudgetMinutes())) {
             List<List<RoadNode>> syntheticVariants = buildSyntheticWaypointRings(start, job.getTimeBudgetMinutes());
             List<RouteCandidate> syntheticCandidates = collectHybridCandidates(job, syntheticVariants, preferences);
@@ -659,8 +680,11 @@ public class RoutePlanner {
             .collect(Collectors.joining("|"));
     }
 
-    private List<TileCandidate> scoreNearbyTiles(RoadNode start, int timeBudgetMinutes, PreferenceWeights preferences) {
-        int ringSize = determineRingSize(timeBudgetMinutes);
+    private List<TileCandidate> scoreNearbyTiles(RoadNode start,
+                                                 int timeBudgetMinutes,
+                                                 PreferenceWeights preferences,
+                                                 VibeCatalog.BlendedVibeProfile vibeProfile) {
+        int ringSize = determineRingSize(timeBudgetMinutes, vibeProfile);
         int configuredResolution = Math.max(0, config.getH3Resolution());
         List<ScenicScoreTile> nearbyTiles = findTilesNearStart(start, ringSize, configuredResolution);
 
@@ -681,6 +705,7 @@ public class RoutePlanner {
             return List.of();
         }
 
+        double targetRadiusKm = targetWaypointRadiusKm(timeBudgetMinutes, vibeProfile);
         return nearbyTiles.stream()
             .filter(tile -> tile.getGeometry() != null && !tile.getGeometry().isEmpty())
             .map(tile -> {
@@ -690,14 +715,18 @@ public class RoutePlanner {
                 );
                 double distanceKm = distanceKm(start, tileCenter);
                 double score = scoreTile(tile, preferences);
-                return new TileCandidate(tile, tileCenter, score, distanceKm);
+                double selectionScore = tileSelectionScore(tile, vibeProfile, score, distanceKm, targetRadiusKm);
+                return new TileCandidate(tile, tileCenter, score, selectionScore, distanceKm);
             })
-            .sorted(Comparator.comparingDouble(TileCandidate::scenicScore).reversed())
+            .sorted(Comparator.comparingDouble(TileCandidate::selectionScore).reversed())
             .limit(Math.max(20, config.getTileSelectionLimit()))
             .toList();
     }
 
-    private void validateVibeAvailability(RouteJob job, List<String> vibes, List<TileCandidate> scoredTiles) {
+    private void validateVibeAvailability(RouteJob job,
+                                          List<String> vibes,
+                                          VibeCatalog.BlendedVibeProfile vibeProfile,
+                                          List<TileCandidate> scoredTiles) {
         if (scoredTiles == null || scoredTiles.size() < MIN_VIBE_AVAILABILITY_TILES) {
             throw new NoFeasibleRouteException(
                 "No scenic data found near this start for " + VibeCatalog.displayList(vibes)
@@ -707,7 +736,7 @@ public class RoutePlanner {
         }
 
         List<Double> fitScores = scoredTiles.stream()
-            .map(candidate -> vibeFitScore(candidate.tile(), vibes))
+            .map(candidate -> vibeFitScore(candidate.tile(), vibeProfile))
             .sorted(Comparator.reverseOrder())
             .toList();
         double bestFit = fitScores.getFirst();
@@ -717,7 +746,9 @@ public class RoutePlanner {
             .average()
             .orElse(0.0);
 
-        if (bestFit < MIN_VIBE_BEST_FIT_SCORE || avgTopFit < MIN_VIBE_AVG_FIT_SCORE) {
+        double minBestFit = Math.max(MIN_VIBE_BEST_FIT_SCORE, vibeProfile.minBestFit());
+        double minAverageFit = Math.max(MIN_VIBE_AVG_FIT_SCORE, vibeProfile.minAverageFit());
+        if (bestFit < minBestFit || avgTopFit < minAverageFit) {
             throw new NoFeasibleRouteException(
                 "No strong " + VibeCatalog.displayList(vibes)
                     + " route found near this start within your " + job.getTimeBudgetMinutes()
@@ -726,40 +757,109 @@ public class RoutePlanner {
         }
     }
 
-    private double vibeFitScore(ScenicScoreTile tile, List<String> vibes) {
-        List<String> activeVibes = (vibes == null || vibes.isEmpty()) ? List.of(VibeCatalog.defaultVibe()) : vibes;
-        return activeVibes.stream()
-            .mapToDouble(vibe -> singleVibeFitScore(tile, vibe))
+    private double vibeFitScore(ScenicScoreTile tile, VibeCatalog.BlendedVibeProfile vibeProfile) {
+        VibeCatalog.BlendedVibeProfile activeProfile = vibeProfile == null
+            ? VibeCatalog.blendProfiles(List.of(VibeCatalog.defaultVibe()))
+            : vibeProfile;
+        return activeProfile.profiles().stream()
+            .mapToDouble(profile -> singleVibeFitScore(tile, profile))
             .average()
             .orElse(DEFAULT_SCENIC_FALLBACK);
     }
 
-    private double singleVibeFitScore(ScenicScoreTile tile, String vibe) {
+    private double singleVibeFitScore(ScenicScoreTile tile, VibeCatalog.VibeProfile profile) {
         ComponentScores components = componentScores(tile);
-        return switch (VibeCatalog.normalize(vibe)) {
-            case "coastal", "riverside" -> components.water();
-            case "mountain" -> average(components.elevation(), components.curves());
-            case "forest", "nature_escape" -> average(components.greenery(), components.solitude());
-            case "open_roads" -> average(components.curves(), components.solitude());
-            case "relaxing", "smooth_cruise", "quiet", "minimal_traffic", "clear_my_head", "countryside", "sunday_cruise" ->
-                average(components.greenery(), components.solitude());
-            case "winding_roads", "adventure" -> average(components.curves(), components.elevation());
-            case "sunset", "sunrise", "golden_hour", "date_night" -> Math.max(components.water(), components.elevation());
-            case "photo_worthy", "photo_run" -> average(Math.max(components.water(), components.elevation()), components.poi());
-            case "hidden_gems" -> average(components.solitude(), components.curves(), components.poi());
-            case "loop_variety", "scenic", "scenic_reset" -> average(
+        double targetScore = targetComponentScore(tile, components, profile);
+        double antiPenalty = antiComponentPenalty(tile, components, profile.antiComponents());
+        double penaltyWeight = profile.strictIntent() ? 0.24 : 0.14;
+        return clamp01(targetScore - (antiPenalty * penaltyWeight));
+    }
+
+    private double targetComponentScore(ScenicScoreTile tile, ComponentScores components, VibeCatalog.VibeProfile profile) {
+        if (profile.targetComponents() == null || profile.targetComponents().isEmpty()) {
+            return average(
                 components.water(),
                 components.greenery(),
                 components.elevation(),
                 components.solitude(),
-                components.curves()
+                components.curves(),
+                components.poi()
             );
-            default -> average(components.greenery(), components.solitude());
-        };
+        }
+
+        double weighted = 0.0;
+        double totalWeight = 0.0;
+        for (String component : profile.targetComponents()) {
+            double weight = componentWeight(profile.weights(), component);
+            weighted += componentValue(tile, components, component) * weight;
+            totalWeight += weight;
+        }
+        return totalWeight <= 0.0001 ? DEFAULT_SCENIC_FALLBACK : clamp01(weighted / totalWeight);
     }
 
     private ComponentScores componentScores(ScenicScoreTile tile) {
         return scenicScoreCalculator.componentScores(tile);
+    }
+
+    private double antiComponentPenalty(ScenicScoreTile tile, ComponentScores components, List<String> antiComponents) {
+        if (antiComponents == null || antiComponents.isEmpty()) {
+            return 0.0;
+        }
+
+        double sum = 0.0;
+        int count = 0;
+        for (String antiComponent : antiComponents) {
+            sum += switch (antiComponent) {
+                case "urban_penalty" -> clamp01(tile.getUrbanPenaltyScore());
+                case "building_density" -> clamp01(tile.getBuildingDensityScore());
+                case "poi" -> components.poi();
+                case "curves" -> components.curves();
+                case "road_density" -> clamp01(tile.getRoadDensity());
+                default -> 0.0;
+            };
+            count++;
+        }
+        return count == 0 ? 0.0 : clamp01(sum / count);
+    }
+
+    private double componentValue(ScenicScoreTile tile, ComponentScores components, String component) {
+        return switch (component) {
+            case "water" -> components.water();
+            case "greenery" -> components.greenery();
+            case "elevation" -> components.elevation();
+            case "solitude" -> components.solitude();
+            case "curves" -> components.curves();
+            case "poi" -> components.poi();
+            case "open_space" -> openSpaceScore(tile, components);
+            default -> 0.0;
+        };
+    }
+
+    private double componentWeight(VibeCatalog.ComponentWeights weights, String component) {
+        return switch (component) {
+            case "water" -> weights.water();
+            case "greenery" -> weights.greenery();
+            case "elevation" -> weights.elevation();
+            case "solitude" -> weights.solitude();
+            case "curves" -> weights.curves();
+            case "poi" -> weights.poi();
+            case "open_space" -> Math.max(weights.solitude(), weights.curves());
+            default -> 0.0;
+        };
+    }
+
+    private double openSpaceScore(ScenicScoreTile tile, ComponentScores components) {
+        double lowRoadDensity = 1.0 - clamp01(tile.getRoadDensity());
+        double lowBuildingDensity = 1.0 - clamp01(tile.getBuildingDensityScore());
+        double lowUrbanPressure = 1.0 - clamp01(tile.getUrbanPenaltyScore());
+        double lowPoiDensity = 1.0 - components.poi();
+        return clamp01(
+            (components.solitude() * 0.45)
+                + (lowRoadDensity * 0.25)
+                + (lowBuildingDensity * 0.15)
+                + (lowUrbanPressure * 0.10)
+                + (lowPoiDensity * 0.05)
+        );
     }
 
     private double average(double... values) {
@@ -783,23 +883,32 @@ public class RoutePlanner {
     }
 
     private int determineRingSize(int timeBudgetMinutes) {
+        return determineRingSize(timeBudgetMinutes, null);
+    }
+
+    private int determineRingSize(int timeBudgetMinutes, VibeCatalog.BlendedVibeProfile vibeProfile) {
         int dynamicRing = (int) Math.ceil(timeBudgetMinutes / 5.0);
         int min = Math.max(1, config.getTileSelectionRingMin());
         int max = Math.max(min, config.getTileSelectionRingMax());
+        if (usesTargetAnchors(vibeProfile)) {
+            dynamicRing = Math.max(dynamicRing, (int) Math.ceil(dynamicRing * 1.65));
+        }
         return Math.max(min, Math.min(max, dynamicRing));
     }
 
     private List<List<RoadNode>> buildWaypointRings(RoadNode start,
                                                     List<TileCandidate> scoredTiles,
-                                                    int timeBudgetMinutes) {
+                                                    int timeBudgetMinutes,
+                                                    VibeCatalog.BlendedVibeProfile vibeProfile) {
         if (scoredTiles.isEmpty()) {
             return List.of();
         }
 
         int sectorCount = Math.max(4, config.getSectorCount());
-        double targetRadiusKm = Math.max(2.5, timeBudgetMinutes / 6.5);
-        double minRadiusKm = targetRadiusKm * 0.45;
-        double maxRadiusKm = targetRadiusKm * 2.0;
+        double targetRadiusKm = targetWaypointRadiusKm(timeBudgetMinutes, vibeProfile);
+        boolean outwardRouting = usesTargetAnchors(vibeProfile);
+        double minRadiusKm = targetRadiusKm * (outwardRouting ? 0.50 : 0.45);
+        double maxRadiusKm = targetRadiusKm * (outwardRouting ? 1.90 : 2.0);
 
         Map<Integer, TileCandidate> bestBySector = new HashMap<>();
         for (TileCandidate candidate : scoredTiles) {
@@ -807,13 +916,13 @@ public class RoutePlanner {
                 continue;
             }
             int sector = calculateSector(start, candidate.center(), sectorCount);
-            bestBySector.merge(sector, candidate, (left, right) -> left.scenicScore() >= right.scenicScore() ? left : right);
+            bestBySector.merge(sector, candidate, (left, right) -> left.selectionScore() >= right.selectionScore() ? left : right);
         }
 
         if (bestBySector.size() < 4) {
             for (TileCandidate candidate : scoredTiles) {
                 int sector = calculateSector(start, candidate.center(), sectorCount);
-                bestBySector.merge(sector, candidate, (left, right) -> left.scenicScore() >= right.scenicScore() ? left : right);
+                bestBySector.merge(sector, candidate, (left, right) -> left.selectionScore() >= right.selectionScore() ? left : right);
                 if (bestBySector.size() >= sectorCount) {
                     break;
                 }
@@ -859,6 +968,78 @@ public class RoutePlanner {
         }
 
         return deduplicateRings(variants);
+    }
+
+    private List<List<RoadNode>> buildTargetAnchorWaypointRings(RoadNode start,
+                                                               List<TileCandidate> scoredTiles,
+                                                               int timeBudgetMinutes,
+                                                               VibeCatalog.BlendedVibeProfile vibeProfile) {
+        if (scoredTiles == null || scoredTiles.isEmpty()) {
+            return List.of();
+        }
+
+        double targetRadiusKm = targetWaypointRadiusKm(timeBudgetMinutes, vibeProfile);
+        double minRadiusKm = Math.max(3.0, targetRadiusKm * 0.55);
+        double maxRadiusKm = Math.max(minRadiusKm + 1.0, Math.min(timeBudgetMinutes / 2.2, targetRadiusKm * 1.85));
+        int sectorCount = Math.max(4, config.getSectorCount());
+        List<TileCandidate> anchors = selectTargetAnchors(scoredTiles, minRadiusKm, maxRadiusKm);
+
+        List<List<RoadNode>> variants = new ArrayList<>();
+        for (TileCandidate anchor : anchors) {
+            variants.add(List.of(start, anchor.center()));
+        }
+
+        int pairCount = 0;
+        for (int i = 0; i < anchors.size() && pairCount < TARGET_ANCHOR_PAIR_LIMIT; i++) {
+            TileCandidate first = anchors.get(i);
+            int firstSector = calculateSector(start, first.center(), sectorCount);
+            for (int j = i + 1; j < anchors.size() && pairCount < TARGET_ANCHOR_PAIR_LIMIT; j++) {
+                TileCandidate second = anchors.get(j);
+                if (distanceKm(first.center(), second.center()) < TARGET_ANCHOR_MIN_SEPARATION_KM) {
+                    continue;
+                }
+                int secondSector = calculateSector(start, second.center(), sectorCount);
+                int sectorGap = Math.abs(firstSector - secondSector);
+                int circularGap = Math.min(sectorGap, sectorCount - sectorGap);
+                if (circularGap < 2) {
+                    continue;
+                }
+                variants.add(List.of(start, first.center(), second.center()));
+                pairCount++;
+            }
+        }
+
+        if (anchors.size() >= 3) {
+            List<RoadNode> triangle = new ArrayList<>();
+            triangle.add(start);
+            anchors.stream()
+                .sorted(Comparator.comparingInt(anchor -> calculateSector(start, anchor.center(), sectorCount)))
+                .limit(3)
+                .map(TileCandidate::center)
+                .forEach(triangle::add);
+            variants.add(List.copyOf(triangle));
+        }
+
+        return deduplicateRings(variants);
+    }
+
+    private List<TileCandidate> selectTargetAnchors(List<TileCandidate> scoredTiles, double minRadiusKm, double maxRadiusKm) {
+        List<TileCandidate> anchors = new ArrayList<>();
+        for (TileCandidate candidate : scoredTiles) {
+            if (candidate.distanceKm() < minRadiusKm || candidate.distanceKm() > maxRadiusKm) {
+                continue;
+            }
+            boolean tooClose = anchors.stream()
+                .anyMatch(anchor -> distanceKm(anchor.center(), candidate.center()) < TARGET_ANCHOR_MIN_SEPARATION_KM);
+            if (tooClose) {
+                continue;
+            }
+            anchors.add(candidate);
+            if (anchors.size() >= TARGET_ANCHOR_LIMIT) {
+                break;
+            }
+        }
+        return List.copyOf(anchors);
     }
 
     private List<List<RoadNode>> buildSyntheticWaypointRings(RoadNode start, int timeBudgetMinutes) {
@@ -947,6 +1128,32 @@ public class RoutePlanner {
         double bearing = bearingDegrees(start, point);
         double sectorWidth = 360.0 / sectorCount;
         return (int) Math.floor(bearing / sectorWidth);
+    }
+
+    private double targetWaypointRadiusKm(int timeBudgetMinutes, VibeCatalog.BlendedVibeProfile vibeProfile) {
+        boolean outwardRouting = usesTargetAnchors(vibeProfile);
+        double target = outwardRouting ? timeBudgetMinutes / 4.2 : timeBudgetMinutes / 6.5;
+        return Math.max(2.5, target);
+    }
+
+    private boolean usesTargetAnchors(VibeCatalog.BlendedVibeProfile vibeProfile) {
+        return vibeProfile != null && vibeProfile.outwardRouting() && !vibeProfile.antiComponents().isEmpty();
+    }
+
+    private double tileSelectionScore(ScenicScoreTile tile,
+                                      VibeCatalog.BlendedVibeProfile vibeProfile,
+                                      double scenicScore,
+                                      double distanceKm,
+                                      double targetRadiusKm) {
+        if (vibeProfile == null) {
+            return scenicScore;
+        }
+        double vibeFit = vibeFitScore(tile, vibeProfile);
+        double radiusFit = 1.0 - Math.min(1.0, Math.abs(distanceKm - targetRadiusKm) / Math.max(1.0, targetRadiusKm));
+        if (vibeProfile.strictIntent()) {
+            return (scenicScore * 0.35) + (vibeFit * 0.55) + (radiusFit * 0.10);
+        }
+        return (scenicScore * 0.55) + (vibeFit * 0.35) + (radiusFit * 0.10);
     }
 
     private double bearingDegrees(RoadNode from, RoadNode to) {
@@ -1293,6 +1500,7 @@ public class RoutePlanner {
     private record TileCandidate(ScenicScoreTile tile,
                                  RoadNode center,
                                  double scenicScore,
+                                 double selectionScore,
                                  double distanceKm) {
     }
 }

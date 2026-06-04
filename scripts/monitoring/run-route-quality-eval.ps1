@@ -307,7 +307,7 @@ function Get-TargetComponentsForVibes {
     $targets = New-Object System.Collections.Generic.List[string]
     foreach ($vibe in $Vibes) {
         switch ($vibe) {
-            { $_ -in @("coastal", "riverside") } {
+            "coastal" {
                 $targets.Add("water")
                 break
             }
@@ -316,17 +316,22 @@ function Get-TargetComponentsForVibes {
                 $targets.Add("curves")
                 break
             }
+            "riverside" {
+                $targets.Add("water")
+                $targets.Add("greenery")
+                break
+            }
             { $_ -in @("forest", "nature_escape") } {
                 $targets.Add("greenery")
                 $targets.Add("solitude")
                 break
             }
             "open_roads" {
-                $targets.Add("curves")
+                $targets.Add("open_space")
                 $targets.Add("solitude")
                 break
             }
-            { $_ -in @("countryside", "quiet", "relaxing", "sunday_cruise", "smooth_cruise", "minimal_traffic", "clear_my_head") } {
+            { $_ -in @("countryside", "country", "quiet", "relaxing", "sunday_cruise", "smooth_cruise", "minimal_traffic", "low_traffic", "clear_my_head") } {
                 $targets.Add("solitude")
                 $targets.Add("greenery")
                 break
@@ -336,9 +341,15 @@ function Get-TargetComponentsForVibes {
                 $targets.Add("elevation")
                 break
             }
-            { $_ -in @("sunset", "sunrise", "golden_hour", "date_night") } {
+            { $_ -in @("sunset", "sunrise", "golden_hour") } {
                 $targets.Add("water")
                 $targets.Add("elevation")
+                break
+            }
+            "date_night" {
+                $targets.Add("water")
+                $targets.Add("elevation")
+                $targets.Add("poi")
                 break
             }
             { $_ -in @("photo_worthy", "photo_run") } {

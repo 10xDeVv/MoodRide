@@ -69,6 +69,8 @@ public class RouteService {
         "green", "greenery",
         "elevation", "elevation",
         "solitude", "solitude",
+        "open_space", "open_space",
+        "openspace", "open_space",
         "curves", "curves",
         "curve", "curves",
         "poi", "poi"
@@ -85,6 +87,7 @@ public class RouteService {
         "greenery",
         "elevation",
         "solitude",
+        "open_space",
         "curves",
         "poi"
     );
@@ -579,6 +582,7 @@ public class RouteService {
                     reorderedLeadingComponents,
                     explanation.componentLifts(),
                     explanation.weightedContributions(),
+                    null,
                     liftBased
                 ),
                 explanation.sampleTileCount(),
@@ -662,8 +666,10 @@ public class RouteService {
 
         Map<String, Double> averages = accumulator.averages();
         Map<String, Double> baselineAverages = baselineAccumulator == null ? Map.of() : baselineAccumulator.averages();
+        List<String> routeVibes = resolveRouteVibes(routeJob, route);
+        VibeCatalog.BlendedVibeProfile vibeProfile = VibeCatalog.blendProfiles(routeVibes);
         Map<String, Double> componentWeights = resolveEffectivePreferenceWeights(
-            resolveRouteVibes(routeJob, route),
+            routeVibes,
             routeJob == null ? Map.of() : parseStoredPreferenceVector(routeJob.getPreferenceVector())
         ).componentRatios();
         Map<String, Double> componentLifts = buildComponentLifts(averages, baselineAverages);
@@ -675,6 +681,7 @@ public class RouteService {
             weightedContributions,
             componentLifts,
             componentWeights,
+            vibeProfile,
             liftBased
         );
 
@@ -691,7 +698,7 @@ public class RouteService {
             componentWeights,
             weightedContributions,
             leadingComponents,
-            buildRouteExplanationSummary(leadingComponents, componentLifts, weightedContributions, liftBased),
+            buildRouteExplanationSummary(leadingComponents, componentLifts, weightedContributions, vibeProfile, liftBased),
             tiles.size(),
             baselineAccumulator == null ? 0 : baselineAccumulator.count()
         );
@@ -809,6 +816,7 @@ public class RouteService {
         Map<String, Double> fallbackSignals,
         Map<String, Double> componentLifts,
         Map<String, Double> componentWeights,
+        VibeCatalog.BlendedVibeProfile vibeProfile,
         boolean liftBased
     ) {
         if (baseSignals == null || baseSignals.isEmpty()) {
@@ -822,6 +830,12 @@ public class RouteService {
             double weight = componentWeights == null ? 0.0 : componentWeights.getOrDefault(component, 0.0);
             double lift = componentLifts == null ? 0.0 : componentLifts.getOrDefault(component, 0.0);
 
+            if (vibeProfile != null && vibeProfile.targetComponents().contains(component)) {
+                signal *= vibeProfile.strictIntent() ? 1.35 : 1.18;
+            }
+            if (vibeProfile != null && vibeProfile.antiComponents().contains(component)) {
+                signal *= 0.45;
+            }
             if ("poi".equals(component)) {
                 requestedPoi = weight >= ROUTE_EXPLANATION_POI_REQUESTED_WEIGHT;
                 signal *= requestedPoi
@@ -859,6 +873,7 @@ public class RouteService {
                     Map.of(),
                     componentLifts,
                     componentWeights,
+                    vibeProfile,
                     false
                 );
             }
@@ -871,25 +886,34 @@ public class RouteService {
         List<String> leadingComponents,
         Map<String, Double> componentLifts,
         Map<String, Double> weightedContributions,
+        VibeCatalog.BlendedVibeProfile vibeProfile,
         boolean liftBased
     ) {
         if (leadingComponents == null || leadingComponents.isEmpty()) {
             return "Scored from nearby scenic tiles along this route.";
         }
 
+        String prefix = "";
+        if (vibeProfile != null && !vibeProfile.profiles().isEmpty()) {
+            String template = vibeProfile.profiles().getFirst().explanationTemplate();
+            if (template != null && !template.isBlank()) {
+                prefix = template + " ";
+            }
+        }
+
         String first = componentLabel(leadingComponents.getFirst());
         if (leadingComponents.size() == 1) {
-            return liftBased
+            return prefix + (liftBased
                 ? first + " is the strongest above-area signal on this option (" + formatLift(componentLifts.get(leadingComponents.getFirst())) + ")."
-                : first + " carries the strongest weighted influence on this option (" + formatContribution(weightedContributions.get(leadingComponents.getFirst())) + ").";
+                : first + " carries the strongest weighted influence on this option (" + formatContribution(weightedContributions.get(leadingComponents.getFirst())) + ").");
         }
 
         String second = componentLabel(leadingComponents.get(1));
         if (liftBased) {
-            return first + " (" + formatLift(componentLifts.get(leadingComponents.getFirst())) + ") and "
+            return prefix + first + " (" + formatLift(componentLifts.get(leadingComponents.getFirst())) + ") and "
                 + second + " (" + formatLift(componentLifts.get(leadingComponents.get(1))) + ") are strongest above the local area baseline.";
         }
-        return first + " (" + formatContribution(weightedContributions.get(leadingComponents.getFirst())) + ") and "
+        return prefix + first + " (" + formatContribution(weightedContributions.get(leadingComponents.getFirst())) + ") and "
             + second + " (" + formatContribution(weightedContributions.get(leadingComponents.get(1))) + ") carry the most weighted influence on this option.";
     }
 
@@ -909,6 +933,7 @@ public class RouteService {
             case "greenery" -> "Greenery";
             case "elevation" -> "Elevation";
             case "solitude" -> "Solitude";
+            case "open_space" -> "Open space";
             case "curves" -> "Curves";
             case "poi" -> "Stops";
             default -> component;
@@ -1236,6 +1261,7 @@ public class RouteService {
         private double greenery;
         private double elevation;
         private double solitude;
+        private double openSpace;
         private double curves;
         private double poi;
         private int count;
@@ -1246,6 +1272,7 @@ public class RouteService {
             greenery += scores.greenery();
             elevation += scores.elevation();
             solitude += scores.solitude();
+            openSpace += openSpaceScore(tile, scores);
             curves += scores.curves();
             poi += scores.poi();
             count++;
@@ -1258,6 +1285,7 @@ public class RouteService {
             values.put("greenery", roundComponent(greenery / safeCount));
             values.put("elevation", roundComponent(elevation / safeCount));
             values.put("solitude", roundComponent(solitude / safeCount));
+            values.put("open_space", roundComponent(openSpace / safeCount));
             values.put("curves", roundComponent(curves / safeCount));
             values.put("poi", roundComponent(poi / safeCount));
             return Map.copyOf(values);
@@ -1269,6 +1297,20 @@ public class RouteService {
 
         private double roundComponent(double value) {
             return Math.round(clamp01(value) * 10_000.0) / 10_000.0;
+        }
+
+        private double openSpaceScore(ScenicScoreTile tile, ComponentScores scores) {
+            double lowRoadDensity = 1.0 - clamp01(tile.getRoadDensity());
+            double lowBuildingDensity = 1.0 - clamp01(tile.getBuildingDensityScore());
+            double lowUrbanPressure = 1.0 - clamp01(tile.getUrbanPenaltyScore());
+            double lowPoiDensity = 1.0 - scores.poi();
+            return clamp01(
+                (scores.solitude() * 0.45)
+                    + (lowRoadDensity * 0.25)
+                    + (lowBuildingDensity * 0.15)
+                    + (lowUrbanPressure * 0.10)
+                    + (lowPoiDensity * 0.05)
+            );
         }
     }
 
@@ -1312,6 +1354,7 @@ public class RouteService {
                 "greenery", normalized.greenery(),
                 "elevation", normalized.elevation(),
                 "solitude", normalized.solitude(),
+                "open_space", normalized.solitude(),
                 "curves", normalized.curves(),
                 "poi", normalized.poi()
             );
