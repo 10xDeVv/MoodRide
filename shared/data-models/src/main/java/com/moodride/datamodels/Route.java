@@ -40,6 +40,9 @@ public class Route {
     @Column(nullable = false)
     private double scenicScore;  // Average scenic score (0.0 - 1.0)
 
+    @Column(name = "score_breakdown_json", columnDefinition = "TEXT")
+    private String scoreBreakdownJson;
+
     @Enumerated(EnumType.STRING)
     @Column(name = "route_mode", nullable = false, length = 16)
     private RouteMode routeMode = RouteMode.DRIVE;
@@ -64,6 +67,9 @@ public class Route {
 
     @Column
     private Instant ratedAt;
+
+    @Column(name = "feedback_tags_json", columnDefinition = "TEXT")
+    private String feedbackTagsJson;
 
     // Constructors
     public Route() {}
@@ -100,6 +106,9 @@ public class Route {
     public double getScenicScore() { return scenicScore; }
     public void setScenicScore(double scenicScore) { this.scenicScore = scenicScore; }
 
+    public String getScoreBreakdownJson() { return scoreBreakdownJson; }
+    public void setScoreBreakdownJson(String scoreBreakdownJson) { this.scoreBreakdownJson = scoreBreakdownJson; }
+
     public RouteMode getRouteMode() { return routeMode == null ? RouteMode.DRIVE : routeMode; }
     public void setRouteMode(RouteMode routeMode) { this.routeMode = routeMode == null ? RouteMode.DRIVE : routeMode; }
 
@@ -128,4 +137,7 @@ public class Route {
 
     public Instant getRatedAt() { return ratedAt; }
     public void setRatedAt(Instant ratedAt) { this.ratedAt = ratedAt; }
+
+    public String getFeedbackTagsJson() { return feedbackTagsJson; }
+    public void setFeedbackTagsJson(String feedbackTagsJson) { this.feedbackTagsJson = feedbackTagsJson; }
 }

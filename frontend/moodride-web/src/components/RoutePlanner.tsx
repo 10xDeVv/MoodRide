@@ -1,1065 +1,1544 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
-import { getJobStatus, getRoute, getScenicRegions, searchLocations, submitRoute, submitRouteRating } from "@/lib/api";
+import { useState, useCallback, useRef, useEffect } from "react";
+import {
+  MapPin, Navigation, Bike, Footprints, Car,
+  Sparkles, RefreshCw, ChevronDown, ChevronUp,
+  AlertTriangle, Download, Map as MapIcon, ArrowRight, Loader2,
+  Waves, Trees, Mountain, Eye, Route,
+  Sunset, Camera, Compass, Wind, Coffee, Zap, Moon, Sun,
+  type LucideIcon
+} from "lucide-react";
+import { RouteMap } from "./RouteMap";
+import { ScenicHighlightsPanel } from "./ScenicHighlightsPanel";
+import { BottomSheet, type BottomSheetState } from "./BottomSheet";
+import { submitRoute, getJobStatus, getRoute, submitRouteRating, searchLocations } from "@/lib/api";
 import { connectJobChannel } from "@/lib/ws";
 import type {
-  JobSocketEvent,
-  LocationSuggestion,
   RouteDetailResponse,
+  RouteOptionResponse,
   RouteJobStatusResponse,
   RouteMode,
-  RouteOptionResponse,
-  RouteSubmissionResponse,
-  ScenicRegionsResponse,
-  Vibe
+  Vibe,
+  LocationSuggestion
 } from "@/lib/types";
-import { RouteMap } from "@/components/RouteMap";
-import { ScenicHighlightsPanel } from "@/components/ScenicHighlightsPanel";
 
-const VIBE_GROUPS: Array<{ title: string; description: string; options: Vibe[] }> = [
-  {
-    title: "Browse by scenery",
-    description: "What the drive should look like.",
-    options: ["coastal", "mountain", "countryside", "riverside", "forest", "open_roads"]
-  },
-  {
-    title: "Refine by feel",
-    description: "How the road should behave.",
-    options: ["relaxing", "winding_roads", "smooth_cruise", "quiet", "hidden_gems", "minimal_traffic"]
-  },
-  {
-    title: "Quick presets",
-    description: "Pick a mood and let MoodRide blend the weights.",
-    options: ["scenic", "sunset", "photo_worthy", "nature_escape", "sunday_cruise", "adventure"]
-  }
+// ─── Constants ────────────────────────────────────────────────────────────────
+
+const VIBE_CONFIG: Array<{ vibe: Vibe; label: string; Icon: LucideIcon }> = [
+  { vibe: "coastal",         label: "Coastal",       Icon: Waves },
+  { vibe: "mountain",        label: "Mountain",      Icon: Mountain },
+  { vibe: "countryside",     label: "Country",       Icon: Trees },
+  { vibe: "riverside",       label: "Riverside",     Icon: Waves },
+  { vibe: "forest",          label: "Forest",        Icon: Trees },
+  { vibe: "open_roads",      label: "Open Roads",    Icon: Route },
+  { vibe: "relaxing",        label: "Relaxing",      Icon: Wind },
+  { vibe: "winding_roads",   label: "Winding",       Icon: Route },
+  { vibe: "smooth_cruise",   label: "Cruise",        Icon: Car },
+  { vibe: "quiet",           label: "Quiet",         Icon: Eye },
+  { vibe: "hidden_gems",     label: "Hidden",        Icon: Compass },
+  { vibe: "minimal_traffic", label: "Low Traffic",   Icon: Navigation },
+  { vibe: "scenic",          label: "Scenic",        Icon: Camera },
+  { vibe: "sunset",          label: "Sunset",        Icon: Sunset },
+  { vibe: "photo_worthy",    label: "Photo",         Icon: Camera },
+  { vibe: "nature_escape",   label: "Nature",        Icon: Trees },
+  { vibe: "sunday_cruise",   label: "Sunday",        Icon: Coffee },
+  { vibe: "adventure",       label: "Adventure",     Icon: Zap },
 ];
-const TIME_BUDGET_OPTIONS = [30, 60, 90, 120] as const;
-const ROUTE_MODES: Array<{ value: RouteMode; label: string; status: string; enabled: boolean }> = [
-  { value: "drive", label: "Drive", status: "Canada live", enabled: true },
-  { value: "walk", label: "Walk", status: "City pilot next", enabled: false },
-  { value: "bike", label: "Bike", status: "Safety scoring next", enabled: false }
-];
-const PROFILE_DISPLAY_NAMES: Record<string, string> = {
-  most_scenic: "Most Scenic",
-  balanced: "Balanced",
-  shorter: "Shorter"
-};
-const VIBE_DISPLAY_NAMES: Record<string, string> = {
-  coastal: "Coastal",
-  mountain: "Mountain",
-  countryside: "Countryside",
-  riverside: "Riverside",
-  forest: "Forest",
-  open_roads: "Open Roads",
-  relaxing: "Relaxing",
-  winding_roads: "Winding Roads",
-  smooth_cruise: "Smooth Cruise",
-  quiet: "Quiet",
-  hidden_gems: "Hidden Gems",
-  minimal_traffic: "Minimal Traffic",
-  loop_variety: "Loop Variety",
-  scenic: "Scenic",
-  clear_my_head: "Clear My Head",
-  date_night: "Date Night",
-  sunday_cruise: "Sunday Cruise",
-  adventure: "Adventure",
-  photo_run: "Photo Run",
-  photo_worthy: "Photo-Worthy",
-  nature_escape: "Nature Escape",
-  scenic_reset: "Scenic Reset",
-  golden_hour: "Golden Hour",
-  sunset: "Sunset",
-  sunrise: "Sunrise"
-};
+
 const VIBE_PREFERENCE_DEFAULTS: Record<string, Record<string, number>> = {
-  coastal: { water: 0.9, greenery: 0.7, elevation: 0.3, solitude: 0.6, curves: 0.45, poi: 0.2 },
-  mountain: { water: 0.2, greenery: 0.55, elevation: 0.9, solitude: 0.7, curves: 0.8, poi: 0.2 },
-  countryside: { water: 0.4, greenery: 0.7, elevation: 0.45, solitude: 0.7, curves: 0.6, poi: 0.3 },
-  riverside: { water: 0.85, greenery: 0.75, elevation: 0.35, solitude: 0.65, curves: 0.45, poi: 0.25 },
-  forest: { water: 0.3, greenery: 0.9, elevation: 0.45, solitude: 0.8, curves: 0.45, poi: 0.2 },
-  open_roads: { water: 0.25, greenery: 0.45, elevation: 0.35, solitude: 0.4, curves: 0.9, poi: 0.25 },
-  relaxing: { water: 0.45, greenery: 0.65, elevation: 0.25, solitude: 0.85, curves: 0.3, poi: 0.25 },
-  winding_roads: { water: 0.35, greenery: 0.45, elevation: 0.65, solitude: 0.55, curves: 0.95, poi: 0.15 },
-  smooth_cruise: { water: 0.35, greenery: 0.5, elevation: 0.25, solitude: 0.6, curves: 0.25, poi: 0.2 },
-  quiet: { water: 0.3, greenery: 0.7, elevation: 0.35, solitude: 0.95, curves: 0.35, poi: 0.1 },
-  hidden_gems: { water: 0.45, greenery: 0.7, elevation: 0.55, solitude: 0.8, curves: 0.65, poi: 0.45 },
+  coastal:         { water: 0.9, greenery: 0.7, elevation: 0.3, solitude: 0.6, curves: 0.45, poi: 0.2 },
+  mountain:        { water: 0.2, greenery: 0.55, elevation: 0.9, solitude: 0.7, curves: 0.8, poi: 0.2 },
+  countryside:     { water: 0.4, greenery: 0.7, elevation: 0.45, solitude: 0.7, curves: 0.6, poi: 0.3 },
+  riverside:       { water: 0.85, greenery: 0.75, elevation: 0.35, solitude: 0.65, curves: 0.45, poi: 0.25 },
+  forest:          { water: 0.3, greenery: 0.9, elevation: 0.45, solitude: 0.8, curves: 0.45, poi: 0.2 },
+  open_roads:      { water: 0.25, greenery: 0.45, elevation: 0.35, solitude: 0.4, curves: 0.9, poi: 0.25 },
+  relaxing:        { water: 0.45, greenery: 0.65, elevation: 0.25, solitude: 0.85, curves: 0.3, poi: 0.25 },
+  winding_roads:   { water: 0.35, greenery: 0.45, elevation: 0.65, solitude: 0.55, curves: 0.95, poi: 0.15 },
+  smooth_cruise:   { water: 0.35, greenery: 0.5, elevation: 0.25, solitude: 0.6, curves: 0.25, poi: 0.2 },
+  quiet:           { water: 0.3, greenery: 0.7, elevation: 0.35, solitude: 0.95, curves: 0.35, poi: 0.1 },
+  hidden_gems:     { water: 0.45, greenery: 0.7, elevation: 0.55, solitude: 0.8, curves: 0.65, poi: 0.45 },
   minimal_traffic: { water: 0.25, greenery: 0.6, elevation: 0.3, solitude: 0.95, curves: 0.4, poi: 0.1 },
-  loop_variety: { water: 0.55, greenery: 0.6, elevation: 0.5, solitude: 0.55, curves: 0.7, poi: 0.35 },
-  scenic: { water: 0.65, greenery: 0.7, elevation: 0.6, solitude: 0.65, curves: 0.55, poi: 0.3 },
-  clear_my_head: { water: 0.35, greenery: 0.75, elevation: 0.35, solitude: 0.95, curves: 0.25, poi: 0.1 },
-  date_night: { water: 0.75, greenery: 0.55, elevation: 0.45, solitude: 0.65, curves: 0.35, poi: 0.55 },
-  sunday_cruise: { water: 0.35, greenery: 0.65, elevation: 0.3, solitude: 0.7, curves: 0.45, poi: 0.25 },
-  adventure: { water: 0.4, greenery: 0.55, elevation: 0.9, solitude: 0.7, curves: 0.9, poi: 0.25 },
-  photo_run: { water: 0.75, greenery: 0.65, elevation: 0.75, solitude: 0.55, curves: 0.6, poi: 0.5 },
-  photo_worthy: { water: 0.75, greenery: 0.65, elevation: 0.75, solitude: 0.55, curves: 0.6, poi: 0.5 },
-  nature_escape: { water: 0.45, greenery: 0.9, elevation: 0.55, solitude: 0.9, curves: 0.45, poi: 0.15 },
-  scenic_reset: { water: 0.55, greenery: 0.7, elevation: 0.45, solitude: 0.8, curves: 0.4, poi: 0.2 },
-  golden_hour: { water: 0.75, greenery: 0.5, elevation: 0.55, solitude: 0.55, curves: 0.35, poi: 0.35 },
-  sunset: { water: 0.75, greenery: 0.5, elevation: 0.55, solitude: 0.55, curves: 0.35, poi: 0.35 },
-  sunrise: { water: 0.7, greenery: 0.55, elevation: 0.55, solitude: 0.6, curves: 0.35, poi: 0.3 }
+  scenic:          { water: 0.65, greenery: 0.7, elevation: 0.6, solitude: 0.65, curves: 0.55, poi: 0.3 },
+  sunset:          { water: 0.75, greenery: 0.5, elevation: 0.55, solitude: 0.55, curves: 0.35, poi: 0.35 },
+  photo_worthy:    { water: 0.75, greenery: 0.65, elevation: 0.75, solitude: 0.55, curves: 0.6, poi: 0.5 },
+  nature_escape:   { water: 0.45, greenery: 0.9, elevation: 0.55, solitude: 0.9, curves: 0.45, poi: 0.15 },
+  sunday_cruise:   { water: 0.35, greenery: 0.65, elevation: 0.3, solitude: 0.7, curves: 0.45, poi: 0.25 },
+  adventure:       { water: 0.4, greenery: 0.55, elevation: 0.9, solitude: 0.7, curves: 0.9, poi: 0.25 }
 };
-const COMPONENT_DISPLAY_NAMES: Record<string, string> = {
-  water: "Water",
-  greenery: "Greenery",
-  elevation: "Elevation",
-  solitude: "Solitude",
-  curves: "Curves",
-  poi: "Stops"
+
+const COMPONENT_LABELS: Record<string, string> = {
+  water: "Water", greenery: "Greenery", elevation: "Elevation",
+  solitude: "Solitude", curves: "Curves", poi: "Stops"
 };
+
 const COMPONENT_ORDER = ["water", "greenery", "elevation", "solitude", "curves", "poi"];
-const IOS_DEVICE_REGEX = /iPad|iPhone|iPod/;
-const GOOGLE_TRAVEL_MODES: Record<RouteMode, string> = {
-  drive: "driving",
-  walk: "walking",
-  bike: "bicycling"
-};
-const APPLE_TRAVEL_FLAGS: Partial<Record<RouteMode, string>> = {
-  drive: "d",
-  walk: "w"
-};
 
-type Coordinate = {
-  lat: number;
-  lng: number;
-};
+const TIME_BUDGET_OPTIONS = [30, 60, 90, 120] as const;
 
-function sampleWaypoints(coordinates: [number, number][], maxPoints: number): Coordinate[] {
-  if (!Array.isArray(coordinates) || coordinates.length === 0 || maxPoints <= 0) {
-    return [];
+const ROUTE_MODES: Array<{ value: RouteMode; label: string; status: string; enabled: boolean }> = [
+  { value: "drive", label: "Drive",  status: "Live",  enabled: true },
+  { value: "walk",  label: "Walk",   status: "Soon",  enabled: false },
+  { value: "bike",  label: "Bike",   status: "Soon",  enabled: false }
+];
+
+const LOADING_STEPS: Array<{ id: string; label: string; Icon: LucideIcon }> = [
+  { id: "submit",     label: "Submitting",  Icon: MapPin },
+  { id: "candidates", label: "Finding",     Icon: Compass },
+  { id: "scoring",    label: "Scoring",     Icon: Sparkles },
+  { id: "refining",   label: "Refining",    Icon: Route },
+  { id: "finalising", label: "Finalising",  Icon: Zap }
+];
+
+const FEEDBACK_TAGS = [
+  { id: "more_like_this", label: "More Like This" },
+  { id: "loved_quiet", label: "Loved Quiet" },
+  { id: "loved_curves", label: "Loved Curves" },
+  { id: "loved_water", label: "Loved Water" },
+  { id: "loved_greenery", label: "Loved Green" },
+  { id: "loved_stops", label: "Loved Stops" },
+  { id: "too_urban", label: "Too Urban" },
+  { id: "too_long", label: "Too Long" },
+  { id: "too_short", label: "Too Short" },
+  { id: "too_boring", label: "Too Boring" },
+  { id: "not_scenic", label: "Not Scenic" }
+] as const;
+
+const GOOGLE_TRAVEL_MODES: Record<RouteMode, string> = { drive: "driving", walk: "walking", bike: "bicycling" };
+const APPLE_TRAVEL_FLAGS: Partial<Record<RouteMode, string>> = { drive: "d", walk: "w" };
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+function buildPreferenceVector(vibes: string[]): Record<string, number> {
+  const active = vibes.length > 0 ? vibes : ["countryside"];
+  const acc = { water: 0, greenery: 0, elevation: 0, solitude: 0, curves: 0, poi: 0 };
+  for (const v of active) {
+    const d = VIBE_PREFERENCE_DEFAULTS[v] ?? VIBE_PREFERENCE_DEFAULTS.countryside;
+    for (const k of Object.keys(acc) as Array<keyof typeof acc>) acc[k] += d[k];
   }
+  const n = active.length;
+  return Object.fromEntries(Object.entries(acc).map(([k, v]) => [k, Number((v / n).toFixed(4))]));
+}
 
-  if (coordinates.length <= maxPoints) {
-    return coordinates.map(([lng, lat]) => ({ lat, lng }));
-  }
+function escapeXml(s: string) {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
 
-  const sampled: Coordinate[] = [];
-  const step = (coordinates.length - 1) / (maxPoints - 1);
-  for (let i = 0; i < maxPoints; i++) {
-    const index = Math.round(i * step);
-    const [lng, lat] = coordinates[Math.min(index, coordinates.length - 1)];
-    sampled.push({ lat, lng });
-  }
+function exportGpx(route: RouteDetailResponse, name: string) {
+  const pts = route.geometry.geometry.coordinates
+    .map(([lng, lat]) => `      <trkpt lat="${lat}" lon="${lng}" />`)
+    .join("\n");
+  const gpx = `<?xml version="1.0" encoding="UTF-8"?>\n<gpx version="1.1" creator="MoodRide" xmlns="http://www.topografix.com/GPX/1/1">\n  <trk>\n    <name>${escapeXml(name)}</name>\n    <trkseg>\n${pts}\n    </trkseg>\n  </trk>\n</gpx>`;
+  const blob = new Blob([gpx], { type: "application/gpx+xml" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `${name.replace(/[^a-z0-9-_]/gi, "_")}.gpx`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
 
-  return sampled.filter((point, index, list) => {
-    if (index === 0) {
-      return true;
-    }
-    const previous = list[index - 1];
-    return previous.lat !== point.lat || previous.lng !== point.lng;
+function sampleWaypoints(coords: [number, number][], max: number) {
+  if (coords.length <= max) return coords.map(([lng, lat]) => ({ lat, lng }));
+  const step = (coords.length - 1) / (max - 1);
+  return Array.from({ length: max }, (_, i) => {
+    const [lng, lat] = coords[Math.min(Math.round(i * step), coords.length - 1)];
+    return { lat, lng };
   });
 }
 
-function formatCoordinate(point: Coordinate): string {
-  return `${point.lat},${point.lng}`;
-}
-
-function buildGoogleMapsUrl(points: Coordinate[], routeMode: RouteMode): string {
-  const origin = points[0];
-  const destination = points[points.length - 1];
-  const waypoints = points.slice(1, -1).map(formatCoordinate).join("|");
-
+function buildGoogleMapsUrl(coords: [number, number][], mode: RouteMode) {
+  const pts = sampleWaypoints(coords, 10);
   const url = new URL("https://www.google.com/maps/dir/");
   url.searchParams.set("api", "1");
-  url.searchParams.set("origin", formatCoordinate(origin));
-  url.searchParams.set("destination", formatCoordinate(destination));
-  if (waypoints) {
-    url.searchParams.set("waypoints", waypoints);
-  }
-  url.searchParams.set("travelmode", GOOGLE_TRAVEL_MODES[routeMode] ?? "driving");
+  url.searchParams.set("origin", `${pts[0].lat},${pts[0].lng}`);
+  url.searchParams.set("destination", `${pts[pts.length - 1].lat},${pts[pts.length - 1].lng}`);
+  const wps = pts.slice(1, -1).map((p) => `${p.lat},${p.lng}`).join("|");
+  if (wps) url.searchParams.set("waypoints", wps);
+  url.searchParams.set("travelmode", GOOGLE_TRAVEL_MODES[mode]);
   return url.toString();
 }
 
-function buildAppleMapsUrl(points: Coordinate[], routeMode: RouteMode): string {
-  const origin = points[0];
-  const destinations = points.slice(1).map(formatCoordinate);
-
+function buildAppleMapsUrl(coords: [number, number][], mode: RouteMode) {
+  const pts = sampleWaypoints(coords, 5);
   const url = new URL("https://maps.apple.com/");
-  url.searchParams.set("saddr", formatCoordinate(origin));
-  if (destinations.length > 0) {
-    url.searchParams.set("daddr", destinations.join("+to:"));
-  }
-  const travelFlag = APPLE_TRAVEL_FLAGS[routeMode];
-  if (travelFlag) {
-    url.searchParams.set("dirflg", travelFlag);
-  }
+  url.searchParams.set("saddr", `${pts[0].lat},${pts[0].lng}`);
+  url.searchParams.set("daddr", pts.slice(1).map((p) => `${p.lat},${p.lng}`).join("+to:"));
+  const flag = APPLE_TRAVEL_FLAGS[mode];
+  if (flag) url.searchParams.set("dirflg", flag);
   return url.toString();
 }
 
-function sanitizeFileName(value: string): string {
-  const fallback = "moodride_route";
-  const trimmed = value.trim();
-  if (!trimmed) {
-    return fallback;
-  }
-  return trimmed.replace(/[^a-z0-9-_]+/gi, "_").replace(/_+/g, "_");
+function formatDistFromKm(km: number) {
+  return km >= 10 ? `${Math.round(km)}` : km.toFixed(1);
 }
 
-function buildPreferenceVector(vibes: string[]): Record<string, number> {
-  const activeVibes = vibes.length > 0 ? vibes : ["countryside"];
-  const accumulators = { water: 0, greenery: 0, elevation: 0, solitude: 0, curves: 0, poi: 0 };
-  for (const vibe of activeVibes) {
-    const defaults = VIBE_PREFERENCE_DEFAULTS[vibe] ?? VIBE_PREFERENCE_DEFAULTS.countryside;
-    accumulators.water += defaults.water;
-    accumulators.greenery += defaults.greenery;
-    accumulators.elevation += defaults.elevation;
-    accumulators.solitude += defaults.solitude;
-    accumulators.curves += defaults.curves;
-    accumulators.poi += defaults.poi;
-  }
-
-  const count = Math.max(1, activeVibes.length);
-  return {
-    water: Number((accumulators.water / count).toFixed(4)),
-    greenery: Number((accumulators.greenery / count).toFixed(4)),
-    elevation: Number((accumulators.elevation / count).toFixed(4)),
-    solitude: Number((accumulators.solitude / count).toFixed(4)),
-    curves: Number((accumulators.curves / count).toFixed(4)),
-    poi: Number((accumulators.poi / count).toFixed(4))
-  };
+function formatDur(minutes: number) {
+  if (minutes < 60) return `${Math.round(minutes)}m`;
+  const h = Math.floor(minutes / 60);
+  const rem = Math.round(minutes % 60);
+  return rem > 0 ? `${h}h${rem}m` : `${h}h`;
 }
 
-function escapeXml(value: string): string {
-  return value
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&apos;");
-}
+// ─── Types ────────────────────────────────────────────────────────────────────
+type Phase = "idle" | "submitting" | "tracking" | "completed" | "failed";
+type AppTheme = "day" | "night";
 
-function exportRouteAsGpx(route: RouteDetailResponse, routeName: string) {
-  const points = route.geometry.geometry.coordinates
-    .map(([lng, lat]) => `      <trkpt lat="${lat}" lon="${lng}" />`)
-    .join("\n");
+type FailureGuidance = {
+  failureCode: string | null;
+  suggestedVibes: string[];
+  suggestedActions: string[];
+};
 
-  const gpx = `<?xml version="1.0" encoding="UTF-8"?>
-<gpx version="1.1" creator="MoodRide" xmlns="http://www.topografix.com/GPX/1/1">
-  <trk>
-    <name>${escapeXml(routeName)}</name>
-    <trkseg>
-${points}
-    </trkseg>
-  </trk>
-</gpx>`;
-
-  const blob = new Blob([gpx], { type: "application/gpx+xml" });
-  const downloadUrl = URL.createObjectURL(blob);
-  const anchor = document.createElement("a");
-  anchor.href = downloadUrl;
-  anchor.download = `${sanitizeFileName(routeName)}.gpx`;
-  anchor.click();
-  URL.revokeObjectURL(downloadUrl);
-}
-
-function requestBrowserLocation(
-  onSuccess: (latitude: number, longitude: number) => void,
-  onError: (message: string) => void
-) {
-  if (!navigator.geolocation) {
-    onError("Geolocation is unavailable in this browser.");
-    return;
-  }
-
-  navigator.geolocation.getCurrentPosition(
-    (position) => {
-      onSuccess(Number(position.coords.latitude.toFixed(5)), Number(position.coords.longitude.toFixed(5)));
-    },
-    (error) => {
-      onError(`Unable to fetch geolocation: ${error.message}`);
-    },
-    { enableHighAccuracy: true, timeout: 8000 }
-  );
-}
-
-type JobPhase = "idle" | "submitting" | "tracking" | "completed" | "failed";
-
-function staggerStyle(index: number): CSSProperties {
-  return { ["--stagger-index" as const]: index } as CSSProperties;
-}
-
-export function RoutePlanner() {
-  const [lat, setLat] = useState(45.52);
-  const [lng, setLng] = useState(-122.68);
-  const [locationQuery, setLocationQuery] = useState("");
-  const [locationSuggestions, setLocationSuggestions] = useState<LocationSuggestion[]>([]);
-  const [locationLookupPending, setLocationLookupPending] = useState(false);
-  const [locationLookupError, setLocationLookupError] = useState<string | null>(null);
-  const [locationDropdownVisible, setLocationDropdownVisible] = useState(false);
-  const [routeMode, setRouteMode] = useState<RouteMode>("drive");
-  const [timeBudgetMinutes, setTimeBudgetMinutes] = useState(60);
-  const [vibes, setVibes] = useState<string[]>(["countryside"]);
-  const [submission, setSubmission] = useState<RouteSubmissionResponse | null>(null);
-  const [jobStatus, setJobStatus] = useState<RouteJobStatusResponse | null>(null);
-  const [route, setRoute] = useState<RouteDetailResponse | null>(null);
-  const [scenicRegions, setScenicRegions] = useState<ScenicRegionsResponse | null>(null);
-  const [phase, setPhase] = useState<JobPhase>("idle");
-  const [message, setMessage] = useState<string>("");
-  const [pollingEnabled, setPollingEnabled] = useState(false);
-  const [selectedRating, setSelectedRating] = useState<number | null>(null);
-  const [ratingSubmitted, setRatingSubmitted] = useState(false);
-  const [showDebug, setShowDebug] = useState(false);
-
-  const stopWsRef = useRef<null | (() => void)>(null);
-  const pollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const routeDetailsRef = useRef<Record<string, RouteDetailResponse>>({});
-  const locationLookupSequenceRef = useRef(0);
-
-  const formatNumber = (value: number | null | undefined, digits = 2) =>
-    typeof value === "number" && Number.isFinite(value) ? value.toFixed(digits) : "N/A";
-  const regions = scenicRegions?.regions ?? [];
-
-  const canSubmit = useMemo(
-    () => routeMode === "drive" && vibes.length > 0 && vibes.length <= 3 && phase !== "submitting" && phase !== "tracking",
-    [phase, routeMode, vibes.length]
-  );
-
-  const activeMode = ROUTE_MODES.find((mode) => mode.value === routeMode) ?? ROUTE_MODES[0];
-
-  const formatRouteProfile = (profile: string) => {
-    if (PROFILE_DISPLAY_NAMES[profile]) {
-      return PROFILE_DISPLAY_NAMES[profile];
-    }
-
-    return profile
-      .split("_")
-      .filter((segment) => segment.length > 0)
-      .map((segment) => segment[0].toUpperCase() + segment.slice(1))
-      .join(" ");
-  };
-
-  const formatVibe = (vibe: string) => {
-    if (VIBE_DISPLAY_NAMES[vibe]) {
-      return VIBE_DISPLAY_NAMES[vibe];
-    }
-
-    return vibe
-      .split("_")
-      .filter((segment) => segment.length > 0)
-      .map((segment) => segment[0].toUpperCase() + segment.slice(1))
-      .join(" ");
-  };
-
-  const formatComponent = (component: string) => COMPONENT_DISPLAY_NAMES[component] ?? formatVibe(component);
-
-  const formatComponentPercent = (value: number | null | undefined) =>
-    typeof value === "number" && Number.isFinite(value) ? `${Math.round(value * 100)}%` : "0%";
-
-  const formatComponentLift = (value: number | null | undefined) => {
-    if (typeof value !== "number" || !Number.isFinite(value)) {
-      return "baseline n/a";
-    }
-    const points = Math.round(value * 100);
-    const prefix = points > 0 ? "+" : "";
-    return `${prefix}${points} pts vs area`;
-  };
-
-  const getPrimaryRouteId = (status: RouteJobStatusResponse): string | null => {
-    if (status.routeId) {
-      return status.routeId;
-    }
-
-    if (!Array.isArray(status.routeOptions) || status.routeOptions.length === 0) {
-      return null;
-    }
-
-    const mostScenic = status.routeOptions.find((option) => option.profile === "most_scenic");
-    return mostScenic?.routeId ?? status.routeOptions[0].routeId;
-  };
-
-  const setActiveRoute = (detail: RouteDetailResponse) => {
-    routeDetailsRef.current[detail.routeId] = detail;
-    setRoute(detail);
-  };
-
-  const loadRouteDetail = async (routeId: string) => {
-    const cached = routeDetailsRef.current[routeId];
-    if (cached) {
-      return cached;
-    }
-
-    const detail = await getRoute(routeId);
-    routeDetailsRef.current[detail.routeId] = detail;
-    return detail;
-  };
-
-  const routeOptions = Array.isArray(route?.routeOptions) ? route.routeOptions : [];
-
-  useEffect(() => {
-    if (!route) {
-      setSelectedRating(null);
-      setRatingSubmitted(false);
-      return;
-    }
-
-    setSelectedRating(route.userRating);
-    setRatingSubmitted(Boolean(route.ratedAt));
-  }, [route]);
-
-  useEffect(() => {
-    requestBrowserLocation(
-      (latitude, longitude) => {
-        setLat(latitude);
-        setLng(longitude);
-        setLocationQuery((current) => current || `Current location (${latitude.toFixed(5)}, ${longitude.toFixed(5)})`);
-        setMessage("Location acquired from browser geolocation.");
-      },
-      (locationMessage) => {
-        setMessage(locationMessage);
-      }
-    );
-
-    return () => {
-      if (stopWsRef.current) {
-        stopWsRef.current();
-      }
-      if (pollTimerRef.current) {
-        clearInterval(pollTimerRef.current);
-      }
-    };
-  }, []);
-
-  useEffect(() => {
-    const query = locationQuery.trim();
-    if (!locationDropdownVisible || query.length < 2) {
-      setLocationSuggestions([]);
-      setLocationLookupPending(false);
-      setLocationLookupError(null);
-      return;
-    }
-
-    const currentSequence = ++locationLookupSequenceRef.current;
-    const timer = setTimeout(async () => {
-      setLocationLookupPending(true);
-      setLocationLookupError(null);
-      try {
-        const suggestions = await searchLocations(query);
-        if (currentSequence !== locationLookupSequenceRef.current) {
-          return;
-        }
-        setLocationSuggestions(suggestions);
-      } catch {
-        if (currentSequence !== locationLookupSequenceRef.current) {
-          return;
-        }
-        setLocationLookupError("Location lookup unavailable right now.");
-        setLocationSuggestions([]);
-      } finally {
-        if (currentSequence === locationLookupSequenceRef.current) {
-          setLocationLookupPending(false);
-        }
-      }
-    }, 320);
-
-    return () => clearTimeout(timer);
-  }, [locationQuery, locationDropdownVisible]);
-
-  const toggleVibe = (vibe: Vibe) => {
-    setVibes((current) => {
-      if (current.includes(vibe)) {
-        return current.filter((v) => v !== vibe);
-      }
-      if (current.length >= 3) {
-        return current;
-      }
-      return [...current, vibe];
-    });
-  };
-
-  const useCurrentLocation = () => {
-    requestBrowserLocation(
-      (latitude, longitude) => {
-        setLat(latitude);
-        setLng(longitude);
-        setLocationQuery(`Current location (${latitude.toFixed(5)}, ${longitude.toFixed(5)})`);
-        setLocationDropdownVisible(false);
-        setLocationSuggestions([]);
-        setMessage("Location acquired from browser geolocation.");
-      },
-      (locationMessage) => {
-        setMessage(locationMessage);
-      }
-    );
-  };
-
-  const applyLocationSuggestion = (suggestion: LocationSuggestion) => {
-    const nextLat = Number(suggestion.lat.toFixed(5));
-    const nextLng = Number(suggestion.lng.toFixed(5));
-    setLat(nextLat);
-    setLng(nextLng);
-    setLocationQuery(suggestion.displayName);
-    setLocationDropdownVisible(false);
-    setLocationSuggestions([]);
-    setLocationLookupError(null);
-    setMessage(`Location set to ${suggestion.displayName}.`);
-  };
-
-  const refreshScenicRegions = async () => {
-    try {
-      const response = await getScenicRegions(lat, lng, 50, 12, vibes[0]);
-      setScenicRegions(response);
-    } catch (error) {
-      setMessage(`Scenic region fetch failed: ${(error as Error).message}`);
-    }
-  };
-
-  const stopAsyncTracking = () => {
-    if (stopWsRef.current) {
-      stopWsRef.current();
-      stopWsRef.current = null;
-    }
-    if (pollTimerRef.current) {
-      clearInterval(pollTimerRef.current);
-      pollTimerRef.current = null;
-    }
-    setPollingEnabled(false);
-  };
-
-  const onSocketEvent = async (event: JobSocketEvent) => {
-    if (!event.jobId || !submission || event.jobId !== submission.jobId) {
-      return;
-    }
-
-    if (event.routeId) {
-      const detail = await loadRouteDetail(event.routeId);
-      setActiveRoute(detail);
-      setPhase("completed");
-      setMessage("Route is ready.");
-      stopAsyncTracking();
-      return;
-    }
-
-    if (event.reason) {
-      setPhase("failed");
-      setMessage(`Route generation failed: ${event.reason}`);
-      stopAsyncTracking();
-    }
-  };
-
-  const startPolling = (jobId: string) => {
-    setPollingEnabled(true);
-
-    const tick = async () => {
-      try {
-        const status = await getJobStatus(jobId);
-        setJobStatus(status);
-
-        if (status.status === "COMPLETED") {
-          const primaryRouteId = getPrimaryRouteId(status);
-          if (primaryRouteId) {
-            const detail = await loadRouteDetail(primaryRouteId);
-            setActiveRoute(detail);
-            setPhase("completed");
-            setMessage("Route is ready.");
-            stopAsyncTracking();
-          }
-        } else if (["FAILED", "TIMEOUT"].includes(status.status)) {
-          setPhase("failed");
-          setMessage(`Route job ended with status ${status.status}: ${status.reason ?? "no reason"}`);
-          stopAsyncTracking();
-        }
-      } catch (error) {
-        setMessage(`Polling status failed: ${(error as Error).message}`);
-      }
-    };
-
-    void tick();
-    pollTimerRef.current = setInterval(() => void tick(), 2500);
-  };
-
-  const submit = async () => {
-    setPhase("submitting");
-    setMessage("");
-    setSubmission(null);
-    setJobStatus(null);
-    setRoute(null);
-    routeDetailsRef.current = {};
-
-    try {
-      await refreshScenicRegions();
-
-      const response = await submitRoute({
-        userId: crypto.randomUUID(),
-        lat,
-        lng,
-        timeBudgetMinutes,
-        routeMode,
-        vibes,
-        preferenceVector: buildPreferenceVector(vibes)
-      });
-
-      setSubmission(response);
-      setPhase("tracking");
-      setMessage("Route submitted.");
-
-      stopWsRef.current = connectJobChannel(
-        response.jobId,
-        response.wsChannel,
-        (event) => {
-          void onSocketEvent(event);
-        },
-        () => {
-          setMessage("Live updates disconnected. Continuing with status checks.");
-          if (!pollingEnabled) {
-            startPolling(response.jobId);
-          }
-        }
-      );
-
-      startPolling(response.jobId);
-    } catch (error) {
-      setPhase("failed");
-      setMessage(`Route submission failed: ${(error as Error).message}`);
-      stopAsyncTracking();
-    }
-  };
-
-  const regenerateRoute = () => {
-    void submit();
-  };
-
-  const selectRouteOption = async (option: RouteOptionResponse) => {
-    if (route?.routeId === option.routeId) {
-      return;
-    }
-
-    try {
-      const detail = await loadRouteDetail(option.routeId);
-      setActiveRoute(detail);
-      setMessage(`Showing ${formatRouteProfile(option.profile)} route option.`);
-    } catch (error) {
-      setMessage(`Failed to load ${formatRouteProfile(option.profile)} option: ${(error as Error).message}`);
-    }
-  };
-
-  const startDrive = () => {
-    if (!route) {
-      return;
-    }
-
-    const points = route.geometry.geometry.coordinates;
-    if (points.length < 2) {
-      setMessage("Route geometry is unavailable for navigation handoff.");
-      return;
-    }
-
-    const sampledPoints = sampleWaypoints(points, 15);
-    if (sampledPoints.length < 2) {
-      setMessage("Not enough route points to launch navigation.");
-      return;
-    }
-
-    const isIos = IOS_DEVICE_REGEX.test(navigator.userAgent);
-    const activeRouteMode = route.routeMode ?? "drive";
-    const navigationUrl = isIos ? buildAppleMapsUrl(sampledPoints, activeRouteMode) : buildGoogleMapsUrl(sampledPoints, activeRouteMode);
-    window.open(navigationUrl, "_blank", "noopener,noreferrer");
-    setMessage(isIos ? "Opening Apple Maps." : "Opening Google Maps.");
-  };
-
-  const exportGpx = () => {
-    if (!route) {
-      return;
-    }
-
-    const optionProfile = routeOptions.find((option) => option.routeId === route.routeId)?.profile;
-    const routeName = optionProfile ? `${formatRouteProfile(optionProfile)} Loop` : "MoodRide Scenic Loop";
-    exportRouteAsGpx(route, routeName);
-    setMessage("GPX export started.");
-  };
-
-  const submitRating = async () => {
-    if (!route || selectedRating == null) {
-      return;
-    }
-
-    try {
-      const response = await submitRouteRating(route.routeId, selectedRating);
-      setRoute({
-        ...route,
-        userRating: response.rating,
-        ratedAt: response.ratedAt
-      });
-      setRatingSubmitted(true);
-      setMessage("Rating saved and user feedback events published.");
-    } catch (error) {
-      setMessage(`Rating submit failed: ${(error as Error).message}`);
-    }
-  };
-
-  const activeRouteOption = routeOptions.find((option) => option.routeId === route?.routeId);
-  const activeRouteProfile = activeRouteOption?.profile;
-  const activeExplanation = activeRouteOption?.explanation;
-  const activeProfileLabel = activeRouteProfile ? formatRouteProfile(activeRouteProfile) : "Route";
-  const routeModeLabel = route?.routeMode === "walk" ? "Walk" : route?.routeMode === "bike" ? "Ride" : "Drive";
-  const submitLabel = phase === "submitting" || phase === "tracking" ? "Generating Route..." : `Generate ${activeMode.label}`;
+// ─── Header ───────────────────────────────────────────────────────────────────
+function AppHeader({ theme, onThemeToggle }: { theme: AppTheme; onThemeToggle: () => void }) {
+  const ToggleIcon = theme === "day" ? Moon : Sun;
+  const nextThemeLabel = theme === "day" ? "Switch to dark mode" : "Switch to day mode";
 
   return (
-    <main className="planner-page">
-      <section className="product-hero panel-stagger" style={staggerStyle(0)}>
-        <nav className="product-nav" aria-label="MoodRide">
-          <span className="brand-mark">MoodRide</span>
-          <span className="nav-pill">Canada scenic beta</span>
-        </nav>
-        <div className="hero-layout">
-          <div className="hero-copy">
-            <span className="planner-eyebrow">Scenic route intelligence</span>
-            <h1 className="planner-title">Beautiful loops for the time you actually have.</h1>
-            <p className="planner-subtitle">
-              Generate scenic routes from a starting point, compare route personalities, then launch navigation or export GPX.
-            </p>
-          </div>
-          <div className="hero-stats" aria-label="MoodRide status">
-            <div className="hero-stat">
-              <p className="hero-stat-label">Coverage</p>
-              <p className="hero-stat-value">Canada</p>
-            </div>
-            <div className="hero-stat">
-              <p className="hero-stat-label">Live Mode</p>
-              <p className="hero-stat-value">{activeMode.label}</p>
-            </div>
-            <div className="hero-stat">
-              <p className="hero-stat-label">Route</p>
-              <p className="hero-stat-value">{route ? activeProfileLabel : phase}</p>
-            </div>
-          </div>
-        </div>
-      </section>
-      <div className="grid grid-2">
-        <section className="panel panel-stagger" style={staggerStyle(1)}>
-          <div className="panel-title-row">
-            <h2>Plan A Route</h2>
-            <span className="small">{activeMode.status}</span>
-          </div>
+    <header className="app-header">
+      <svg className="header-glass-filter" aria-hidden="true" focusable="false" width="0" height="0">
+        <defs>
+          <filter id="moodride-glass-distortion" x="0%" y="0%" width="100%" height="100%">
+            <feTurbulence
+              type="fractalNoise"
+              baseFrequency="0.0085 0.0085"
+              numOctaves="2"
+              seed="92"
+              result="noise"
+            />
+            <feGaussianBlur in="noise" stdDeviation="2" result="blurred" />
+            <feDisplacementMap
+              in="SourceGraphic"
+              in2="blurred"
+              scale="118"
+              xChannelSelector="R"
+              yChannelSelector="G"
+            />
+          </filter>
+        </defs>
+      </svg>
+      <span className="header-glass-refraction" aria-hidden="true" />
+      <div className="header-brand-block">
+        <h1 className="header-logo">MOODRIDE</h1>
+      </div>
+      <button
+        className="theme-toggle-btn"
+        type="button"
+        aria-label={nextThemeLabel}
+        title={nextThemeLabel}
+        onClick={onThemeToggle}
+      >
+        <ToggleIcon size={18} strokeWidth={2.3} />
+      </button>
+    </header>
+  );
+}
 
-          <label>Mode</label>
-          <div className="mode-selector" role="tablist" aria-label="Route mode">
-            {ROUTE_MODES.map((mode) => {
-              const active = routeMode === mode.value;
+// ─── Planner Panel ────────────────────────────────────────────────────────────
+interface PlannerPanelProps {
+  lat: number;
+  lng: number;
+  locationQuery: string;
+  locationSuggestions: LocationSuggestion[];
+  locationPending: boolean;
+  locationError: string | null;
+  showDropdown: boolean;
+  routeMode: RouteMode;
+  timeBudget: number;
+  vibes: string[];
+  phase: Phase;
+  statusMessage: string;
+  onLatChange: (v: number) => void;
+  onLngChange: (v: number) => void;
+  onLocationQueryChange: (v: string) => void;
+  onSuggestionSelect: (s: LocationSuggestion) => void;
+  onGeolocate: () => void;
+  onModeChange: (m: RouteMode) => void;
+  onTimeBudgetChange: (t: number) => void;
+  onVibeToggle: (v: string) => void;
+  onGenerate: () => void;
+}
+
+function PlannerPanel({
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  lat, lng, locationQuery, locationSuggestions, locationPending, locationError, showDropdown,
+  routeMode, timeBudget, vibes, phase, statusMessage,
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  onLatChange, onLngChange, onLocationQueryChange, onSuggestionSelect, onGeolocate,
+  onModeChange, onTimeBudgetChange, onVibeToggle, onGenerate
+}: PlannerPanelProps) {
+  const canGenerate = routeMode === "drive" && vibes.length > 0 && phase === "idle";
+  const isGenerating = phase === "submitting" || phase === "tracking";
+
+  return (
+    <aside className="planner-panel">
+      {/* Panel Header */}
+      <div className="panel-header">
+        <h2 className="panel-title">ROUTE PLANNER</h2>
+        <p className="panel-subtitle">Scenic route generation</p>
+      </div>
+
+      <div className="panel-body">
+
+        {/* ── Starting Point ── */}
+        <div className="form-section">
+          <label className="form-label">Starting Point</label>
+          <div className="location-input-wrap">
+            <MapPin className="location-input-icon" size={16} />
+            <input
+              className="location-input"
+              type="text"
+              placeholder="ENTER LOCATION"
+              value={locationQuery}
+              onChange={(e) => onLocationQueryChange(e.target.value)}
+              autoComplete="off"
+              aria-label="Starting location search"
+            />
+            {showDropdown && (
+              <div className="location-suggestions">
+                {locationPending && (
+                  <div className="suggestion-item" style={{ opacity: 0.6 }}>Searching…</div>
+                )}
+                {locationError && (
+                  <div className="suggestion-item" style={{ color: "#ba1a1a" }}>{locationError}</div>
+                )}
+                {!locationPending && locationSuggestions.map((s, i) => (
+                  <button
+                    key={i}
+                    className="suggestion-item"
+                    onClick={() => onSuggestionSelect(s)}
+                    type="button"
+                  >
+                    {s.displayName}
+                  </button>
+                ))}
+                {!locationPending && !locationError && locationSuggestions.length === 0 && (
+                  <div className="suggestion-item" style={{ opacity: 0.6 }}>No results found</div>
+                )}
+              </div>
+            )}
+          </div>
+          <button className="use-location-btn" onClick={onGeolocate} type="button">
+            <Navigation size={14} />
+            USE MY LOCATION
+          </button>
+
+
+        </div>
+
+        {/* ── Travel Mode ── */}
+        <div className="form-section">
+          <label className="form-label">Travel Mode</label>
+          <div className="mode-selector">
+            {ROUTE_MODES.map(({ value, label, status, enabled }) => {
+              const Icon = value === "drive" ? Car : value === "walk" ? Footprints : Bike;
               return (
                 <button
+                  key={value}
+                  className={`mode-option${routeMode === value ? " active" : ""}${!enabled ? " disabled" : ""}`}
+                  onClick={() => enabled && onModeChange(value)}
+                  disabled={!enabled}
+                  aria-pressed={routeMode === value}
                   type="button"
-                  key={mode.value}
-                  className={`mode-option ${active ? "active" : ""} ${mode.enabled ? "" : "locked"}`}
-                  onClick={() => {
-                    setRouteMode(mode.value);
-                    if (!mode.enabled) {
-                      setMessage(`${mode.label} mode is planned as a focused city pilot after Canada driving launch.`);
-                    }
-                  }}
-                  role="tab"
-                  aria-selected={active}
                 >
-                  <span>{mode.label}</span>
-                  <small>{mode.status}</small>
+                  <Icon size={18} />
+                  <span className="mode-option-label">{label}</span>
+                  <span className="mode-option-status">{status}</span>
                 </button>
               );
             })}
           </div>
+        </div>
 
-          <label htmlFor="location-search">Search Place</label>
-          <div className="location-search-shell">
-            <input
-              id="location-search"
-              type="text"
-              value={locationQuery}
-              onChange={(e) => {
-                setLocationQuery(e.target.value);
-                setLocationDropdownVisible(true);
-              }}
-              onFocus={() => setLocationDropdownVisible(true)}
-              onBlur={() => {
-                setTimeout(() => setLocationDropdownVisible(false), 120);
-              }}
-              onKeyDown={(event) => {
-                if (event.key === "Enter" && locationSuggestions.length > 0) {
-                  event.preventDefault();
-                  applyLocationSuggestion(locationSuggestions[0]);
-                }
-              }}
-              placeholder="Search city, address, or landmark"
-              autoComplete="off"
-            />
-            {locationDropdownVisible && (locationLookupPending || locationSuggestions.length > 0 || locationLookupError) && (
-              <div className="location-search-results">
-                {locationLookupPending && <p className="small">Searching locations...</p>}
-                {!locationLookupPending && locationLookupError && <p className="small error">{locationLookupError}</p>}
-                {!locationLookupPending && !locationLookupError && locationSuggestions.length === 0 && (
-                  <p className="small">No matches yet. Keep typing.</p>
-                )}
-                {locationSuggestions.map((suggestion) => (
-                  <button
-                    key={suggestion.placeId}
-                    type="button"
-                    className="location-suggestion-btn"
-                    onClick={() => applyLocationSuggestion(suggestion)}
-                  >
-                    {suggestion.displayName}
-                  </button>
-                ))}
-              </div>
-            )}
+        {/* ── Time Budget ── */}
+        <div className="form-section">
+          <label className="form-label">Time Budget</label>
+          <div className="time-budget-options">
+            {TIME_BUDGET_OPTIONS.map((mins) => {
+              const h = mins / 60;
+              const label = h < 1 ? `${mins}` : `${h}`;
+              const unit = h < 1 ? "min" : h === 1 ? "hr" : "hrs";
+              return (
+                <button
+                  key={mins}
+                  className={`time-option${timeBudget === mins ? " active" : ""}`}
+                  onClick={() => onTimeBudgetChange(mins)}
+                  aria-pressed={timeBudget === mins}
+                  type="button"
+                >
+                  <span className="time-option-value">{label}</span>
+                  <span className="time-option-unit">{unit}</span>
+                </button>
+              );
+            })}
           </div>
+        </div>
 
-          <label htmlFor="lat">Latitude</label>
-          <input id="lat" type="number" value={lat} onChange={(e) => setLat(Number(e.target.value))} step="0.00001" />
-
-          <label htmlFor="lng">Longitude</label>
-          <input id="lng" type="number" value={lng} onChange={(e) => setLng(Number(e.target.value))} step="0.00001" />
-
-          <button type="button" onClick={useCurrentLocation} className="location-btn">
-            Use Current Location
-          </button>
-
-          <label htmlFor="budget">Time Budget</label>
-          <select id="budget" value={timeBudgetMinutes} onChange={(e) => setTimeBudgetMinutes(Number(e.target.value))}>
-            {TIME_BUDGET_OPTIONS.map((value) => (
-              <option key={value} value={value}>
-                {value} minutes
-              </option>
-            ))}
-          </select>
-
-          <label>Vibes (max 3)</label>
-          <div className="vibe-groups" aria-label="Route vibes">
-            {VIBE_GROUPS.map((group) => (
-              <div className="vibe-group" key={group.title}>
-                <div className="vibe-group-copy">
-                  <span>{group.title}</span>
-                  <small>{group.description}</small>
-                </div>
-                <div className="tag-list compact">
-                  {group.options.map((vibe) => {
-                    const active = vibes.includes(vibe);
-                    return (
-                      <button
-                        type="button"
-                        className={`tag ${active ? "active" : ""}`}
-                        key={vibe}
-                        onClick={() => toggleVibe(vibe)}
-                        aria-pressed={active}
-                      >
-                        {formatVibe(vibe)}
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-            ))}
+        {/* ── Vibe Engine ── */}
+        <div className="form-section">
+          <div className="vibe-header">
+            <label className="form-label">Vibe Engine</label>
+            <span className="vibe-count">{vibes.length}/3</span>
           </div>
-
-          <button type="button" onClick={() => void submit()} disabled={!canSubmit}>
-            {submitLabel}
-          </button>
-
-          {route && phase === "completed" && (
-            <div className="actions-row">
-              <button type="button" className="secondary-btn" onClick={regenerateRoute}>
-                Regenerate
-              </button>
-              <button type="button" className="primary-drive-btn" onClick={startDrive}>
-                Start {routeModeLabel}
-              </button>
-              <button type="button" className="secondary-btn" onClick={exportGpx}>
-                Export GPX
-              </button>
-            </div>
-          )}
-
-          <div className="status-row">
-            <span className={`status-pill status-${phase}`}>{phase}</span>
-            <span className="small">
-              {route ? `${route.geometry.geometry.coordinates.length} geometry points loaded` : `${activeMode.label} mode ready.`}
-            </span>
+          <div className="vibe-grid">
+            {VIBE_CONFIG.map(({ vibe, label, Icon }) => {
+              const isActive = vibes.includes(vibe);
+              const atLimit = vibes.length >= 3 && !isActive;
+              return (
+                <button
+                  key={vibe}
+                  className={`vibe-tile${isActive ? " active" : ""}${atLimit ? " locked" : ""}`}
+                  onClick={() => !atLimit && onVibeToggle(vibe)}
+                  disabled={atLimit}
+                  aria-pressed={isActive}
+                  type="button"
+                  title={label}
+                >
+                  <Icon size={18} />
+                  <span className="vibe-tile-label">{label}</span>
+                </button>
+              );
+            })}
           </div>
-          {message && <div className={`message-banner ${phase === "failed" ? "error" : ""}`}>{message}</div>}
+        </div>
 
-          {showDebug && submission && (
-            <div className="small">
-              <p>Job ID: {submission.jobId}</p>
-              <p>Estimated completion: {submission.estimatedCompletionSeconds}s</p>
-              <p>WS Channel: {submission.wsChannel}</p>
-            </div>
-          )}
-
-          {showDebug && jobStatus && (
-            <div className="small">
-              <p>Backend status: {jobStatus.status}</p>
-              <p>
-                Retry: {jobStatus.retryCount}/{jobStatus.maxRetries}
-              </p>
-              {jobStatus.estimatedRemainingSeconds !== null && <p>ETA: {jobStatus.estimatedRemainingSeconds}s</p>}
-            </div>
-          )}
-        </section>
-
-        <section className="grid">
-          <div className="panel panel-stagger" style={staggerStyle(2)}>
-            <div className="panel-title-row">
-              <h2>Route Map</h2>
-              {route && <span className="small">{activeProfileLabel}</span>}
-            </div>
-            <RouteMap route={route} />
-          </div>
-
-          <div className="panel panel-stagger" style={staggerStyle(3)}>
-            <div className="panel-title-row">
-              <h2>Route Details</h2>
-              {route && <span className="small">{activeProfileLabel}</span>}
-            </div>
-            {!route && <p className="small">No completed route yet.</p>}
-            {route && (
-              <div className="route-detail-surface" key={route.routeId}>
-                {routeOptions.length > 0 && (
-                  <div className="route-options">
-                    <p className="small">Choose route option</p>
-                    <div className="route-options-list">
-                      {routeOptions.map((option) => {
-                        const active = option.routeId === route.routeId;
-                        return (
-                          <button
-                            type="button"
-                            key={option.routeId}
-                            className={`route-option ${active ? "active" : ""}`}
-                            onClick={() => void selectRouteOption(option)}
-                          >
-                            <span className="route-option-title">{formatRouteProfile(option.profile)}</span>
-                            <span className="small">
-                              {formatNumber(option.totalDistanceKm, 1)} km · {option.estimatedDurationMinutes} min ·
-                              score {formatNumber(option.scenicScore, 2)}
-                            </span>
-                            {option.explanation?.leadingComponents?.length ? (
-                              <span className="route-option-reasons">
-                                {option.explanation.leadingComponents.slice(0, 3).map(formatComponent).join(" · ")}
-                              </span>
-                            ) : null}
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </div>
-                )}
-                <div className="detail-metrics">
-                  <div className="detail-metric">
-                    <p className="detail-metric-label">Scenic Score</p>
-                    <p className="detail-metric-value">{formatNumber(route.scenicScore, 2)}</p>
-                  </div>
-                  <div className="detail-metric">
-                    <p className="detail-metric-label">Distance</p>
-                    <p className="detail-metric-value">{formatNumber(route.totalDistanceKm, 1)} km</p>
-                  </div>
-                  <div className="detail-metric">
-                    <p className="detail-metric-label">Duration</p>
-                    <p className="detail-metric-value">{route.estimatedDurationMinutes} min</p>
-                  </div>
-                </div>
-                {activeExplanation && (
-                  <div className="route-explanation">
-                    <div className="route-explanation-header">
-                      <p className="detail-metric-label">Why this option</p>
-                      <span className="small">
-                        {activeExplanation.sampleTileCount} route tiles · {activeExplanation.baselineTileCount} area tiles
-                      </span>
-                    </div>
-                    <p className="route-explanation-summary">{activeExplanation.summary}</p>
-                    <div className="component-bars" aria-label="Route weighted component contribution">
-                      {COMPONENT_ORDER.map((component) => {
-                        const routeAverage = activeExplanation.componentAverages?.[component] ?? 0;
-                        const weightedContribution = activeExplanation.weightedContributions?.[component] ?? routeAverage;
-                        const lift = activeExplanation.componentLifts?.[component];
-                        return (
-                          <div className="component-row" key={component}>
-                            <span className="component-label">
-                              {formatComponent(component)}
-                              <small>
-                                avg {formatComponentPercent(routeAverage)} · {formatComponentLift(lift)}
-                              </small>
-                            </span>
-                            <div className="component-track" aria-hidden="true">
-                              <span
-                                className="component-fill"
-                                style={{ width: `${Math.max(0, Math.min(100, weightedContribution * 100))}%` }}
-                              />
-                            </div>
-                            <strong>{formatComponentPercent(weightedContribution)}</strong>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </div>
-                )}
-                {showDebug && <p className="small">Algorithm: {route.algorithmVersion}</p>}
-              </div>
-            )}
-          </div>
-
-          <div className="panel panel-stagger" style={staggerStyle(4)}>
-            <div className="panel-title-row">
-              <h2>Scenic Highlights</h2>
-            </div>
-            <ScenicHighlightsPanel route={route} />
-          </div>
-
-          {route && phase === "completed" && (
-            <div className="panel panel-stagger" style={staggerStyle(5)}>
-              <div className="panel-title-row">
-                <h2>Rate This Route</h2>
-              </div>
-              <p className="small">How was this route? (1-5 stars)</p>
-              <div className="rating-row" role="group" aria-label="Drive rating">
-                {[1, 2, 3, 4, 5].map((ratingValue) => (
-                  <button
-                    type="button"
-                    key={ratingValue}
-                    className={`rating-star ${selectedRating === ratingValue ? "active" : ""}`}
-                    onClick={() => setSelectedRating(ratingValue)}
-                  >
-                    {ratingValue}
-                  </button>
-                ))}
-              </div>
-              <button type="button" onClick={() => void submitRating()} disabled={selectedRating == null || ratingSubmitted}>
-                {ratingSubmitted ? "Rating Saved" : "Submit Rating"}
-              </button>
-            </div>
-          )}
-
-          {showDebug && (
-            <div className="panel panel-stagger" style={staggerStyle(6)}>
-              <div className="panel-title-row">
-                <h2>Nearby Scenic Regions</h2>
-              </div>
-              {!regions.length && <p className="small">No region data loaded yet.</p>}
-              {regions.length > 0 && (
-                <>
-                  <p className="small">
-                    Showing {regions.length} of {scenicRegions?.totalRegions ?? regions.length} scenic regions.
-                  </p>
-                  {scenicRegions?.boundingBox && (
-                    <p className="small">
-                      Bounds: N {formatNumber(scenicRegions.boundingBox.north, 4)}, S {formatNumber(scenicRegions.boundingBox.south, 4)}, E{" "}
-                      {formatNumber(scenicRegions.boundingBox.east, 4)}, W {formatNumber(scenicRegions.boundingBox.west, 4)}
-                    </p>
-                  )}
-                  <ul>
-                    {regions.map((region) => (
-                      <li key={region.h3Index}>
-                        {region.h3Index} - score {formatNumber(region.scenicScore, 2)} [{region.dominantFeature}, confidence{" "}
-                        {formatNumber(region.confidence, 2)}] ({formatNumber(region.centerLat, 4)}, {formatNumber(region.centerLng, 4)})
-                      </li>
-                    ))}
-                  </ul>
-                </>
-              )}
-            </div>
-          )}
-
-          <button type="button" className="debug-toggle" onClick={() => setShowDebug((current) => !current)}>
-            {showDebug ? "Hide Debug" : "Debug"}
-          </button>
-        </section>
       </div>
-    </main>
+
+      {/* Panel Footer — sticky Generate button */}
+      <div className="panel-footer">
+        {statusMessage && (phase === "idle" || phase === "failed") && (
+          <div className={`message-banner${phase === "failed" ? " error" : ""}`}>
+            {statusMessage}
+          </div>
+        )}
+
+        <button
+          className="btn-generate"
+          onClick={onGenerate}
+          disabled={!canGenerate || isGenerating}
+          type="button"
+          aria-label="Generate scenic loop route"
+        >
+          {isGenerating
+            ? <><Loader2 size={20} style={{ animation: "spin 1s linear infinite" }} /><span className="command-text">GENERATING…</span></>
+            : <span className="command-text">GENERATE ROUTE</span>
+          }
+        </button>
+      </div>
+    </aside>
   );
 }
 
+// ─── Loading Overlay ──────────────────────────────────────────────────────────
+function LoadingOverlay({ phase, progressStep }: { phase: Phase; progressStep: number }) {
+  if (phase !== "submitting" && phase !== "tracking") return null;
 
+  return (
+    <div className="loading-overlay" role="status" aria-live="polite" aria-label="Generating your scenic route">
+
+      {/* Background decorative blobs */}
+      <div style={{
+        position: "absolute", top: "-80px", left: "-80px",
+        width: "500px", height: "500px",
+        background: "rgba(26,61,26,0.06)",
+        borderRadius: "50%", filter: "blur(60px)", pointerEvents: "none"
+      }} />
+      <div style={{
+        position: "absolute", top: "40%", right: "-120px",
+        width: "600px", height: "600px",
+        background: "rgba(226,231,106,0.12)",
+        borderRadius: "50%", filter: "blur(80px)", pointerEvents: "none"
+      }} />
+
+      {/* Central content */}
+      <div className="loading-main">
+        {/* Brand above animation */}
+        <div className="loading-brand"><span className="display-squash">MoodRide</span></div>
+
+        {/* Compass animation */}
+        <div className="loading-compass">
+          <div className="loading-compass-ring" />
+          <div className="loading-compass-inner" />
+
+          {/* SVG path animation */}
+          <svg
+            style={{ width: "100%", height: "100%", position: "relative", zIndex: 1 }}
+            viewBox="0 0 200 200"
+            fill="none"
+            aria-hidden="true"
+          >
+            {/* Compass rose (decorative) */}
+            <g opacity="0.08" transform="translate(100,100)">
+              <circle r="80" stroke="var(--loading-graphic, #032707)" strokeWidth="2" fill="none" />
+              <path d="M0 -90 L8 0 L0 90 L-8 0 Z" fill="var(--loading-graphic, #032707)" />
+              <path d="M-90 0 L0 -8 L90 0 L0 8 Z" fill="var(--loading-graphic, #032707)" />
+            </g>
+            {/* Topo rings */}
+            <circle cx="100" cy="100" r="70" stroke="var(--loading-graphic-soft, rgba(3,39,7,0.07))" strokeWidth="1" />
+            <circle cx="100" cy="100" r="50" stroke="var(--loading-graphic-soft, rgba(3,39,7,0.07))" strokeWidth="1" />
+            <circle cx="100" cy="100" r="30" stroke="var(--loading-graphic-soft, rgba(3,39,7,0.07))" strokeWidth="1" />
+            {/* Animated route path */}
+            <path
+              d="M40,160 C60,140 100,180 140,120 S180,40 100,60 S40,20 160,40"
+              stroke="var(--loading-graphic, #032707)"
+              strokeWidth="5"
+              strokeLinecap="round"
+              fill="none"
+              style={{
+                strokeDasharray: 1000,
+                strokeDashoffset: 1000,
+                animation: "drawPath 8s linear infinite"
+              }}
+            />
+            {/* Moving dot */}
+            <circle fill="var(--loading-graphic, #1a3020)" r="9">
+              <animateMotion
+                dur="8s"
+                path="M40,160 C60,140 100,180 140,120 S180,40 100,60 S40,20 160,40"
+                repeatCount="indefinite"
+              />
+            </circle>
+          </svg>
+
+          {/* Glassmorphic center */}
+          <div style={{
+            position: "absolute", inset: "20px",
+            background: "rgba(255,255,255,0.2)",
+            backdropFilter: "blur(12px)",
+            borderRadius: "50%",
+            zIndex: 0,
+            border: "1px solid rgba(255,255,255,0.4)",
+            boxShadow: "0 20px 40px rgba(3,39,7,0.1)"
+          }} />
+        </div>
+
+        {/* Title + subtitle */}
+        <div>
+          <h2 className="loading-title"><span className="display-squash">Crafting your journey…</span></h2>
+          <p className="loading-subtitle">
+            Aligning peaks, valleys, and vibes to match your current frequency.
+          </p>
+        </div>
+
+        {/* Progress steps */}
+        <div className="loading-steps">
+        {LOADING_STEPS.map((step, i) => {
+          const { Icon } = step;
+          const isDone = i < progressStep;
+          const isActive = i === progressStep;
+          return (
+            <div
+              key={step.id}
+              className={`loading-step${isActive ? " active" : ""}${isDone ? " done" : ""}`}
+            >
+              {isDone
+                ? <Icon size={20} className="loading-step-icon" />
+                : isActive
+                  ? <Loader2 size={20} className="loading-step-icon" style={{ animation: "spin 1s linear infinite" }} />
+                  : <Icon size={20} className="loading-step-icon" />
+              }
+              <span className="loading-step-label">{step.label}</span>
+            </div>
+          );
+        })}
+        </div>
+      </div>
+
+      {/* Footer */}
+      <div className="loading-footer">
+        <div className="loading-footer-badge">
+          <Zap size={14} />
+          Secure Adventure Engine Active
+        </div>
+        <div className="loading-footer-copy">
+          &copy; 2024 MoodRide Discovery. All rights reserved.
+        </div>
+      </div>
+
+      {/* Keyframe injection */}
+      <style>{`
+        @keyframes drawPath {
+          0% { stroke-dashoffset: 1000; opacity: 0; }
+          10% { opacity: 1; }
+          100% { stroke-dashoffset: 0; }
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+      `}</style>
+    </div>
+  );
+}
+
+// ─── Results Panel ────────────────────────────────────────────────────────────
+interface ResultsPanelProps {
+  route: RouteDetailResponse;
+  selectedOptionId: string;
+  userRating: number | null;
+  ratingSubmitted: boolean;
+  showDebug: boolean;
+  onOptionSelect: (id: string) => void;
+  onRatingSelect: (rating: number, feedbackTags: string[]) => void;
+  onStartDrive: () => void;
+  onReset: () => void;
+  onToggleDebug: () => void;
+}
+
+function ResultsPanel({
+  route, selectedOptionId, userRating, ratingSubmitted, showDebug,
+  onOptionSelect, onRatingSelect, onStartDrive, onReset, onToggleDebug
+}: ResultsPanelProps) {
+  const [pendingRating, setPendingRating] = useState<number | null>(userRating);
+  const [feedbackTags, setFeedbackTags] = useState<string[]>([]);
+  const selectedOption = route.routeOptions?.find((o) => o.routeId === selectedOptionId)
+    ?? route.routeOptions?.[0];
+
+  const components = COMPONENT_ORDER
+    .map((key) => {
+      const avg = selectedOption?.explanation?.componentAverages?.[key];
+      const lift = selectedOption?.explanation?.componentLifts?.[key];
+      if (avg === undefined) return null;
+      return { key, label: COMPONENT_LABELS[key] ?? key, pct: avg, lift: lift ?? 0 };
+    })
+    .filter(Boolean) as { key: string; label: string; pct: number; lift: number }[];
+
+  return (
+    <aside className="results-panel">
+      <div className="results-header">
+        <h2 className="results-title">ROUTE FOUND</h2>
+        <p className="results-subtitle">
+          {route.routeOptions?.length ?? 1} option{(route.routeOptions?.length ?? 1) !== 1 ? "s" : ""} generated
+        </p>
+      </div>
+
+      <div className="results-body">
+
+        {/* ── Route Options ── */}
+        {route.routeOptions && route.routeOptions.length > 0 && (
+          <div>
+            <div className="section-heading">Route Options</div>
+            <div className="route-options" style={{ marginTop: "var(--space-3)" }}>
+              {route.routeOptions.map((opt: RouteOptionResponse) => (
+                <button
+                  key={opt.routeId}
+                  className={`route-option-card${selectedOptionId === opt.routeId ? " active" : ""}`}
+                  onClick={() => onOptionSelect(opt.routeId)}
+                  type="button"
+                >
+                  <div className="route-option-header">
+                    <div>
+                      <div className="route-option-name">
+                        {opt.profile?.split("_").map((w) => w[0].toUpperCase() + w.slice(1)).join(" ") ?? "Route"}
+                      </div>
+                      <div className="route-option-meta">
+                        {formatDistFromKm(opt.totalDistanceKm ?? 0)} km &bull; {formatDur(opt.estimatedDurationMinutes ?? 0)}
+                      </div>
+                    </div>
+                    {opt.scenicScore != null && (
+                      <div className="route-option-score">
+                        <span className="score-value">{opt.scenicScore.toFixed(1)}</span>
+                        <span className="score-badge">Scenic</span>
+                      </div>
+                    )}
+                  </div>
+                  {opt.explanation?.leadingComponents && opt.explanation.leadingComponents.length > 0 && (
+                    <div className="route-metrics" style={{ marginTop: "var(--space-3)" }}>
+                      {opt.explanation.leadingComponents.slice(0, 3).map((r, i) => (
+                        <div key={i} className="metric-item">
+                          <span className="metric-label">{COMPONENT_LABELS[r] ?? r}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* ── Key Metrics ── */}
+        <div>
+          <div className="section-heading">Journey Stats</div>
+          <div className="handoff-stats" style={{ marginTop: "12px" }}>
+            {[
+              { label: "Distance", value: `${formatDistFromKm(route.totalDistanceKm ?? 0)} km` },
+              { label: "Duration", value: formatDur(route.estimatedDurationMinutes ?? 0) },
+              { label: "Scenic", value: `${(route.scenicScore ?? 0).toFixed(1)}/10` },
+            ].map(({ label, value }) => (
+              <div key={label} className="handoff-stat">
+                <span className="handoff-stat-label">{label}</span>
+                <span className="handoff-stat-value">{value}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* ── Scenic Breakdown ── */}
+        {components.length > 0 && (
+          <div>
+            <div className="section-heading">Scenic Breakdown</div>
+            <div className="score-breakdown" style={{ marginTop: "var(--space-3)" }}>
+              {components.map(({ key, label, pct }) => {
+                const pctVal = Math.round(pct * 100);
+                return (
+                  <div key={key} className="score-bar-row">
+                    <span className="score-bar-label">{label}</span>
+                    <div className="score-bar-track">
+                      <div className="score-bar-fill" style={{ width: `${pctVal}%` }} />
+                    </div>
+                    <span className="score-bar-pct">{pctVal}%</span>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {/* ── Route Summary ── */}
+        {selectedOption?.explanation?.summary && (
+          <div className="route-summary-card">
+            <div className="section-heading route-summary-heading">Why this route?</div>
+            <p className="route-summary-text">
+              &ldquo;{selectedOption.explanation.summary}&rdquo;
+            </p>
+          </div>
+        )}
+
+        {/* ── Scenic Highlights ── */}
+        {selectedOption && (
+          <div>
+            <div className="section-heading">Scenic Highlights</div>
+            <div style={{ marginTop: "var(--space-3)" }}>
+              <ScenicHighlightsPanel route={route} selectedOptionId={selectedOption.routeId} />
+            </div>
+          </div>
+        )}
+
+        {/* ── Rate this route ── */}
+        <div className="rating-card">
+          <div className="section-heading rating-heading">Rate this route</div>
+          <p className="rating-helper">
+            {ratingSubmitted ? "Thanks for your feedback. Future routes will learn from it." : "Help tune future route suggestions"}
+          </p>
+          <div className="rating-buttons">
+            {[1, 2, 3, 4, 5].map((n) => (
+              <button
+                key={n}
+                onClick={() => setPendingRating(n)}
+                disabled={ratingSubmitted}
+                aria-label={`Rate ${n} star${n !== 1 ? "s" : ""}`}
+                type="button"
+                className={`rating-button${pendingRating !== null && n <= pendingRating ? " active" : ""}`}
+              >
+                {n}
+              </button>
+            ))}
+          </div>
+          {!ratingSubmitted && (
+            <>
+              <div className="feedback-tags" aria-label="Route feedback reasons">
+                {FEEDBACK_TAGS.map((tag) => {
+                  const active = feedbackTags.includes(tag.id);
+                  return (
+                    <button
+                      key={tag.id}
+                      type="button"
+                      className={`feedback-tag${active ? " active" : ""}`}
+                      aria-pressed={active}
+                      onClick={() => setFeedbackTags((current) =>
+                        active
+                          ? current.filter((value) => value !== tag.id)
+                          : current.length < 4
+                            ? [...current, tag.id]
+                            : current
+                      )}
+                    >
+                      {tag.label}
+                    </button>
+                  );
+                })}
+              </div>
+              <button
+                type="button"
+                className="feedback-submit"
+                disabled={pendingRating == null}
+                onClick={() => {
+                  if (pendingRating == null) return;
+                  onRatingSelect(pendingRating, feedbackTags);
+                }}
+              >
+                Save Feedback
+              </button>
+            </>
+          )}
+        </div>
+
+        {/* ── System details ── */}
+        <div>
+          <button
+            onClick={onToggleDebug}
+            type="button"
+            className="debug-toggle"
+          >
+            {showDebug ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
+            System details
+          </button>
+          {showDebug && (
+            <div style={{
+              background: "var(--clr-bg-alt)",
+              border: "2px solid var(--clr-border)",
+              padding: "12px", marginTop: "8px"
+            }}>
+              {[
+                ["Job ID",     route.jobId ?? "—"],
+                ["Route ID",   route.routeId ?? "—"],
+                ["Start",      `${route.startLat?.toFixed(4)}, ${route.startLng?.toFixed(4)}`],
+                ["Profile",    selectedOption?.profile ?? "—"],
+                ["Waypoints",  String(route.geometry?.geometry?.coordinates?.length ?? 0)]
+              ].map(([k, v]) => (
+                <div key={k} style={{
+                  display: "flex", justifyContent: "space-between",
+                  fontFamily: "var(--font-body)", fontSize: "11px",
+                  padding: "3px 0", borderBottom: "1px solid var(--clr-border)"
+                }}>
+                  <span style={{ fontWeight: 700, color: "var(--clr-text-muted)", textTransform: "uppercase", letterSpacing: "0.06em" }}>{k}</span>
+                  <span style={{ color: "var(--clr-primary)", fontFamily: "monospace" }}>{v}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+      </div>
+
+      {/* Results Footer */}
+      <div className="results-footer">
+        <button className="btn-generate" onClick={onStartDrive} type="button">
+          <ArrowRight size={20} />
+          <span className="command-text">Start Drive</span>
+        </button>
+        <button
+          onClick={onReset}
+          type="button"
+          className="btn-new-route"
+        >
+          <RefreshCw size={13} />
+          New Route
+        </button>
+      </div>
+    </aside>
+  );
+}
+
+// ─── Handoff Modal ────────────────────────────────────────────────────────────
+function HandoffModal({
+  route,
+  routeMode,
+  onClose
+}: {
+  route: RouteDetailResponse;
+  routeMode: RouteMode;
+  onClose: () => void;
+}) {
+  const coords = route.geometry?.geometry?.coordinates ?? [];
+  const gmapsUrl = buildGoogleMapsUrl(coords, routeMode);
+  const appleMapsUrl = buildAppleMapsUrl(coords, routeMode);
+  const routeName = route.routeOptions?.[0]?.profile
+    ? route.routeOptions[0].profile.split("_").map((w) => w[0].toUpperCase() + w.slice(1)).join(" ")
+    : "MoodRide Route";
+
+  return (
+    <div
+      className="handoff-overlay"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Start Drive"
+      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
+    >
+      <div className="handoff-modal">
+
+        {/* Header */}
+        <div className="handoff-header">
+          <div className="handoff-subtitle">Ready for the road?</div>
+          <h2 className="handoff-title"><span className="display-squash">START YOUR DRIVE</span></h2>
+        </div>
+
+        {/* Body */}
+        <div className="handoff-body">
+
+          {/* Route name + meta */}
+          <div>
+            <div className="handoff-route-name">{routeName.toUpperCase()}</div>
+            <div className="handoff-meta">
+              {formatDistFromKm(route.totalDistanceKm ?? 0)} km &bull; {formatDur(route.estimatedDurationMinutes ?? 0)} &bull; Scenic {(route.scenicScore ?? 0).toFixed(1)}/10
+            </div>
+          </div>
+
+          {/* Stats row */}
+          <div className="handoff-stats">
+            <div className="handoff-stat">
+              <span className="handoff-stat-label">Distance</span>
+              <span className="handoff-stat-value">{formatDistFromKm(route.totalDistanceKm ?? 0)}<span style={{ fontSize: "12px", fontWeight: 400 }}> km</span></span>
+            </div>
+            <div className="handoff-stat">
+              <span className="handoff-stat-label">Duration</span>
+              <span className="handoff-stat-value">{formatDur(route.estimatedDurationMinutes ?? 0)}</span>
+            </div>
+            <div className="handoff-stat">
+              <span className="handoff-stat-label">Scenic Score</span>
+              <span className="handoff-stat-value">{(route.scenicScore ?? 0).toFixed(1)}<span style={{ fontSize: "12px", fontWeight: 400 }}>/10</span></span>
+            </div>
+          </div>
+
+          {/* Navigation options */}
+          <div className="handoff-nav-options">
+            <a
+              href={gmapsUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="nav-option-btn"
+            >
+              <Navigation size={20} />
+              Open in Google Maps
+            </a>
+            <a
+              href={appleMapsUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="nav-option-btn"
+            >
+              <MapIcon size={20} />
+              Open in Apple Maps
+            </a>
+            <button
+              className="nav-option-btn"
+              onClick={() => exportGpx(route, routeName)}
+              type="button"
+            >
+              <Download size={20} />
+              Export GPX Route Data
+            </button>
+          </div>
+
+          {/* Summary quote */}
+          {route.routeOptions?.[0]?.explanation?.summary && (
+            <p style={{
+              fontFamily: "var(--font-body)", fontSize: "12px",
+              color: "var(--clr-text-muted)", lineHeight: 1.6,
+              fontStyle: "italic",
+              borderLeft: "3px solid var(--clr-lime)",
+              paddingLeft: "16px"
+            }}>
+              &ldquo;{route.routeOptions[0].explanation!.summary}&rdquo;
+            </p>
+          )}
+        </div>
+
+        {/* Footer */}
+        <div className="handoff-footer">
+          <button className="btn-start-drive" type="button" onClick={() => window.open(gmapsUrl, "_blank")}>
+            <Navigation size={20} />
+            Sync Navigation
+          </button>
+          <button className="btn-cancel" onClick={onClose} type="button">
+            Back to route
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Failed Card ──────────────────────────────────────────────────────────────
+function FailedCard({
+  message,
+  guidance,
+  onReset,
+  onTryVibe,
+}: {
+  message: string;
+  guidance: FailureGuidance | null;
+  onReset: () => void;
+  onTryVibe: (vibe: string) => void;
+}) {
+  const fallbackVibes = guidance?.suggestedVibes?.slice(0, 3) ?? [];
+  const suggestedActions = guidance?.suggestedActions?.slice(0, 4) ?? [];
+  return (
+    <div className="failed-card" role="alert">
+      <div className="failed-icon">
+        <AlertTriangle size={24} />
+      </div>
+      <h3 className="failed-title">
+        {guidance?.failureCode === "vibe_unavailable" ? "Vibe Unavailable" : "Generation Failed"}
+      </h3>
+      <p className="failed-message">
+        {message || "Route generation failed. Try a different starting point or vibe selection."}
+      </p>
+      {fallbackVibes.length > 0 && (
+        <div className="failed-suggestions" aria-label="Suggested vibes">
+          {fallbackVibes.map((vibe) => (
+            <button key={vibe} className="failed-chip" type="button" onClick={() => onTryVibe(vibe)}>
+              {vibeLabel(vibe)}
+            </button>
+          ))}
+        </div>
+      )}
+      {suggestedActions.length > 0 && (
+        <div className="failed-action-list">
+          {suggestedActions.map((action) => (
+            <span key={action} className="failed-action-item">{action}</span>
+          ))}
+        </div>
+      )}
+      <button className="btn-generate" onClick={onReset} type="button">
+        <RefreshCw size={18} />
+        <span className="command-text">Try Again</span>
+      </button>
+    </div>
+  );
+}
+
+function vibeLabel(vibe: string): string {
+  return VIBE_CONFIG.find((item) => item.vibe === vibe)?.label ?? vibe.replace(/_/g, " ");
+}
+
+function guidanceFromStatus(status: RouteJobStatusResponse): FailureGuidance | null {
+  if (!status.failureCode && (!status.suggestedVibes || status.suggestedVibes.length === 0)) {
+    return null;
+  }
+  return {
+    failureCode: status.failureCode,
+    suggestedVibes: status.suggestedVibes ?? [],
+    suggestedActions: status.suggestedActions ?? [],
+  };
+}
+
+// ─── Main Orchestrator ────────────────────────────────────────────────────────
+export function RoutePlanner() {
+  const [lat, setLat] = useState(49.2827);
+  const [lng, setLng] = useState(-123.1207);
+  const [locationQuery, setLocationQuery] = useState("");
+  const [locationSuggestions, setLocationSuggestions] = useState<LocationSuggestion[]>([]);
+  const [locationPending, setLocationPending] = useState(false);
+  const [locationError, setLocationError] = useState<string | null>(null);
+  const [showDropdown, setShowDropdown] = useState(false);
+  const [routeMode, setRouteMode] = useState<RouteMode>("drive");
+  const [timeBudget, setTimeBudget] = useState(60);
+  const [vibes, setVibes] = useState<string[]>(["countryside"]);
+  const [phase, setPhase] = useState<Phase>("idle");
+  const [statusMessage, setStatusMessage] = useState("");
+  const [failureGuidance, setFailureGuidance] = useState<FailureGuidance | null>(null);
+  const [route, setRoute] = useState<RouteDetailResponse | null>(null);
+  const [selectedOptionId, setSelectedOptionId] = useState("");
+  const [userRating, setUserRating] = useState<number | null>(null);
+  const [ratingSubmitted, setRatingSubmitted] = useState(false);
+  const [showHandoff, setShowHandoff] = useState(false);
+  const [showDebug, setShowDebug] = useState(false);
+  const [progressStep, setProgressStep] = useState(0);
+  const [sheetState, setSheetState] = useState<BottomSheetState>('minimized');
+  const [viewportMode, setViewportMode] = useState<'mobile' | 'tablet' | 'desktop'>('desktop');
+  const [theme, setTheme] = useState<AppTheme>("day");
+  const [themePreferenceReady, setThemePreferenceReady] = useState(false);
+  const isMobile = viewportMode === 'mobile';
+  const isTablet = viewportMode === 'tablet';
+  const isDesktop = viewportMode === 'desktop';
+
+  const geocodeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const stopWsRef = useRef<null | (() => void)>(null);
+  const pollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const routeDetailsRef = useRef<Record<string, RouteDetailResponse>>({});
+  const seqRef = useRef(0);
+
+  useEffect(() => {
+    try {
+      const storedTheme = window.localStorage.getItem("moodride-theme");
+      if (storedTheme === "day" || storedTheme === "night") {
+        setTheme(storedTheme);
+      }
+    } catch {
+      // localStorage can be unavailable in privacy-restricted contexts.
+    } finally {
+      setThemePreferenceReady(true);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!themePreferenceReady) return;
+    try {
+      window.localStorage.setItem("moodride-theme", theme);
+    } catch {
+      // Ignore storage failures; the toggle should still work for this session.
+    }
+  }, [theme, themePreferenceReady]);
+
+  // Geocode as user types
+  useEffect(() => {
+    if (geocodeTimerRef.current) clearTimeout(geocodeTimerRef.current);
+    if (!locationQuery || locationQuery.length < 3) {
+      setLocationSuggestions([]);
+      setShowDropdown(false);
+      return;
+    }
+    setLocationPending(true);
+    setLocationError(null);
+    setShowDropdown(true);
+    geocodeTimerRef.current = setTimeout(async () => {
+      const seq = ++seqRef.current;
+      try {
+        const results = await searchLocations(locationQuery);
+        if (seq !== seqRef.current) return;
+        setLocationSuggestions(results);
+        setLocationPending(false);
+      } catch {
+        if (seq !== seqRef.current) return;
+        setLocationError("Search failed. Enter coordinates directly.");
+        setLocationPending(false);
+      }
+    }, 400);
+    return () => { if (geocodeTimerRef.current) clearTimeout(geocodeTimerRef.current); };
+  }, [locationQuery]);
+
+  const handleSuggestionSelect = useCallback((s: LocationSuggestion) => {
+    setLat(s.lat);
+    setLng(s.lng);
+    setLocationQuery(s.displayName);
+    setLocationSuggestions([]);
+    setShowDropdown(false);
+  }, []);
+
+  const handleGeolocate = useCallback(() => {
+    if (!navigator.geolocation) {
+      setStatusMessage("Geolocation not supported.");
+      return;
+    }
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        setLat(Number(pos.coords.latitude.toFixed(5)));
+        setLng(Number(pos.coords.longitude.toFixed(5)));
+        setLocationQuery(`${pos.coords.latitude.toFixed(4)}, ${pos.coords.longitude.toFixed(4)}`);
+      },
+      () => setStatusMessage("Could not detect location. Enter coordinates manually.")
+    );
+  }, []);
+
+  const handleVibeToggle = useCallback((vibe: string) => {
+    setVibes((prev) =>
+      prev.includes(vibe)
+        ? prev.filter((v) => v !== vibe)
+        : prev.length < 3
+          ? [...prev, vibe]
+          : prev
+    );
+  }, []);
+
+  const resolveRouteDetail = useCallback(async (routeId: string): Promise<RouteDetailResponse> => {
+    if (routeDetailsRef.current[routeId]) return routeDetailsRef.current[routeId];
+    const detail = await getRoute(routeId);
+    routeDetailsRef.current[routeId] = detail;
+    return detail;
+  }, []);
+
+  const handleGenerate = useCallback(async () => {
+    if (routeMode !== "drive" || vibes.length === 0) return;
+    setPhase("submitting");
+    setStatusMessage("");
+    setFailureGuidance(null);
+    setProgressStep(0);
+    routeDetailsRef.current = {};
+    setRoute(null);
+    setRatingSubmitted(false);
+    setUserRating(null);
+
+    const stepTimer = setInterval(() => {
+      setProgressStep((p) => Math.min(p + 1, LOADING_STEPS.length - 1));
+    }, 2200);
+
+    try {
+      const preferences = buildPreferenceVector(vibes);
+      const submission = await submitRoute({
+        userId: "00000000-0000-0000-0000-000000000000",
+        lat,
+        lng,
+        routeMode,
+        vibes: vibes as Vibe[],
+        preferenceVector: preferences,
+        timeBudgetMinutes: timeBudget
+      });
+
+      setPhase("tracking");
+
+      let resolved = false;
+
+      const stopWs = connectJobChannel(
+        submission.jobId,
+        submission.wsChannel,
+        async (event) => {
+          if (resolved) return;
+          if (event.routeId) {
+            resolved = true;
+            stopWs();
+            clearInterval(stepTimer);
+            clearInterval(pollTimerRef.current!);
+            setProgressStep(LOADING_STEPS.length);
+            try {
+              const detail = await resolveRouteDetail(event.routeId);
+              setRoute(detail);
+              setSelectedOptionId(event.routeId);
+              setPhase("completed");
+            } catch (e) {
+              const msg = e instanceof Error ? e.message : "Failed to load route detail.";
+              setStatusMessage(msg);
+              setPhase("failed");
+            }
+          }
+        },
+        (errMsg) => {
+          console.warn("WS error:", errMsg);
+        }
+      );
+      stopWsRef.current = stopWs;
+
+      // Polling fallback
+      const pollTimer = setInterval(async () => {
+        if (resolved) { clearInterval(pollTimer); return; }
+        try {
+          const status = await getJobStatus(submission.jobId);
+          const normalizedStatus = status.status?.toLowerCase();
+          if (normalizedStatus === "completed") {
+            clearInterval(pollTimer);
+            if (!resolved) {
+              resolved = true;
+              stopWs();
+              clearInterval(stepTimer);
+              setProgressStep(LOADING_STEPS.length);
+              const routeId = status.routeId ?? status.routeOptions?.[0]?.routeId;
+              if (routeId) {
+                const detail = await resolveRouteDetail(routeId);
+                setRoute(detail);
+                setSelectedOptionId(routeId);
+                setPhase("completed");
+              }
+            }
+          } else if (normalizedStatus === "failed") {
+            clearInterval(pollTimer);
+            if (!resolved) {
+              resolved = true;
+              stopWs();
+              clearInterval(stepTimer);
+              setFailureGuidance(guidanceFromStatus(status));
+              setStatusMessage(status.userMessage ?? status.reason ?? "Route generation failed.");
+              setPhase("failed");
+            }
+          } else {
+            setStatusMessage("Processing…");
+          }
+        } catch { /* ignore poll errors */ }
+      }, 3000);
+      pollTimerRef.current = pollTimer;
+
+    } catch (err: unknown) {
+      clearInterval(stepTimer);
+      const msg = err instanceof Error ? err.message : "An unexpected error occurred.";
+      setStatusMessage(msg);
+      setFailureGuidance(null);
+      setPhase("failed");
+    }
+  }, [lat, lng, routeMode, vibes, timeBudget, resolveRouteDetail]);
+
+  const handleReset = useCallback(() => {
+    if (stopWsRef.current) { stopWsRef.current(); stopWsRef.current = null; }
+    if (pollTimerRef.current) { clearInterval(pollTimerRef.current); pollTimerRef.current = null; }
+    setPhase("idle");
+    routeDetailsRef.current = {};
+    setRoute(null);
+    setStatusMessage("");
+    setFailureGuidance(null);
+    setSelectedOptionId("");
+    setUserRating(null);
+    setRatingSubmitted(false);
+    setShowHandoff(false);
+    setProgressStep(0);
+  }, []);
+
+  const handleTryVibe = useCallback((vibe: string) => {
+    if (stopWsRef.current) { stopWsRef.current(); stopWsRef.current = null; }
+    if (pollTimerRef.current) { clearInterval(pollTimerRef.current); pollTimerRef.current = null; }
+    setVibes([vibe]);
+    setPhase("idle");
+    setStatusMessage("");
+    setFailureGuidance(null);
+    setRoute(null);
+    setSelectedOptionId("");
+  }, []);
+
+  const handleOptionSelect = useCallback(async (id: string) => {
+    setSelectedOptionId(id);
+    try {
+      const detail = await resolveRouteDetail(id);
+      setRoute(detail);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "Failed to load route detail.";
+      setStatusMessage(msg);
+    }
+  }, [resolveRouteDetail]);
+
+  const handleRatingSelect = useCallback(async (rating: number, feedbackTags: string[]) => {
+    if (ratingSubmitted || !route) return;
+    setUserRating(rating);
+    try {
+      await submitRouteRating(route.routeId, rating, feedbackTags);
+      setRatingSubmitted(true);
+    } catch { /* ignore rating errors */ }
+  }, [ratingSubmitted, route]);
+
+  const handleThemeToggle = useCallback(() => {
+    setTheme((current) => current === "day" ? "night" : "day");
+  }, []);
+
+  // Detect responsive viewport mode: phone sheet, tablet hybrid panel, desktop split panels.
+  useEffect(() => {
+    const checkViewportMode = () => {
+      const width = window.innerWidth;
+      if (width < 768) {
+        setViewportMode('mobile');
+      } else if (width <= 1366) {
+        setViewportMode('tablet');
+      } else {
+        setViewportMode('desktop');
+      }
+    };
+    checkViewportMode();
+    window.addEventListener('resize', checkViewportMode);
+    return () => window.removeEventListener('resize', checkViewportMode);
+  }, []);
+
+  // Auto-adjust sheet state based on phase for phone bottom sheets.
+  useEffect(() => {
+    if (!isMobile) return;
+    if (phase === 'completed' && route) {
+      setSheetState('halfway');
+    } else if (phase === 'submitting' || phase === 'tracking') {
+      setSheetState('expanded');
+    } else if (phase === 'failed') {
+      setSheetState('halfway');
+    } else if (phase === 'idle') {
+      setSheetState('minimized');
+    }
+  }, [phase, route, isMobile]);
+
+  return (
+    <div className={`app-shell viewport-${viewportMode} theme-${theme}`}>
+      {/* ── Top bar ── */}
+      <AppHeader theme={theme} onThemeToggle={handleThemeToggle} />
+
+      {/* ── Main layout ── */}
+      <div className="app-main">
+        {/* ── Desktop: Planner panel on left ── */}
+        {isDesktop && (
+          <PlannerPanel
+            lat={lat}
+            lng={lng}
+            locationQuery={locationQuery}
+            locationSuggestions={locationSuggestions}
+            locationPending={locationPending}
+            locationError={locationError}
+            showDropdown={showDropdown}
+            routeMode={routeMode}
+            timeBudget={timeBudget}
+            vibes={vibes}
+            phase={phase}
+            statusMessage={phase === "idle" || phase === "failed" ? statusMessage : ""}
+            onLatChange={setLat}
+            onLngChange={setLng}
+            onLocationQueryChange={setLocationQuery}
+            onSuggestionSelect={handleSuggestionSelect}
+            onGeolocate={handleGeolocate}
+            onModeChange={setRouteMode}
+            onTimeBudgetChange={setTimeBudget}
+            onVibeToggle={handleVibeToggle}
+            onGenerate={handleGenerate}
+          />
+        )}
+
+        {/* ── Map canvas — always rendered ── */}
+        <div className="map-canvas">
+          <RouteMap route={route} selectedRouteId={selectedOptionId} centerLat={lat} centerLng={lng} theme={theme} onRouteSelect={handleOptionSelect} />
+        </div>
+
+        {/* ── Desktop: Results panel on right ── */}
+        {isDesktop && phase === "completed" && route && (
+          <ResultsPanel
+            route={route}
+            selectedOptionId={selectedOptionId}
+            userRating={userRating}
+            ratingSubmitted={ratingSubmitted}
+            showDebug={showDebug}
+            onOptionSelect={handleOptionSelect}
+            onRatingSelect={handleRatingSelect}
+            onStartDrive={() => setShowHandoff(true)}
+            onReset={handleReset}
+            onToggleDebug={() => setShowDebug((v) => !v)}
+          />
+        )}
+
+        {/* ── Desktop: Failed card on right ── */}
+        {isDesktop && phase === "failed" && (
+          <div style={{
+            width: "var(--sidebar-width)", flexShrink: 0,
+            background: "var(--clr-bg)",
+            borderLeft: "4px solid var(--clr-primary)",
+            display: "flex", flexDirection: "column"
+          }}>
+            <FailedCard
+              message={statusMessage}
+              guidance={failureGuidance}
+              onReset={handleReset}
+              onTryVibe={handleTryVibe}
+            />
+          </div>
+        )}
+
+        {/* ── Tablet: Google Maps-inspired left sliding panel ── */}
+        {isTablet && (
+          <aside className={`tablet-adaptive-panel tablet-panel-${phase === "completed" ? "results" : "planner"}`}>
+            <div className="tablet-panel-handle" />
+            <div className="tablet-panel-content">
+              {phase !== "completed" && phase !== "failed" && (
+                <PlannerPanel
+                  lat={lat}
+                  lng={lng}
+                  locationQuery={locationQuery}
+                  locationSuggestions={locationSuggestions}
+                  locationPending={locationPending}
+                  locationError={locationError}
+                  showDropdown={showDropdown}
+                  routeMode={routeMode}
+                  timeBudget={timeBudget}
+                  vibes={vibes}
+                  phase={phase}
+                  statusMessage={phase === "idle" ? statusMessage : ""}
+                  onLatChange={setLat}
+                  onLngChange={setLng}
+                  onLocationQueryChange={setLocationQuery}
+                  onSuggestionSelect={handleSuggestionSelect}
+                  onGeolocate={handleGeolocate}
+                  onModeChange={setRouteMode}
+                  onTimeBudgetChange={setTimeBudget}
+                  onVibeToggle={handleVibeToggle}
+                  onGenerate={handleGenerate}
+                />
+              )}
+
+              {phase === "completed" && route && (
+                <ResultsPanel
+                  route={route}
+                  selectedOptionId={selectedOptionId}
+                  userRating={userRating}
+                  ratingSubmitted={ratingSubmitted}
+                  showDebug={showDebug}
+                  onOptionSelect={handleOptionSelect}
+                  onRatingSelect={handleRatingSelect}
+                  onStartDrive={() => setShowHandoff(true)}
+                  onReset={handleReset}
+                  onToggleDebug={() => setShowDebug((v) => !v)}
+                />
+              )}
+
+              {phase === "failed" && (
+                <FailedCard
+                  message={statusMessage}
+                  guidance={failureGuidance}
+                  onReset={handleReset}
+                  onTryVibe={handleTryVibe}
+                />
+              )}
+            </div>
+          </aside>
+        )}
+      </div>
+
+      {/* ── Mobile: Bottom Sheet ── */}
+      {isMobile && (
+        <BottomSheet
+          state={sheetState}
+          onStateChange={setSheetState}
+          theme={phase === "completed" ? "results" : "planner"}
+        >
+          {/* Planner panel (when not completed) */}
+          {phase !== "completed" && (
+            <PlannerPanel
+              lat={lat}
+              lng={lng}
+              locationQuery={locationQuery}
+              locationSuggestions={locationSuggestions}
+              locationPending={locationPending}
+              locationError={locationError}
+              showDropdown={showDropdown}
+              routeMode={routeMode}
+              timeBudget={timeBudget}
+              vibes={vibes}
+              phase={phase}
+              statusMessage={phase === "idle" || phase === "failed" ? statusMessage : ""}
+              onLatChange={setLat}
+              onLngChange={setLng}
+              onLocationQueryChange={setLocationQuery}
+              onSuggestionSelect={handleSuggestionSelect}
+              onGeolocate={handleGeolocate}
+              onModeChange={setRouteMode}
+              onTimeBudgetChange={setTimeBudget}
+              onVibeToggle={handleVibeToggle}
+              onGenerate={handleGenerate}
+            />
+          )}
+
+          {/* Results panel (when completed) */}
+          {phase === "completed" && route && (
+            <ResultsPanel
+              route={route}
+              selectedOptionId={selectedOptionId}
+              userRating={userRating}
+              ratingSubmitted={ratingSubmitted}
+              showDebug={showDebug}
+              onOptionSelect={handleOptionSelect}
+              onRatingSelect={handleRatingSelect}
+              onStartDrive={() => setShowHandoff(true)}
+              onReset={() => {
+                handleReset();
+                setSheetState('minimized');
+              }}
+              onToggleDebug={() => setShowDebug((v) => !v)}
+            />
+          )}
+
+          {/* Failed card (when failed) */}
+          {phase === "failed" && (
+            <FailedCard
+              message={statusMessage}
+              guidance={failureGuidance}
+              onReset={() => {
+                handleReset();
+                setSheetState('minimized');
+              }}
+              onTryVibe={(vibe) => {
+                handleTryVibe(vibe);
+                setSheetState('expanded');
+              }}
+            />
+          )}
+        </BottomSheet>
+      )}
+
+      {/* ── Loading overlay — full screen ── */}
+      <LoadingOverlay phase={phase} progressStep={progressStep} />
+
+      {/* ── Handoff modal ── */}
+      {showHandoff && route && (
+        <HandoffModal
+          route={route}
+          routeMode={routeMode}
+          onClose={() => setShowHandoff(false)}
+        />
+      )}
+
+    </div>
+  );
+}

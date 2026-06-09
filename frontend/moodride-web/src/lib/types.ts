@@ -27,7 +27,7 @@ export type Vibe =
 export type RouteMode = "drive" | "walk" | "bike";
 
 export interface RouteRequest {
-  userId: string;
+  userId: string; // must be a valid UUID
   lat: number;
   lng: number;
   timeBudgetMinutes: number;
@@ -52,6 +52,7 @@ export interface RouteOptionResponse {
   routeId: string;
   routeUrl: string;
   scenicScore: number;
+  scoreBreakdown: Record<string, number>;
   totalDistanceKm: number;
   estimatedDurationMinutes: number;
   explanation: RouteOptionExplanationResponse | null;
@@ -84,6 +85,10 @@ export interface RouteJobStatusResponse {
   retryCount: number;
   maxRetries: number;
   routeMode: RouteMode;
+  failureCode: string | null;
+  userMessage: string | null;
+  suggestedVibes: string[];
+  suggestedActions: string[];
 }
 
 export interface RouteDetailResponse {
@@ -91,6 +96,7 @@ export interface RouteDetailResponse {
   jobId: string;
   routeUrl: string;
   scenicScore: number;
+  scoreBreakdown: Record<string, number>;
   qualityTier: string;
   totalDistanceKm: number;
   estimatedDurationMinutes: number;
@@ -154,6 +160,7 @@ export interface RouteRatingResponse {
   routeId: string;
   rating: number;
   ratedAt: string;
+  feedbackTags: string[];
 }
 
 export interface LocationSuggestion {
@@ -162,4 +169,3 @@ export interface LocationSuggestion {
   lat: number;
   lng: number;
 }
-

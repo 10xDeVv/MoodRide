@@ -103,6 +103,20 @@ public class RouteService {
     private static final double ROUTE_EXPLANATION_POI_REQUESTED_MULTIPLIER = 0.62;
     private static final double ROUTE_EXPLANATION_POI_REQUESTED_WEIGHT = 0.30;
     private static final double ROUTE_EXPLANATION_POI_SUPPORT_CAP_RATIO = 0.82;
+    private static final int MAX_FEEDBACK_TAGS = 4;
+    private static final Set<String> SUPPORTED_FEEDBACK_TAGS = Set.of(
+        "more_like_this",
+        "too_urban",
+        "too_long",
+        "too_short",
+        "too_boring",
+        "not_scenic",
+        "loved_quiet",
+        "loved_curves",
+        "loved_water",
+        "loved_greenery",
+        "loved_stops"
+    );
 
     private final RouteJobRepository jobRepository;
     private final RouteRepository routeRepository;
@@ -140,7 +154,8 @@ public class RouteService {
         job.setRouteMode(routeMode);
         job.setStatus(RouteJob.JobStatus.QUEUED);
         job.setVibesJson(serializeVibes(resolvedVibes));
-        job.setPreferenceVector(serializePreferenceVector(normalizePreferenceVector(request.preferenceVector())));
+        Map<String, Double> requestedPreferenceVector = normalizePreferenceVector(request.preferenceVector());
+        job.setPreferenceVector(serializePreferenceVector(applyRouteWeightCalibrations(resolvedVibes, requestedPreferenceVector)));
         jobRepository.save(job);
 
         publishRouteJobAfterCommit(job.getId());
@@ -191,6 +206,7 @@ public class RouteService {
         Integer estimatedRemaining = job.getStatus() == RouteJob.JobStatus.QUEUED || job.getStatus() == RouteJob.JobStatus.PROCESSING
                 ? 3
                 : null;
+        FailureGuidance failureGuidance = buildFailureGuidance(job);
 
         return new RouteJobStatusResponse(
             job.getId(),
@@ -206,7 +222,75 @@ public class RouteService {
             estimatedRemaining,
             job.getRetryCount(),
             job.getMaxRetries(),
-            job.getRouteMode().apiValue()
+            job.getRouteMode().apiValue(),
+            failureGuidance.code(),
+            failureGuidance.userMessage(),
+            failureGuidance.suggestedVibes(),
+            failureGuidance.suggestedActions()
+        );
+    }
+
+    private FailureGuidance buildFailureGuidance(RouteJob job) {
+        if (job == null || job.getStatus() != RouteJob.JobStatus.FAILED) {
+            return FailureGuidance.empty();
+        }
+
+        String reason = job.getFailureReason();
+        if (reason == null || reason.isBlank()) {
+            return new FailureGuidance(
+                "route_generation_failed",
+                "Route generation failed. Try a different starting point, more time, or another vibe.",
+                List.of("scenic", "open_roads"),
+                List.of("Try Scenic", "Try Open Roads", "Increase time budget")
+            );
+        }
+
+        String normalized = reason.toLowerCase(Locale.ROOT);
+        if (normalized.contains("no strong ") || normalized.contains("no feasible route found")) {
+            return new FailureGuidance(
+                "vibe_unavailable",
+                reason,
+                suggestedFallbackVibes(job),
+                suggestedFailureActions(job)
+            );
+        }
+
+        return new FailureGuidance(
+            "route_generation_failed",
+            reason,
+            List.of("scenic", "open_roads"),
+            List.of("Try Scenic", "Try Open Roads", "Increase time budget")
+        );
+    }
+
+    private List<String> suggestedFallbackVibes(RouteJob job) {
+        List<String> routeVibes = resolveRouteVibes(job, null);
+        Set<String> suggestions = new LinkedHashSet<>();
+        if (routeVibes.stream().anyMatch(vibe -> vibe.equals("countryside") || vibe.equals("sunday_cruise"))) {
+            suggestions.add("scenic");
+            suggestions.add("open_roads");
+            suggestions.add("relaxing");
+        } else if (routeVibes.contains("mountain")) {
+            suggestions.add("scenic");
+            suggestions.add("winding_roads");
+            suggestions.add("open_roads");
+        } else {
+            suggestions.add("scenic");
+            suggestions.add("open_roads");
+            suggestions.add("relaxing");
+        }
+        suggestions.removeAll(routeVibes);
+        return List.copyOf(suggestions);
+    }
+
+    private List<String> suggestedFailureActions(RouteJob job) {
+        int currentBudget = job == null ? 60 : job.getTimeBudgetMinutes();
+        int nextBudget = currentBudget < 60 ? 60 : currentBudget < 90 ? 90 : currentBudget < 120 ? 120 : currentBudget + 30;
+        return List.of(
+            "Try Scenic",
+            "Try Open Roads",
+            "Increase time budget to " + nextBudget + " minutes",
+            "Move the start point farther from downtown"
         );
     }
     
@@ -233,15 +317,17 @@ public class RouteService {
             throw new IllegalArgumentException("rating must be between 1 and 5");
         }
 
+        List<String> feedbackTags = normalizeFeedbackTags(request.feedbackTags());
         Instant ratedAt = Instant.now();
         route.setUserRating(rating);
         route.setRatedAt(ratedAt);
+        route.setFeedbackTagsJson(serializeFeedbackTags(feedbackTags));
         routeRepository.save(route);
 
-        publishUserFeedbackEvents(route, rating, ratedAt);
-        applyCalibrationFeedback(route, rating, ratedAt);
+        publishUserFeedbackEvents(route, rating, ratedAt, feedbackTags);
+        applyCalibrationFeedback(route, rating, ratedAt, feedbackTags);
 
-        return new RouteRatingResponse(route.getId(), rating, ratedAt);
+        return new RouteRatingResponse(route.getId(), rating, ratedAt, feedbackTags);
     }
 
     private RouteDetailResponse mapRouteToDetail(Route route) {
@@ -285,6 +371,7 @@ public class RouteService {
             route.getJobId(),
             "/routes/route/" + route.getId(),
             route.getScenicScore() * 100.0,
+            parseScoreBreakdown(route.getScoreBreakdownJson()),
             deriveQualityTier(route),
             route.getTotalDistanceKm(),
             route.getEstimatedDurationMinutes(),
@@ -306,13 +393,36 @@ public class RouteService {
         );
     }
 
-    private void publishUserFeedbackEvents(Route route, int rating, Instant ratedAt) {
+    private Map<String, Double> parseScoreBreakdown(String rawScoreBreakdownJson) {
+        if (rawScoreBreakdownJson == null || rawScoreBreakdownJson.isBlank()) {
+            return Map.of();
+        }
+        try {
+            Map<String, Object> raw = objectMapper.readValue(rawScoreBreakdownJson, new TypeReference<>() {
+            });
+            Map<String, Double> normalized = new LinkedHashMap<>();
+            for (Map.Entry<String, Object> entry : raw.entrySet()) {
+                if (entry.getKey() == null || entry.getKey().isBlank()) {
+                    continue;
+                }
+                if (entry.getValue() instanceof Number number) {
+                    normalized.put(entry.getKey(), number.doubleValue());
+                }
+            }
+            return Map.copyOf(normalized);
+        } catch (Exception ex) {
+            return Map.of();
+        }
+    }
+
+    private void publishUserFeedbackEvents(Route route, int rating, Instant ratedAt, List<String> feedbackTags) {
         RouteRatedEvent ratedEvent = new RouteRatedEvent(
             route.getId(),
             route.getJobId(),
             route.getUserId(),
             rating,
-            ratedAt
+            ratedAt,
+            feedbackTags
         );
 
         DriveCompletedEvent completedEvent = new DriveCompletedEvent(
@@ -330,7 +440,7 @@ public class RouteService {
         }
     }
 
-    private void applyCalibrationFeedback(Route route, int rating, Instant ratedAt) {
+    private void applyCalibrationFeedback(Route route, int rating, Instant ratedAt, List<String> feedbackTags) {
         RouteJob routeJob = jobRepository.findById(route.getJobId()).orElse(null);
         List<String> vibes = resolveRouteVibes(routeJob, route);
         if (vibes.isEmpty()) {
@@ -353,12 +463,12 @@ public class RouteService {
         List<RouteWeightCalibration> updates = new ArrayList<>();
         for (String vibe : vibes) {
             RouteWeightCalibration calibration = byVibe.getOrDefault(vibe, new RouteWeightCalibration(vibe));
-            calibration.setWaterMultiplier(adjustMultiplier(calibration.getWaterMultiplier(), componentRatios.get("water"), feedbackSignal));
-            calibration.setGreeneryMultiplier(adjustMultiplier(calibration.getGreeneryMultiplier(), componentRatios.get("greenery"), feedbackSignal));
-            calibration.setElevationMultiplier(adjustMultiplier(calibration.getElevationMultiplier(), componentRatios.get("elevation"), feedbackSignal));
-            calibration.setSolitudeMultiplier(adjustMultiplier(calibration.getSolitudeMultiplier(), componentRatios.get("solitude"), feedbackSignal));
-            calibration.setCurvesMultiplier(adjustMultiplier(calibration.getCurvesMultiplier(), componentRatios.get("curves"), feedbackSignal));
-            calibration.setPoiMultiplier(adjustMultiplier(calibration.getPoiMultiplier(), componentRatios.get("poi"), feedbackSignal));
+            calibration.setWaterMultiplier(adjustMultiplier(calibration.getWaterMultiplier(), componentRatios.get("water"), feedbackSignal, feedbackTagSignal("water", feedbackTags)));
+            calibration.setGreeneryMultiplier(adjustMultiplier(calibration.getGreeneryMultiplier(), componentRatios.get("greenery"), feedbackSignal, feedbackTagSignal("greenery", feedbackTags)));
+            calibration.setElevationMultiplier(adjustMultiplier(calibration.getElevationMultiplier(), componentRatios.get("elevation"), feedbackSignal, feedbackTagSignal("elevation", feedbackTags)));
+            calibration.setSolitudeMultiplier(adjustMultiplier(calibration.getSolitudeMultiplier(), componentRatios.get("solitude"), feedbackSignal, feedbackTagSignal("solitude", feedbackTags)));
+            calibration.setCurvesMultiplier(adjustMultiplier(calibration.getCurvesMultiplier(), componentRatios.get("curves"), feedbackSignal, feedbackTagSignal("curves", feedbackTags)));
+            calibration.setPoiMultiplier(adjustMultiplier(calibration.getPoiMultiplier(), componentRatios.get("poi"), feedbackSignal, feedbackTagSignal("poi", feedbackTags)));
             calibration.setSampleCount(Math.max(0, calibration.getSampleCount()) + 1);
             calibration.setUpdatedAt(ratedAt);
             updates.add(calibration);
@@ -367,9 +477,99 @@ public class RouteService {
         calibrationRepository.saveAll(updates);
     }
 
-    private double adjustMultiplier(double current, double componentRatio, double feedbackSignal) {
+    private List<String> normalizeFeedbackTags(List<String> rawTags) {
+        if (rawTags == null || rawTags.isEmpty()) {
+            return List.of();
+        }
+        LinkedHashSet<String> accepted = new LinkedHashSet<>();
+        for (String rawTag : rawTags) {
+            if (rawTag == null || rawTag.isBlank()) {
+                continue;
+            }
+            String normalized = rawTag.trim().toLowerCase(Locale.ROOT)
+                .replace('-', '_')
+                .replace(' ', '_');
+            if (SUPPORTED_FEEDBACK_TAGS.contains(normalized)) {
+                accepted.add(normalized);
+            }
+            if (accepted.size() >= MAX_FEEDBACK_TAGS) {
+                break;
+            }
+        }
+        return List.copyOf(accepted);
+    }
+
+    private String serializeFeedbackTags(List<String> feedbackTags) {
+        if (feedbackTags == null || feedbackTags.isEmpty()) {
+            return null;
+        }
+        try {
+            return objectMapper.writeValueAsString(feedbackTags);
+        } catch (JsonProcessingException ex) {
+            throw new IllegalArgumentException("Invalid feedbackTags payload", ex);
+        }
+    }
+
+    private double feedbackTagSignal(String component, List<String> feedbackTags) {
+        if (feedbackTags == null || feedbackTags.isEmpty()) {
+            return 0.0;
+        }
+        double signal = 0.0;
+        for (String tag : feedbackTags) {
+            signal += switch (tag) {
+                case "more_like_this" -> switch (component) {
+                    case "water", "greenery", "elevation", "solitude", "curves" -> 0.18;
+                    case "poi" -> 0.08;
+                    default -> 0.0;
+                };
+                case "too_urban" -> switch (component) {
+                    case "solitude" -> 0.80;
+                    case "greenery" -> 0.42;
+                    case "water" -> 0.22;
+                    case "poi" -> -0.36;
+                    default -> 0.0;
+                };
+                case "not_scenic" -> switch (component) {
+                    case "water", "greenery", "elevation", "solitude", "curves" -> 0.30;
+                    case "poi" -> -0.18;
+                    default -> 0.0;
+                };
+                case "too_boring" -> switch (component) {
+                    case "curves" -> 0.74;
+                    case "elevation" -> 0.32;
+                    case "poi" -> 0.18;
+                    default -> 0.0;
+                };
+                case "loved_quiet" -> switch (component) {
+                    case "solitude" -> 0.72;
+                    case "greenery" -> 0.24;
+                    default -> 0.0;
+                };
+                case "loved_curves" -> switch (component) {
+                    case "curves" -> 0.72;
+                    case "elevation" -> 0.26;
+                    default -> 0.0;
+                };
+                case "loved_water" -> component.equals("water") ? 0.80 : 0.0;
+                case "loved_greenery" -> switch (component) {
+                    case "greenery" -> 0.78;
+                    case "solitude" -> 0.18;
+                    default -> 0.0;
+                };
+                case "loved_stops" -> switch (component) {
+                    case "poi" -> 0.72;
+                    case "water", "elevation" -> 0.12;
+                    default -> 0.0;
+                };
+                default -> 0.0;
+            };
+        }
+        return clamp(signal, -1.0, 1.0);
+    }
+
+    private double adjustMultiplier(double current, double componentRatio, double feedbackSignal, double tagSignal) {
         double safeCurrent = current <= 0.0 ? 1.0 : current;
-        double delta = CALIBRATION_LEARNING_RATE * feedbackSignal * clamp01(componentRatio);
+        double delta = CALIBRATION_LEARNING_RATE * ((feedbackSignal * clamp01(componentRatio)) + tagSignal);
         return clamp(safeCurrent + delta, CALIBRATION_MIN_MULTIPLIER, CALIBRATION_MAX_MULTIPLIER);
     }
 
@@ -528,6 +728,7 @@ public class RouteService {
                 route.getId(),
                 "/routes/route/" + route.getId(),
                 route.getScenicScore() * 100.0,
+                parseScoreBreakdown(route.getScoreBreakdownJson()),
                 route.getTotalDistanceKm(),
                 route.getEstimatedDurationMinutes(),
                 buildRouteOptionExplanation(route, routeJob, baselineAccumulator)
@@ -593,6 +794,7 @@ public class RouteService {
                 option.routeId(),
                 option.routeUrl(),
                 option.scenicScore(),
+                option.scoreBreakdown(),
                 option.totalDistanceKm(),
                 option.estimatedDurationMinutes(),
                 diversifiedExplanation
@@ -1193,6 +1395,28 @@ public class RouteService {
         return defaults.withOverrides(overrides).normalized();
     }
 
+    private Map<String, Double> applyRouteWeightCalibrations(List<String> vibes, Map<String, Double> requestedPreferenceVector) {
+        PreferenceWeights baseWeights = resolveEffectivePreferenceWeights(vibes, requestedPreferenceVector);
+        List<RouteWeightCalibration> calibrations = calibrationRepository.findByVibeIn(
+            vibes == null || vibes.isEmpty() ? List.of(VibeCatalog.defaultVibe()) : vibes
+        );
+        if (calibrations.isEmpty()) {
+            return baseWeights.componentRatios();
+        }
+
+        double count = calibrations.size();
+        PreferenceWeights calibrated = new PreferenceWeights(
+            baseWeights.water() * calibrations.stream().mapToDouble(RouteWeightCalibration::getWaterMultiplier).sum() / count,
+            baseWeights.greenery() * calibrations.stream().mapToDouble(RouteWeightCalibration::getGreeneryMultiplier).sum() / count,
+            baseWeights.elevation() * calibrations.stream().mapToDouble(RouteWeightCalibration::getElevationMultiplier).sum() / count,
+            baseWeights.solitude() * calibrations.stream().mapToDouble(RouteWeightCalibration::getSolitudeMultiplier).sum() / count,
+            baseWeights.curves() * calibrations.stream().mapToDouble(RouteWeightCalibration::getCurvesMultiplier).sum() / count,
+            baseWeights.poi() * calibrations.stream().mapToDouble(RouteWeightCalibration::getPoiMultiplier).sum() / count
+        ).normalized();
+
+        return calibrated.componentRatios();
+    }
+
     private PreferenceWeights blendVibeDefaults(List<String> vibes) {
         List<String> activeVibes = (vibes == null || vibes.isEmpty()) ? List.of(VibeCatalog.defaultVibe()) : vibes;
         double water = 0.0;
@@ -1358,6 +1582,15 @@ public class RouteService {
                 "curves", normalized.curves(),
                 "poi", normalized.poi()
             );
+        }
+    }
+
+    private record FailureGuidance(String code,
+                                   String userMessage,
+                                   List<String> suggestedVibes,
+                                   List<String> suggestedActions) {
+        private static FailureGuidance empty() {
+            return new FailureGuidance(null, null, List.of(), List.of());
         }
     }
 

@@ -5,6 +5,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.moodride.datamodels.Route;
 import com.moodride.datamodels.RouteJob;
 import com.moodride.datamodels.RouteWaypoint;
+import com.moodride.datamodels.RouteWeightCalibration;
 import com.moodride.datamodels.ScenicScoreTile;
 import com.moodride.geo.H3Utils;
 import com.moodride.routeapi.dto.RouteDetailResponse;
@@ -214,6 +215,93 @@ class RouteServiceTest {
     }
 
     @Test
+    void rateRoutePersistsFeedbackTagsAndAppliesTagCalibration() {
+        UUID routeId = UUID.randomUUID();
+        UUID jobId = UUID.randomUUID();
+        UUID userId = UUID.randomUUID();
+
+        RouteJob job = new RouteJob(userId, 45.5152, -122.6784, 60, "scenic");
+        job.setId(jobId);
+        job.setVibesJson("[\"scenic\"]");
+
+        Route route = new Route();
+        route.setId(routeId);
+        route.setJobId(jobId);
+        route.setUserId(userId);
+        route.setVibe("scenic");
+
+        RouteWeightCalibration calibration = new RouteWeightCalibration("scenic");
+
+        lenient().when(routeRepository.findById(routeId)).thenReturn(Optional.of(route));
+        lenient().when(routeRepository.save(any(Route.class))).thenAnswer(invocation -> invocation.getArgument(0));
+        lenient().when(jobRepository.findById(jobId)).thenReturn(Optional.of(job));
+        lenient().when(calibrationRepository.findByVibeIn(anyCollection())).thenReturn(List.of(calibration));
+
+        RouteRatingResponse response = routeService.rateRoute(
+            routeId,
+            new RouteRatingRequest(4, List.of("too urban", "loved-water", "ignored_tag", "too_boring", "too_long", "too_short"))
+        );
+
+        assertThat(response.feedbackTags()).containsExactly("too_urban", "loved_water", "too_boring", "too_long");
+
+        ArgumentCaptor<Route> savedRoute = ArgumentCaptor.forClass(Route.class);
+        verify(routeRepository).save(savedRoute.capture());
+        assertThat(savedRoute.getValue().getFeedbackTagsJson()).contains("too_urban", "loved_water", "too_boring", "too_long");
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<RouteWeightCalibration>> savedCalibrations = ArgumentCaptor.forClass(List.class);
+        verify(calibrationRepository).saveAll(savedCalibrations.capture());
+        RouteWeightCalibration savedCalibration = savedCalibrations.getValue().getFirst();
+        assertThat(savedCalibration.getSolitudeMultiplier()).isGreaterThan(1.0);
+        assertThat(savedCalibration.getWaterMultiplier()).isGreaterThan(1.0);
+        assertThat(savedCalibration.getCurvesMultiplier()).isGreaterThan(1.0);
+        assertThat(savedCalibration.getPoiMultiplier()).isLessThan(1.0);
+        assertThat(savedCalibration.getSampleCount()).isEqualTo(1);
+    }
+
+    @Test
+    void submitRouteAppliesLearnedCalibrationToStoredPreferenceVector() throws Exception {
+        RouteWeightCalibration calibration = new RouteWeightCalibration("scenic");
+        calibration.setWaterMultiplier(1.30);
+        calibration.setGreeneryMultiplier(1.0);
+        calibration.setElevationMultiplier(1.0);
+        calibration.setSolitudeMultiplier(0.80);
+        calibration.setCurvesMultiplier(1.0);
+        calibration.setPoiMultiplier(1.0);
+        lenient().when(calibrationRepository.findByVibeIn(anyCollection())).thenReturn(List.of(calibration));
+
+        RouteRequest request = new RouteRequest(
+            UUID.randomUUID(),
+            45.5152,
+            -122.6784,
+            90,
+            List.of("scenic"),
+            null,
+            Map.of(
+                "water", 1.0,
+                "greenery", 1.0,
+                "elevation", 1.0,
+                "solitude", 1.0,
+                "curves", 1.0,
+                "poi", 1.0
+            )
+        );
+
+        routeService.submitRoute(request);
+
+        ArgumentCaptor<RouteJob> saved = ArgumentCaptor.forClass(RouteJob.class);
+        verify(jobRepository).save(saved.capture());
+        Map<String, Double> storedPreferences = new ObjectMapper().readValue(
+            saved.getValue().getPreferenceVector(),
+            new TypeReference<>() {
+            }
+        );
+
+        assertThat(storedPreferences.get("water")).isGreaterThan(storedPreferences.get("greenery"));
+        assertThat(storedPreferences.get("solitude")).isLessThan(storedPreferences.get("greenery"));
+    }
+
+    @Test
     void getRouteReturnsRichScenicMetadata() {
         UUID routeId = UUID.randomUUID();
         UUID jobId = UUID.randomUUID();
@@ -241,6 +329,9 @@ class RouteServiceTest {
         route.setTotalDistanceKm(62.3);
         route.setEstimatedDurationMinutes(88);
         route.setScenicScore(0.785);
+        route.setScoreBreakdownJson("""
+            {"final_score":0.785,"landscape_score":0.72,"vibe_fit_score":0.81,"urban_penalty":0.08}
+            """);
         route.setVibe("coastal");
         route.setGeneratedAt(Instant.parse("2026-04-02T14:30:05Z"));
         route.setExpiresAt(Instant.parse("2026-04-09T14:30:05Z"));
@@ -266,6 +357,11 @@ class RouteServiceTest {
         assertThat(response.scenicHighlights()).isNotEmpty();
         assertThat(response.routeOptions()).hasSize(1);
         assertThat(response.routeOptions().getFirst().profile()).isEqualTo("most_scenic");
+        assertThat(response.scoreBreakdown())
+            .containsEntry("final_score", 0.785)
+            .containsEntry("urban_penalty", 0.08);
+        assertThat(response.routeOptions().getFirst().scoreBreakdown())
+            .containsEntry("vibe_fit_score", 0.81);
         assertThat(response.computationTimeMs()).isEqualTo(4000);
     }
 
@@ -315,6 +411,27 @@ class RouteServiceTest {
         assertThat(response.routeOptions().get(1).profile()).isEqualTo("balanced");
         assertThat(response.routeOptions().get(2).profile()).isEqualTo("shorter");
         assertThat(response.routeId()).isEqualTo(option1.getId());
+    }
+
+    @Test
+    void getRouteJobStatusAddsGuidanceForUnavailableVibeFailures() {
+        UUID jobId = UUID.randomUUID();
+        UUID userId = UUID.randomUUID();
+
+        RouteJob job = new RouteJob(userId, 51.0447, -114.0719, 60, "countryside");
+        job.setId(jobId);
+        job.markFailed("No strong Countryside route found near this start within your 60-minute budget. Try a larger time budget, a less urban start point, or Scenic/Open Roads.");
+
+        lenient().when(jobRepository.findById(jobId)).thenReturn(Optional.of(job));
+        lenient().when(routeRepository.findByJobIdOrderByGeneratedAtAsc(jobId)).thenReturn(List.of());
+
+        RouteJobStatusResponse response = routeService.getRouteJobStatus(jobId);
+
+        assertThat(response.status()).isEqualTo("FAILED");
+        assertThat(response.failureCode()).isEqualTo("vibe_unavailable");
+        assertThat(response.userMessage()).contains("No strong Countryside route found");
+        assertThat(response.suggestedVibes()).contains("scenic", "open_roads");
+        assertThat(response.suggestedActions()).contains("Try Scenic", "Try Open Roads", "Increase time budget to 90 minutes");
     }
 
     @Test

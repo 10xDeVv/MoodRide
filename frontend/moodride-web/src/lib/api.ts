@@ -8,7 +8,20 @@ import {
   ScenicRegionsResponse
 } from "@/lib/types";
 
-const apiBase = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8080";
+// In the browser, use the same-origin proxy to avoid CORS issues.
+// In server-side code (SSR), call the upstream directly.
+const apiBase =
+  process.env.NEXT_PUBLIC_API_BASE_URL ??
+  (typeof window !== "undefined" ? "" : "https://app.moodrides.com");
+
+// Helper: build the correct URL for a given API path
+function apiUrl(path: string): string {
+  if (typeof window !== "undefined" && !process.env.NEXT_PUBLIC_API_BASE_URL) {
+    // Browser: route through Next.js proxy to avoid CORS
+    return `/api/proxy${path}`;
+  }
+  return `${apiBase}${path}`;
+}
 
 type ScenicRegionApiResponse = ScenicRegionsResponse["regions"][number] & {
   scenicScore?: number;
@@ -32,7 +45,7 @@ function sleep(ms: number): Promise<void> {
 }
 
 export async function submitRoute(payload: RouteRequest): Promise<RouteSubmissionResponse> {
-  const response = await fetch(`${apiBase}/api/routes`, {
+  const response = await fetch(apiUrl("/api/routes"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload)
@@ -41,7 +54,7 @@ export async function submitRoute(payload: RouteRequest): Promise<RouteSubmissio
 }
 
 export async function getJobStatus(jobId: string): Promise<RouteJobStatusResponse> {
-  const response = await fetch(`${apiBase}/api/routes/${jobId}`, { cache: "no-store" });
+  const response = await fetch(apiUrl(`/api/routes/${jobId}`), { cache: "no-store" });
   return handleJson<RouteJobStatusResponse>(response);
 }
 
@@ -51,7 +64,7 @@ export async function getRoute(routeId: string): Promise<RouteDetailResponse> {
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
-      const response = await fetch(`${apiBase}/api/routes/route/${routeId}`, { cache: "no-store" });
+      const response = await fetch(apiUrl(`/api/routes/route/${routeId}`), { cache: "no-store" });
       return await handleJson<RouteDetailResponse>(response);
     } catch (error) {
       lastError = error as Error;
@@ -80,7 +93,7 @@ export async function getScenicRegions(
   if (vibe) {
     params.set("vibe", vibe);
   }
-  const url = `${apiBase}/api/scenic-regions?${params.toString()}`;
+  const url = apiUrl(`/api/scenic-regions?${params.toString()}`);
   const response = await fetch(url, { cache: "no-store" });
   const payload = await handleJson<ScenicRegionsApiResponse>(response);
 
@@ -98,11 +111,49 @@ export async function getScenicRegions(
   };
 }
 
-export async function submitRouteRating(routeId: string, rating: number): Promise<RouteRatingResponse> {
-  const response = await fetch(`${apiBase}/api/routes/${routeId}/rating`, {
+export async function getRouteByUrl(routeUrl: string): Promise<RouteDetailResponse> {
+  const maxAttempts = 3;
+  let lastError: Error | null = null;
+
+  const targetUrl = (() => {
+    try {
+      if (routeUrl.startsWith("/api/")) return apiUrl(routeUrl);
+      if (routeUrl.startsWith("/routes/")) return apiUrl(`/api${routeUrl}`);
+      if (routeUrl.startsWith("http://") || routeUrl.startsWith("https://")) {
+        const parsed = new URL(routeUrl);
+        if (parsed.pathname.startsWith("/api/")) {
+          return apiUrl(`${parsed.pathname}${parsed.search}`);
+        }
+        if (parsed.pathname.startsWith("/routes/")) {
+          return apiUrl(`/api${parsed.pathname}${parsed.search}`);
+        }
+      }
+    } catch {
+      // Fall back to the original routeUrl below.
+    }
+    return routeUrl;
+  })();
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const response = await fetch(targetUrl, { cache: "no-store" });
+      return await handleJson<RouteDetailResponse>(response);
+    } catch (error) {
+      lastError = error as Error;
+      if (attempt < maxAttempts) {
+        await sleep(300 * attempt);
+      }
+    }
+  }
+
+  throw lastError ?? new Error("Route fetch by URL failed after retries.");
+}
+
+export async function submitRouteRating(routeId: string, rating: number, feedbackTags: string[] = []): Promise<RouteRatingResponse> {
+  const response = await fetch(apiUrl(`/api/routes/${routeId}/rating`), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ rating })
+    body: JSON.stringify({ rating, feedbackTags })
   });
   return handleJson<RouteRatingResponse>(response);
 }
@@ -140,4 +191,3 @@ export async function searchLocations(query: string, limit = 6): Promise<Locatio
     }))
     .filter((candidate) => Number.isFinite(candidate.lat) && Number.isFinite(candidate.lng));
 }
-

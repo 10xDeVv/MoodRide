@@ -1,6 +1,7 @@
 package com.moodride.eventmodels;
 
 import java.time.Instant;
+import java.util.List;
 import java.util.UUID;
 
 /**
@@ -11,7 +12,12 @@ public record RouteRatedEvent(
         UUID jobId,
         UUID userId,
         int rating,
-        Instant ratedAt
+        Instant ratedAt,
+        List<String> feedbackTags
 ) {
     public static final String TOPIC = "user.events.route_rated";
+
+    public RouteRatedEvent(UUID routeId, UUID jobId, UUID userId, int rating, Instant ratedAt) {
+        this(routeId, jobId, userId, rating, ratedAt, List.of());
+    }
 }
