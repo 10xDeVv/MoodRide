@@ -97,7 +97,7 @@ moodride:
         max-interval-ms: 5000
   cache:
     graph-warmup:
-      enabled: true
+      enabled: false
       interval-ms: 900000
       initial-delay-ms: 20000
 

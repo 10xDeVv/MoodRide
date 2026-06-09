@@ -321,7 +321,7 @@ function Get-TargetComponentsForVibes {
                 $targets.Add("greenery")
                 break
             }
-            { $_ -in @("forest", "nature_escape") } {
+            { $_ -in @("forest", "nature_escape", "nature") } {
                 $targets.Add("greenery")
                 $targets.Add("solitude")
                 break
@@ -331,12 +331,12 @@ function Get-TargetComponentsForVibes {
                 $targets.Add("solitude")
                 break
             }
-            { $_ -in @("countryside", "country", "quiet", "relaxing", "sunday_cruise", "smooth_cruise", "minimal_traffic", "low_traffic", "clear_my_head") } {
+            { $_ -in @("countryside", "country", "quiet", "relaxing", "sunday_cruise", "sunday", "smooth_cruise", "cruise", "minimal_traffic", "low_traffic", "clear_my_head") } {
                 $targets.Add("solitude")
                 $targets.Add("greenery")
                 break
             }
-            { $_ -in @("winding_roads", "adventure") } {
+            { $_ -in @("winding_roads", "winding", "adventure") } {
                 $targets.Add("curves")
                 $targets.Add("elevation")
                 break
@@ -352,7 +352,7 @@ function Get-TargetComponentsForVibes {
                 $targets.Add("poi")
                 break
             }
-            { $_ -in @("photo_worthy", "photo_run") } {
+            { $_ -in @("photo_worthy", "photo_run", "photo") } {
                 $targets.Add("water")
                 $targets.Add("elevation")
                 $targets.Add("poi")
@@ -529,6 +529,22 @@ function Get-ScenarioFlags {
     if ($missingExplanations -gt 0) {
         $flags.Add("missing_explanations")
     }
+    $missingV2Breakdowns = @($items | Where-Object { $null -eq $_.v2FinalScore }).Count
+    if ($missingV2Breakdowns -gt 0) {
+        $flags.Add("missing_v2_breakdown")
+    }
+    $unexpectedAlgorithms = @($items | Where-Object { $_.algorithmVersion -and $_.algorithmVersion -ne "hybrid_osrm_v2" })
+    if ($unexpectedAlgorithms.Count -gt 0) {
+        $flags.Add("unexpected_algorithm:" + (@($unexpectedAlgorithms | ForEach-Object { $_.algorithmVersion } | Select-Object -Unique) -join "+"))
+    }
+    $weakStrategyFits = @($items | Where-Object { $null -ne $_.v2StrategyFitScore -and $_.v2StrategyFitScore -lt 0.30 })
+    if ($weakStrategyFits.Count -gt 0) {
+        $flags.Add("weak_strategy_fit:" + (@($weakStrategyFits | ForEach-Object { $_.profile } | Select-Object -Unique) -join "+"))
+    }
+    $highStrategyPenalties = @($items | Where-Object { $null -ne $_.v2StrategyMismatchPenalty -and $_.v2StrategyMismatchPenalty -gt 0.50 })
+    if ($highStrategyPenalties.Count -gt 0) {
+        $flags.Add("strategy_mismatch:" + (@($highStrategyPenalties | ForEach-Object { $_.profile } | Select-Object -Unique) -join "+"))
+    }
 
     $leadingKeys = @($items | ForEach-Object { $_.leadingComponentKey } | Where-Object { $_ } | Select-Object -Unique)
     if ($leadingKeys.Count -eq 1 -and $items.Count -gt 1) {
@@ -679,6 +695,10 @@ foreach ($scenario in $selectedScenarios) {
                     $duration = Get-Number -Value (Get-PropertyValue -Object $option -PropertyName "estimatedDurationMinutes")
                     $distance = Get-Number -Value (Get-PropertyValue -Object $option -PropertyName "totalDistanceKm")
                     $score = Get-Number -Value (Get-PropertyValue -Object $option -PropertyName "scenicScore")
+                    $scoreBreakdown = Get-PropertyValue -Object $option -PropertyName "scoreBreakdown"
+                    if ($null -eq $scoreBreakdown -and $detail) {
+                        $scoreBreakdown = Get-PropertyValue -Object $detail -PropertyName "scoreBreakdown"
+                    }
 
                     $optionDetails += [pscustomobject]@{
                         profile = [string]$option.profile
@@ -691,6 +711,28 @@ foreach ($scenario in $selectedScenarios) {
                         qualityTier = if ($detail) { Get-PropertyValue -Object $detail -PropertyName "qualityTier" } else { $null }
                         algorithmVersion = if ($detail) { Get-PropertyValue -Object $detail -PropertyName "algorithmVersion" } else { $null }
                         computationTimeMs = if ($detail) { Get-Number -Value (Get-PropertyValue -Object $detail -PropertyName "computationTimeMs") } else { $null }
+                        scoreBreakdown = $scoreBreakdown
+                        v2FinalScore = Get-MapNumber -Map $scoreBreakdown -Key "final_score"
+                        v2LandscapeScore = Get-MapNumber -Map $scoreBreakdown -Key "landscape_score"
+                        v2VibeFitScore = Get-MapNumber -Map $scoreBreakdown -Key "vibe_fit_score"
+                        v2DriveQualityScore = Get-MapNumber -Map $scoreBreakdown -Key "drive_quality_score"
+                        v2RouteShapeScore = Get-MapNumber -Map $scoreBreakdown -Key "route_shape_score"
+                        v2ScenicMomentsScore = Get-MapNumber -Map $scoreBreakdown -Key "scenic_moments_score"
+                        v2UrbanPenalty = Get-MapNumber -Map $scoreBreakdown -Key "urban_penalty"
+                        v2StartEndPenalty = Get-MapNumber -Map $scoreBreakdown -Key "start_end_penalty"
+                        v2CorridorTileSamples = Get-MapNumber -Map $scoreBreakdown -Key "corridor_tile_samples"
+                        v2GeometryStrategyCode = Get-MapNumber -Map $scoreBreakdown -Key "geometry_strategy_code"
+                        v2StrategyFitScore = Get-MapNumber -Map $scoreBreakdown -Key "strategy_fit_score"
+                        v2StrategyMismatchPenalty = Get-MapNumber -Map $scoreBreakdown -Key "strategy_mismatch_penalty"
+                        v2WaterCorridorShare = Get-MapNumber -Map $scoreBreakdown -Key "water_corridor_share"
+                        v2OpenSpaceCorridorShare = Get-MapNumber -Map $scoreBreakdown -Key "open_space_corridor_share"
+                        v2QuietCorridorShare = Get-MapNumber -Map $scoreBreakdown -Key "quiet_corridor_share"
+                        v2PhotoPeakScore = Get-MapNumber -Map $scoreBreakdown -Key "photo_peak_score"
+                        v2CurveElevationCorridorShare = Get-MapNumber -Map $scoreBreakdown -Key "curve_elevation_corridor_share"
+                        v2RequestedAvgRadiusKm = Get-MapNumber -Map $scoreBreakdown -Key "requested_avg_radius_km"
+                        v2RequestedWaypointCount = Get-MapNumber -Map $scoreBreakdown -Key "requested_waypoint_count"
+                        v2DurationFitRatio = Get-MapNumber -Map $scoreBreakdown -Key "duration_fit_ratio"
+                        v2DurationCalibrationBucketMinutes = Get-MapNumber -Map $scoreBreakdown -Key "duration_calibration_bucket_minutes"
                         coordinates = $coordinates
                         coordinateCount = @($coordinates).Count
                         hasExplanation = ($null -ne $explanation)
@@ -779,6 +821,27 @@ foreach ($scenario in $selectedScenarios) {
             qualityTier = $null
             algorithmVersion = $null
             computationTimeMs = $null
+            v2FinalScore = $null
+            v2LandscapeScore = $null
+            v2VibeFitScore = $null
+            v2DriveQualityScore = $null
+            v2RouteShapeScore = $null
+            v2ScenicMomentsScore = $null
+            v2UrbanPenalty = $null
+            v2StartEndPenalty = $null
+            v2CorridorTileSamples = $null
+            v2GeometryStrategyCode = $null
+            v2StrategyFitScore = $null
+            v2StrategyMismatchPenalty = $null
+            v2WaterCorridorShare = $null
+            v2OpenSpaceCorridorShare = $null
+            v2QuietCorridorShare = $null
+            v2PhotoPeakScore = $null
+            v2CurveElevationCorridorShare = $null
+            v2RequestedAvgRadiusKm = $null
+            v2RequestedWaypointCount = $null
+            v2DurationFitRatio = $null
+            v2DurationCalibrationBucketMinutes = $null
             targetComponents = ($targetComponents -join "+")
             targetAverage = $null
             targetLift = $null
@@ -822,6 +885,27 @@ foreach ($scenario in $selectedScenarios) {
                 qualityTier = $option.qualityTier
                 algorithmVersion = $option.algorithmVersion
                 computationTimeMs = $option.computationTimeMs
+                v2FinalScore = $option.v2FinalScore
+                v2LandscapeScore = $option.v2LandscapeScore
+                v2VibeFitScore = $option.v2VibeFitScore
+                v2DriveQualityScore = $option.v2DriveQualityScore
+                v2RouteShapeScore = $option.v2RouteShapeScore
+                v2ScenicMomentsScore = $option.v2ScenicMomentsScore
+                v2UrbanPenalty = $option.v2UrbanPenalty
+                v2StartEndPenalty = $option.v2StartEndPenalty
+                v2CorridorTileSamples = $option.v2CorridorTileSamples
+                v2GeometryStrategyCode = $option.v2GeometryStrategyCode
+                v2StrategyFitScore = $option.v2StrategyFitScore
+                v2StrategyMismatchPenalty = $option.v2StrategyMismatchPenalty
+                v2WaterCorridorShare = $option.v2WaterCorridorShare
+                v2OpenSpaceCorridorShare = $option.v2OpenSpaceCorridorShare
+                v2QuietCorridorShare = $option.v2QuietCorridorShare
+                v2PhotoPeakScore = $option.v2PhotoPeakScore
+                v2CurveElevationCorridorShare = $option.v2CurveElevationCorridorShare
+                v2RequestedAvgRadiusKm = $option.v2RequestedAvgRadiusKm
+                v2RequestedWaypointCount = $option.v2RequestedWaypointCount
+                v2DurationFitRatio = $option.v2DurationFitRatio
+                v2DurationCalibrationBucketMinutes = $option.v2DurationCalibrationBucketMinutes
                 targetComponents = ($targetComponents -join "+")
                 targetAverage = $option.targetAverage
                 targetLift = $option.targetLift
@@ -896,14 +980,30 @@ if ($flagCounts.Count -eq 0) {
 $lines += ""
 $lines += "## Scenario Summary"
 $lines += ""
-$lines += "| Scenario | City | Budget | Vibes | Status | Routes | Score Spread | Duration Spread | Min Geometry Sep | Flags |"
-$lines += "|---|---|---:|---|---|---:|---:|---:|---:|---|"
+$lines += "| Scenario | City | Budget | Vibes | Status | Routes | Algorithm | Avg Strategy | Avg Strategy Fit | Avg Strategy Penalty | Avg Req Radius | Avg Req Wpts | Score Spread | Duration Spread | Min Geometry Sep | Avg V2 Final | Avg Urban Penalty | Flags |"
+$lines += "|---|---|---:|---|---|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|"
 foreach ($result in $scenarioResults) {
     $spread = if ($null -ne $result.scoreSpread) { "{0:N4}" -f [double]$result.scoreSpread } else { "n/a" }
     $durationSpreadLabel = if ($null -ne $result.durationSpreadMinutes) { "{0:N1}" -f [double]$result.durationSpreadMinutes } else { "n/a" }
     $minSep = if ($null -ne $result.geometryDiversity.minSeparationKm) { "{0:N2}" -f [double]$result.geometryDiversity.minSeparationKm } else { "n/a" }
     $flagLabel = if (@($result.flags).Count -gt 0) { @($result.flags) -join ", " } else { "none" }
-    $lines += "| $($result.scenarioId) | $($result.city) | $($result.timeBudgetMinutes) | $(@($result.vibes) -join '+') | $($result.status) | $($result.routeCount) | $spread | $durationSpreadLabel | $minSep | $flagLabel |"
+    $algorithms = @($result.options | ForEach-Object { $_.algorithmVersion } | Where-Object { $_ } | Select-Object -Unique)
+    $algorithmLabel = if ($algorithms.Count -gt 0) { $algorithms -join "+" } else { "n/a" }
+    $v2FinalScores = @($result.options | ForEach-Object { $_.v2FinalScore } | Where-Object { $null -ne $_ })
+    $v2UrbanPenalties = @($result.options | ForEach-Object { $_.v2UrbanPenalty } | Where-Object { $null -ne $_ })
+    $v2StrategyCodes = @($result.options | ForEach-Object { $_.v2GeometryStrategyCode } | Where-Object { $null -ne $_ })
+    $v2StrategyFits = @($result.options | ForEach-Object { $_.v2StrategyFitScore } | Where-Object { $null -ne $_ })
+    $v2StrategyPenalties = @($result.options | ForEach-Object { $_.v2StrategyMismatchPenalty } | Where-Object { $null -ne $_ })
+    $v2RequestedRadii = @($result.options | ForEach-Object { $_.v2RequestedAvgRadiusKm } | Where-Object { $null -ne $_ })
+    $v2RequestedWaypointCounts = @($result.options | ForEach-Object { $_.v2RequestedWaypointCount } | Where-Object { $null -ne $_ })
+    $avgStrategyCode = if ($v2StrategyCodes.Count -gt 0) { "{0:N1}" -f [double](($v2StrategyCodes | Measure-Object -Average).Average) } else { "n/a" }
+    $avgStrategyFit = if ($v2StrategyFits.Count -gt 0) { "{0:N4}" -f [double](($v2StrategyFits | Measure-Object -Average).Average) } else { "n/a" }
+    $avgStrategyPenalty = if ($v2StrategyPenalties.Count -gt 0) { "{0:N4}" -f [double](($v2StrategyPenalties | Measure-Object -Average).Average) } else { "n/a" }
+    $avgRequestedRadius = if ($v2RequestedRadii.Count -gt 0) { "{0:N2}" -f [double](($v2RequestedRadii | Measure-Object -Average).Average) } else { "n/a" }
+    $avgRequestedWaypointCount = if ($v2RequestedWaypointCounts.Count -gt 0) { "{0:N1}" -f [double](($v2RequestedWaypointCounts | Measure-Object -Average).Average) } else { "n/a" }
+    $avgV2Final = if ($v2FinalScores.Count -gt 0) { "{0:N4}" -f [double](($v2FinalScores | Measure-Object -Average).Average) } else { "n/a" }
+    $avgUrbanPenalty = if ($v2UrbanPenalties.Count -gt 0) { "{0:N4}" -f [double](($v2UrbanPenalties | Measure-Object -Average).Average) } else { "n/a" }
+    $lines += "| $($result.scenarioId) | $($result.city) | $($result.timeBudgetMinutes) | $(@($result.vibes) -join '+') | $($result.status) | $($result.routeCount) | $algorithmLabel | $avgStrategyCode | $avgStrategyFit | $avgStrategyPenalty | $avgRequestedRadius | $avgRequestedWaypointCount | $spread | $durationSpreadLabel | $minSep | $avgV2Final | $avgUrbanPenalty | $flagLabel |"
 }
 $lines += ""
 $lines += "## Output Files"

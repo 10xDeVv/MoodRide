@@ -3,6 +3,7 @@ package com.moodride.routeworker.algorithm;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.moodride.datamodels.RouteJob;
+import com.moodride.datamodels.RouteDurationCalibration;
 import com.moodride.datamodels.ScenicScoreTile;
 import com.moodride.datamodels.RouteWeightCalibration;
 import com.moodride.datamodels.scoring.ComponentScores;
@@ -12,6 +13,7 @@ import com.moodride.geo.H3Utils;
 import com.moodride.geo.VibeCatalog;
 import com.moodride.routeworker.config.ApplicationConfiguration;
 import com.moodride.routeworker.graph.RoadNode;
+import com.moodride.routeworker.repository.RouteDurationCalibrationRepository;
 import com.moodride.routeworker.repository.RouteWeightCalibrationRepository;
 import com.moodride.routeworker.repository.ScenicScoreTileRepository;
 import com.moodride.routeworker.service.OsrmTripClient;
@@ -55,6 +57,28 @@ public class RoutePlanner {
     private static final int TARGET_ANCHOR_LIMIT = 14;
     private static final int TARGET_ANCHOR_PAIR_LIMIT = 24;
     private static final double TARGET_ANCHOR_MIN_SEPARATION_KM = 2.0;
+    private static final String HYBRID_OSRM_V2 = "hybrid_osrm_v2";
+    private static final double V2_LANDSCAPE_WEIGHT = 0.38;
+    private static final double V2_VIBE_FIT_WEIGHT = 0.24;
+    private static final double V2_DRIVE_QUALITY_WEIGHT = 0.14;
+    private static final double V2_ROUTE_SHAPE_WEIGHT = 0.10;
+    private static final double V2_SCENIC_MOMENTS_WEIGHT = 0.14;
+    private static final double V2_URBAN_PENALTY_WEIGHT = 0.10;
+    private static final double V2_START_END_PENALTY_WEIGHT = 0.06;
+    private static final double V2_STRATEGY_MISMATCH_PENALTY_WEIGHT = 0.08;
+    private static final double V2_CONTINUITY_THRESHOLD = 0.45;
+    private static final int V2_EDGE_SAMPLE_COUNT = 4;
+    private static final int STRATEGY_ANCHOR_LIMIT = 12;
+    private static final int STRATEGY_PAIR_LIMIT = 18;
+    private static final double STRATEGY_ANCHOR_MIN_SEPARATION_KM = 1.6;
+    private static final double STRICT_RURAL_STRATEGY_MIN_FIT = 0.30;
+    private static final double STRICT_RURAL_MAX_URBAN_PRESSURE = 0.86;
+    private static final int DURATION_CALIBRATION_H3_RESOLUTION = 5;
+    private static final int MIN_DURATION_CALIBRATION_SAMPLES = 3;
+    private static final double MIN_RADIUS_MULTIPLIER = 0.75;
+    private static final double MAX_RADIUS_MULTIPLIER = 1.25;
+    private static final int MIN_LEARNED_WAYPOINT_COUNT = 2;
+    private static final int MAX_LEARNED_WAYPOINT_COUNT = 10;
 
     private static final List<Integer> WAYPOINT_VARIANTS = List.of(8, 6, 4);
     private static final Map<String, String> PREFERENCE_KEY_ALIASES = Map.of(
@@ -70,6 +94,7 @@ public class RoutePlanner {
 
     private final ScenicScoreTileRepository scenicScoreTileRepository;
     private final RouteWeightCalibrationRepository routeWeightCalibrationRepository;
+    private final RouteDurationCalibrationRepository routeDurationCalibrationRepository;
     private final OsrmTripClient osrmTripClient;
     private final ApplicationConfiguration config;
     private final ObjectMapper objectMapper;
@@ -77,12 +102,14 @@ public class RoutePlanner {
 
     public RoutePlanner(ScenicScoreTileRepository scenicScoreTileRepository,
                         RouteWeightCalibrationRepository routeWeightCalibrationRepository,
+                        RouteDurationCalibrationRepository routeDurationCalibrationRepository,
                         OsrmTripClient osrmTripClient,
                         ApplicationConfiguration config,
                         ObjectMapper objectMapper,
                         ScenicScoreCalculator scenicScoreCalculator) {
         this.scenicScoreTileRepository = scenicScoreTileRepository;
         this.routeWeightCalibrationRepository = routeWeightCalibrationRepository;
+        this.routeDurationCalibrationRepository = routeDurationCalibrationRepository;
         this.osrmTripClient = osrmTripClient;
         this.config = config;
         this.objectMapper = objectMapper;
@@ -98,31 +125,29 @@ public class RoutePlanner {
         List<String> requestVibes = resolveJobVibes(job);
         VibeCatalog.BlendedVibeProfile vibeProfile = VibeCatalog.blendProfiles(requestVibes);
         PreferenceWeights preferences = resolvePreferenceWeights(requestVibes, job.getPreferenceVector());
+        GeometryStrategy geometryStrategy = resolveGeometryStrategy(vibeProfile);
+        DurationCalibrationHint durationCalibration = resolveDurationCalibrationHint(start, job, geometryStrategy);
 
-        List<TileCandidate> scoredTiles = scoreNearbyTiles(start, job.getTimeBudgetMinutes(), preferences, vibeProfile);
+        List<TileCandidate> scoredTiles = scoreNearbyTiles(
+            start,
+            job.getTimeBudgetMinutes(),
+            preferences,
+            vibeProfile,
+            durationCalibration
+        );
         validateVibeAvailability(job, requestVibes, vibeProfile, scoredTiles);
-        List<List<RoadNode>> waypointVariants = buildWaypointRings(start, scoredTiles, job.getTimeBudgetMinutes(), vibeProfile);
-        List<RouteCandidate> hybridCandidates = collectHybridCandidates(job, waypointVariants, preferences);
-        if (usesTargetAnchors(vibeProfile)) {
-            List<List<RoadNode>> targetAnchorVariants = buildTargetAnchorWaypointRings(
-                start,
-                scoredTiles,
-                job.getTimeBudgetMinutes(),
-                vibeProfile
-            );
-            List<RouteCandidate> targetAnchorCandidates = collectHybridCandidates(job, targetAnchorVariants, preferences);
-            if (!targetAnchorCandidates.isEmpty()) {
-                hybridCandidates = combineCandidates(hybridCandidates, targetAnchorCandidates);
-                logger.info(
-                    "Hybrid routing used {} target-anchor waypoint variant(s) for job {}",
-                    targetAnchorVariants.size(),
-                    job.getId()
-                );
-            }
-        }
+        List<List<RoadNode>> waypointVariants = buildHybridV2WaypointRings(
+            start,
+            scoredTiles,
+            job.getTimeBudgetMinutes(),
+            vibeProfile,
+            geometryStrategy,
+            durationCalibration
+        );
+        List<RouteCandidate> hybridCandidates = collectHybridCandidates(job, waypointVariants, preferences, vibeProfile, geometryStrategy);
         if (hybridCandidates.isEmpty() || !hasDiverseCandidatePool(hybridCandidates, job.getTimeBudgetMinutes())) {
             List<List<RoadNode>> syntheticVariants = buildSyntheticWaypointRings(start, job.getTimeBudgetMinutes());
-            List<RouteCandidate> syntheticCandidates = collectHybridCandidates(job, syntheticVariants, preferences);
+            List<RouteCandidate> syntheticCandidates = collectHybridCandidates(job, syntheticVariants, preferences, vibeProfile, geometryStrategy);
             if (hybridCandidates.isEmpty()) {
                 hybridCandidates = syntheticCandidates;
             } else if (!syntheticCandidates.isEmpty()) {
@@ -134,7 +159,7 @@ public class RoutePlanner {
         }
         if (hybridCandidates.size() < ROUTE_OPTION_COUNT || needsBudgetRescue(hybridCandidates, job.getTimeBudgetMinutes())) {
             List<List<RoadNode>> budgetRescueVariants = buildBudgetRescueWaypointRings(start, job.getTimeBudgetMinutes());
-            List<RouteCandidate> budgetRescueCandidates = collectHybridCandidates(job, budgetRescueVariants, preferences);
+            List<RouteCandidate> budgetRescueCandidates = collectHybridCandidates(job, budgetRescueVariants, preferences, vibeProfile, geometryStrategy);
             if (!budgetRescueCandidates.isEmpty()) {
                 hybridCandidates = combineCandidates(hybridCandidates, budgetRescueCandidates);
                 logger.info("Hybrid routing used budget-rescue waypoint variants for job {}", job.getId());
@@ -142,21 +167,28 @@ public class RoutePlanner {
         }
         if (!hybridCandidates.isEmpty()) {
             List<RouteCandidate> differentiated = differentiateFlatScenicScores(hybridCandidates, job.getTimeBudgetMinutes());
-            List<RouteCandidate> selected = selectRouteOptions(differentiated, job.getTimeBudgetMinutes());
+            List<RouteCandidate> candidatePool = strictRuralCandidatePool(differentiated, vibeProfile, geometryStrategy, requestVibes, job);
+            List<RouteCandidate> selected = selectRouteOptions(candidatePool, job.getTimeBudgetMinutes());
             if (selected.size() >= ROUTE_OPTION_COUNT && minRouteSeparationKm(selected) < ROUTE_OPTION_MIN_SEPARATION_KM) {
                 List<RouteCandidate> rescueCandidates = collectHybridCandidates(
                     job,
                     buildDiversityRescueWaypointRings(start, job.getTimeBudgetMinutes()),
-                    preferences
+                    preferences,
+                    vibeProfile,
+                    geometryStrategy
                 );
                 if (!rescueCandidates.isEmpty()) {
                     List<RouteCandidate> expanded = differentiateFlatScenicScores(
                         combineCandidates(differentiated, rescueCandidates),
                         job.getTimeBudgetMinutes()
                     );
-                    selected = selectRouteOptions(expanded, job.getTimeBudgetMinutes());
+                    List<RouteCandidate> expandedPool = strictRuralCandidatePool(expanded, vibeProfile, geometryStrategy, requestVibes, job);
+                    selected = selectRouteOptions(expandedPool, job.getTimeBudgetMinutes());
                     logger.info("Hybrid routing used diversity-rescue waypoint variants for job {}", job.getId());
                 }
+            }
+            if (requiresStrictRuralOptions(vibeProfile, geometryStrategy) && selected.size() < ROUTE_OPTION_COUNT) {
+                throw noStrongStrategyRoute(requestVibes, job);
             }
             return selected;
         }
@@ -171,7 +203,9 @@ public class RoutePlanner {
 
     private List<RouteCandidate> collectHybridCandidates(RouteJob job,
                                                          List<List<RoadNode>> waypointVariants,
-                                                         PreferenceWeights preferences) {
+                                                         PreferenceWeights preferences,
+                                                         VibeCatalog.BlendedVibeProfile vibeProfile,
+                                                         GeometryStrategy geometryStrategy) {
         List<RouteCandidate> candidates = new ArrayList<>();
         int maxAllowedMinutes = maxAllowedMinutes(job.getTimeBudgetMinutes());
 
@@ -182,14 +216,29 @@ public class RoutePlanner {
             }
 
             var trip = result.get();
-            double scenicDensity = computeScenicDensity(trip.path(), preferences);
+            RouteScoreResult routeScore = computeHybridV2RouteScore(
+                trip.path(),
+                preferences,
+                vibeProfile,
+                job.getTimeBudgetMinutes(),
+                trip.durationMinutes(),
+                geometryStrategy
+            );
+            Map<String, Double> scoreBreakdown = withDurationCalibrationBreakdown(
+                routeScore.breakdown(),
+                variant,
+                startNode(job),
+                job.getTimeBudgetMinutes(),
+                trip.durationMinutes()
+            );
             RouteCandidate candidate = new RouteCandidate(
                 trip.path(),
-                scenicDensity,
+                routeScore.finalScore(),
                 trip.totalDistanceKm(),
                 trip.durationMinutes(),
-                "hybrid_osrm_v1",
-                null
+                HYBRID_OSRM_V2,
+                null,
+                scoreBreakdown
             );
             candidates.add(candidate);
         }
@@ -235,6 +284,41 @@ public class RoutePlanner {
         return (int) Math.ceil(Math.max(10.0, Math.max(1, targetMinutes) * MIN_USEFUL_DURATION_RATIO));
     }
 
+    private DurationCalibrationHint resolveDurationCalibrationHint(RoadNode start,
+                                                                   RouteJob job,
+                                                                   GeometryStrategy geometryStrategy) {
+        if (routeDurationCalibrationRepository == null || start == null || job == null) {
+            return DurationCalibrationHint.empty();
+        }
+
+        String routeMode = job.getRouteMode().apiValue();
+        String regionKey = durationCalibrationRegionKey(start);
+        int timeBudgetBucket = RouteDurationCalibration.bucketMinutes(job.getTimeBudgetMinutes());
+        String strategy = geometryStrategyName(geometryStrategy);
+        String calibrationId = RouteDurationCalibration.idFor(routeMode, regionKey, timeBudgetBucket, strategy);
+        return routeDurationCalibrationRepository.findById(calibrationId)
+            .filter(calibration -> calibration.getSampleCount() >= MIN_DURATION_CALIBRATION_SAMPLES)
+            .map(calibration -> new DurationCalibrationHint(
+                clamp(calibration.getRadiusMultiplier(), MIN_RADIUS_MULTIPLIER, MAX_RADIUS_MULTIPLIER),
+                clamp(calibration.getLearnedWaypointCount(), MIN_LEARNED_WAYPOINT_COUNT, MAX_LEARNED_WAYPOINT_COUNT),
+                calibration.getSampleCount()
+            ))
+            .orElse(DurationCalibrationHint.empty());
+    }
+
+    private String durationCalibrationRegionKey(RoadNode start) {
+        return H3Utils.getH3Index(
+            start.getLatitude(),
+            start.getLongitude(),
+            DURATION_CALIBRATION_H3_RESOLUTION
+        );
+    }
+
+    private String geometryStrategyName(GeometryStrategy geometryStrategy) {
+        GeometryStrategy activeStrategy = geometryStrategy == null ? GeometryStrategy.BALANCED_VARIETY : geometryStrategy;
+        return activeStrategy.name();
+    }
+
     private List<RouteCandidate> combineCandidates(List<RouteCandidate> left, List<RouteCandidate> right) {
         if ((left == null || left.isEmpty()) && (right == null || right.isEmpty())) {
             return List.of();
@@ -274,6 +358,59 @@ public class RoutePlanner {
         }
 
         return List.copyOf(selected);
+    }
+
+    private List<RouteCandidate> strictRuralCandidatePool(List<RouteCandidate> candidates,
+                                                          VibeCatalog.BlendedVibeProfile vibeProfile,
+                                                          GeometryStrategy geometryStrategy,
+                                                          List<String> requestVibes,
+                                                          RouteJob job) {
+        if (!requiresStrictRuralOptions(vibeProfile, geometryStrategy)) {
+            return candidates;
+        }
+
+        List<RouteCandidate> qualified = candidates.stream()
+            .filter(this::isStrictRuralCandidate)
+            .toList();
+        if (qualified.size() >= ROUTE_OPTION_COUNT) {
+            return qualified;
+        }
+
+        throw noStrongStrategyRoute(requestVibes, job);
+    }
+
+    private boolean requiresStrictRuralOptions(VibeCatalog.BlendedVibeProfile vibeProfile,
+                                               GeometryStrategy geometryStrategy) {
+        if (geometryStrategy != GeometryStrategy.QUIET_LOW_PRESSURE || vibeProfile == null) {
+            return false;
+        }
+        Set<String> profileIds = vibeProfile.profiles().stream()
+            .map(VibeCatalog.VibeProfile::id)
+            .collect(Collectors.toSet());
+        return containsAny(profileIds, "countryside", "sunday_cruise");
+    }
+
+    private boolean isStrictRuralCandidate(RouteCandidate candidate) {
+        Map<String, Double> breakdown = candidate.getScoreBreakdown();
+        double strategyFit = breakdownValue(breakdown, "strategy_fit_score", 0.0);
+        double urbanPressure = breakdownValue(breakdown, "urban_penalty", 1.0);
+        return strategyFit >= STRICT_RURAL_STRATEGY_MIN_FIT
+            && urbanPressure <= STRICT_RURAL_MAX_URBAN_PRESSURE;
+    }
+
+    private NoFeasibleRouteException noStrongStrategyRoute(List<String> requestVibes, RouteJob job) {
+        return new NoFeasibleRouteException(
+            "No strong " + VibeCatalog.displayList(requestVibes)
+                + " route found near this start within your " + job.getTimeBudgetMinutes()
+                + "-minute budget. Try a larger time budget, a less urban start point, or Scenic/Open Roads."
+        );
+    }
+
+    private double breakdownValue(Map<String, Double> breakdown, String key, double fallback) {
+        if (breakdown == null || !breakdown.containsKey(key) || breakdown.get(key) == null) {
+            return fallback;
+        }
+        return breakdown.get(key);
     }
 
     private boolean needsBudgetRescue(List<RouteCandidate> candidates, int targetMinutes) {
@@ -579,13 +716,17 @@ public class RoutePlanner {
         List<RouteCandidate> adjusted = new ArrayList<>(candidates.size());
         for (RouteCandidate candidate : candidates) {
             double fallbackScore = estimateFallbackScenicScore(candidate, minDistance, maxDistance, targetMinutes);
+            Map<String, Double> adjustedBreakdown = new LinkedHashMap<>(candidate.getScoreBreakdown());
+            adjustedBreakdown.put("final_score", fallbackScore);
+            adjustedBreakdown.put("fallback_selection_score", fallbackScore);
             adjusted.add(new RouteCandidate(
                 candidate.getWaypoints(),
                 fallbackScore,
                 candidate.getTotalDistanceKm(),
                 candidate.getEstimatedMinutes(),
                 candidate.getAlgorithmVersion(),
-                candidate.getBeamCandidates()
+                candidate.getBeamCandidates(),
+                adjustedBreakdown
             ));
         }
 
@@ -683,8 +824,9 @@ public class RoutePlanner {
     private List<TileCandidate> scoreNearbyTiles(RoadNode start,
                                                  int timeBudgetMinutes,
                                                  PreferenceWeights preferences,
-                                                 VibeCatalog.BlendedVibeProfile vibeProfile) {
-        int ringSize = determineRingSize(timeBudgetMinutes, vibeProfile);
+                                                 VibeCatalog.BlendedVibeProfile vibeProfile,
+                                                 DurationCalibrationHint durationCalibration) {
+        int ringSize = determineRingSize(timeBudgetMinutes, vibeProfile, durationCalibration);
         int configuredResolution = Math.max(0, config.getH3Resolution());
         List<ScenicScoreTile> nearbyTiles = findTilesNearStart(start, ringSize, configuredResolution);
 
@@ -705,7 +847,7 @@ public class RoutePlanner {
             return List.of();
         }
 
-        double targetRadiusKm = targetWaypointRadiusKm(timeBudgetMinutes, vibeProfile);
+        double targetRadiusKm = targetWaypointRadiusKm(timeBudgetMinutes, vibeProfile, durationCalibration);
         return nearbyTiles.stream()
             .filter(tile -> tile.getGeometry() != null && !tile.getGeometry().isEmpty())
             .map(tile -> {
@@ -873,6 +1015,28 @@ public class RoutePlanner {
         return sum / values.length;
     }
 
+    private double averageScores(List<Double> values) {
+        if (values == null || values.isEmpty()) {
+            return DEFAULT_SCENIC_FALLBACK;
+        }
+        return clamp01(values.stream()
+            .mapToDouble(Double::doubleValue)
+            .average()
+            .orElse(DEFAULT_SCENIC_FALLBACK));
+    }
+
+    private double standardDeviation(List<Double> values) {
+        if (values == null || values.size() < 2) {
+            return 0.0;
+        }
+        double mean = averageScores(values);
+        double variance = values.stream()
+            .mapToDouble(value -> Math.pow(clamp01(value) - mean, 2))
+            .average()
+            .orElse(0.0);
+        return Math.sqrt(variance);
+    }
+
     private List<ScenicScoreTile> findTilesNearStart(RoadNode start, int ringSize, int resolution) {
         String centerCell = H3Utils.getH3Index(start.getLatitude(), start.getLongitude(), resolution);
         List<String> nearbyCells = H3Utils.getKRing(centerCell, ringSize);
@@ -883,29 +1047,376 @@ public class RoutePlanner {
     }
 
     private int determineRingSize(int timeBudgetMinutes) {
-        return determineRingSize(timeBudgetMinutes, null);
+        return determineRingSize(timeBudgetMinutes, null, DurationCalibrationHint.empty());
     }
 
     private int determineRingSize(int timeBudgetMinutes, VibeCatalog.BlendedVibeProfile vibeProfile) {
+        return determineRingSize(timeBudgetMinutes, vibeProfile, DurationCalibrationHint.empty());
+    }
+
+    private int determineRingSize(int timeBudgetMinutes,
+                                  VibeCatalog.BlendedVibeProfile vibeProfile,
+                                  DurationCalibrationHint durationCalibration) {
         int dynamicRing = (int) Math.ceil(timeBudgetMinutes / 5.0);
         int min = Math.max(1, config.getTileSelectionRingMin());
         int max = Math.max(min, config.getTileSelectionRingMax());
         if (usesTargetAnchors(vibeProfile)) {
             dynamicRing = Math.max(dynamicRing, (int) Math.ceil(dynamicRing * 1.65));
         }
+        if (durationCalibration.active()) {
+            dynamicRing = Math.max(1, (int) Math.ceil(dynamicRing * durationCalibration.radiusMultiplier()));
+        }
         return Math.max(min, Math.min(max, dynamicRing));
+    }
+
+    private List<List<RoadNode>> buildHybridV2WaypointRings(RoadNode start,
+                                                            List<TileCandidate> scoredTiles,
+                                                            int timeBudgetMinutes,
+                                                            VibeCatalog.BlendedVibeProfile vibeProfile,
+                                                            GeometryStrategy geometryStrategy,
+                                                            DurationCalibrationHint durationCalibration) {
+        List<List<RoadNode>> variants = new ArrayList<>();
+        variants.addAll(buildWaypointRings(start, scoredTiles, timeBudgetMinutes, vibeProfile, durationCalibration));
+
+        List<List<RoadNode>> intentVariants = buildTargetAnchorWaypointRings(
+            start,
+            scoredTiles,
+            timeBudgetMinutes,
+            vibeProfile,
+            durationCalibration
+        );
+        variants.addAll(intentVariants);
+        List<List<RoadNode>> strategyVariants = buildStrategyWaypointRings(
+            start,
+            scoredTiles,
+            timeBudgetMinutes,
+            vibeProfile,
+            geometryStrategy,
+            durationCalibration
+        );
+        variants.addAll(strategyVariants);
+
+        if (!intentVariants.isEmpty()) {
+            logger.info(
+                "Hybrid OSRM v2 added {} intent-anchor waypoint variant(s)",
+                intentVariants.size()
+            );
+        }
+        if (!strategyVariants.isEmpty()) {
+            logger.info(
+                "Hybrid OSRM v2 added {} {} strategy waypoint variant(s)",
+                strategyVariants.size(),
+                geometryStrategy
+            );
+        }
+
+        return deduplicateRings(variants);
+    }
+
+    private List<List<RoadNode>> buildStrategyWaypointRings(RoadNode start,
+                                                            List<TileCandidate> scoredTiles,
+                                                            int timeBudgetMinutes,
+                                                            VibeCatalog.BlendedVibeProfile vibeProfile,
+                                                            GeometryStrategy geometryStrategy,
+                                                            DurationCalibrationHint durationCalibration) {
+        if (scoredTiles == null || scoredTiles.isEmpty() || geometryStrategy == null) {
+            return List.of();
+        }
+
+        double targetRadiusKm = targetWaypointRadiusKm(timeBudgetMinutes, vibeProfile, durationCalibration);
+        double minRadiusKm = Math.max(2.0, targetRadiusKm * strategyMinRadiusRatio(geometryStrategy));
+        double maxRadiusKm = Math.max(
+            minRadiusKm + 1.0,
+            Math.min(strategyMaxTimeRadiusKm(timeBudgetMinutes, geometryStrategy), targetRadiusKm * strategyMaxRadiusRatio(geometryStrategy))
+        );
+        List<TileCandidate> anchors = selectStrategyAnchors(
+            scoredTiles,
+            minRadiusKm,
+            maxRadiusKm,
+            candidate -> strategyAnchorScore(candidate, vibeProfile, geometryStrategy)
+        );
+        if (anchors.isEmpty()) {
+            return List.of();
+        }
+
+        return switch (geometryStrategy) {
+            case WATER_FOLLOWING -> buildWaterFollowingRings(start, anchors);
+            case OPEN_SPACE_ESCAPE -> buildDirectionalStrategyRings(start, anchors, 1.18, true);
+            case QUIET_LOW_PRESSURE -> buildQuietEscapeRings(start, anchors);
+            case PHOTO_PEAKS -> buildPeakStrategyRings(start, anchors);
+            case CURVY_ELEVATION -> buildDirectionalStrategyRings(start, anchors, 1.22, true);
+            case BALANCED_VARIETY -> buildBalancedVarietyRings(start, anchors);
+        };
+    }
+
+    private List<List<RoadNode>> buildWaterFollowingRings(RoadNode start, List<TileCandidate> anchors) {
+        List<TileCandidate> orderedByBearing = anchors.stream()
+            .sorted(Comparator.comparingDouble(anchor -> bearingDegrees(start, anchor.center())))
+            .toList();
+        List<List<RoadNode>> variants = new ArrayList<>();
+        for (int i = 0; i < orderedByBearing.size(); i++) {
+            TileCandidate first = orderedByBearing.get(i);
+            variants.add(List.of(start, first.center()));
+            TileCandidate second = orderedByBearing.get((i + 1) % orderedByBearing.size());
+            if (!first.equals(second)) {
+                variants.add(List.of(start, first.center(), second.center()));
+            }
+            if (orderedByBearing.size() >= 3) {
+                TileCandidate third = orderedByBearing.get((i + 2) % orderedByBearing.size());
+                variants.add(List.of(start, first.center(), second.center(), third.center()));
+            }
+        }
+        return deduplicateRings(variants);
+    }
+
+    private List<List<RoadNode>> buildQuietEscapeRings(RoadNode start, List<TileCandidate> anchors) {
+        List<List<RoadNode>> variants = new ArrayList<>(buildDirectionalStrategyRings(start, anchors, 1.32, false));
+        anchors.stream()
+            .limit(STRATEGY_ANCHOR_LIMIT)
+            .forEach(anchor -> {
+                double bearing = bearingDegrees(start, anchor.center());
+                double distanceKm = distanceKm(start, anchor.center());
+                variants.add(List.of(start, anchor.center()));
+                variants.add(List.of(
+                    start,
+                    anchor.center(),
+                    offsetNode(start, Math.max(3.0, distanceKm * 1.38), bearing + 18.0)
+                ));
+                variants.add(List.of(
+                    start,
+                    offsetNode(start, Math.max(3.0, distanceKm * 0.92), bearing - 16.0),
+                    anchor.center()
+                ));
+            });
+        return deduplicateRings(variants);
+    }
+
+    private List<List<RoadNode>> buildDirectionalStrategyRings(RoadNode start,
+                                                               List<TileCandidate> anchors,
+                                                               double radiusPush,
+                                                               boolean requireSectorGap) {
+        int sectorCount = Math.max(4, config.getSectorCount());
+        List<List<RoadNode>> variants = new ArrayList<>();
+        for (TileCandidate anchor : anchors) {
+            double bearing = bearingDegrees(start, anchor.center());
+            double distanceKm = distanceKm(start, anchor.center());
+            variants.add(List.of(
+                start,
+                anchor.center(),
+                offsetNode(start, Math.max(2.0, distanceKm * radiusPush), bearing + 36.0)
+            ));
+        }
+
+        int pairCount = 0;
+        for (int i = 0; i < anchors.size() && pairCount < STRATEGY_PAIR_LIMIT; i++) {
+            TileCandidate first = anchors.get(i);
+            int firstSector = calculateSector(start, first.center(), sectorCount);
+            for (int j = i + 1; j < anchors.size() && pairCount < STRATEGY_PAIR_LIMIT; j++) {
+                TileCandidate second = anchors.get(j);
+                int secondSector = calculateSector(start, second.center(), sectorCount);
+                int sectorGap = Math.abs(firstSector - secondSector);
+                int circularGap = Math.min(sectorGap, sectorCount - sectorGap);
+                if (requireSectorGap && circularGap < 2) {
+                    continue;
+                }
+                variants.add(List.of(start, first.center(), second.center()));
+                pairCount++;
+            }
+        }
+        return deduplicateRings(variants);
+    }
+
+    private List<List<RoadNode>> buildPeakStrategyRings(RoadNode start, List<TileCandidate> anchors) {
+        List<List<RoadNode>> variants = new ArrayList<>();
+        int limit = Math.min(anchors.size(), STRATEGY_ANCHOR_LIMIT);
+        for (int i = 0; i < limit; i++) {
+            TileCandidate anchor = anchors.get(i);
+            variants.add(List.of(start, anchor.center()));
+            if (i + 1 < limit) {
+                variants.add(List.of(start, anchor.center(), anchors.get(i + 1).center()));
+            }
+        }
+        if (limit >= 3) {
+            variants.add(List.of(start, anchors.get(0).center(), anchors.get(1).center(), anchors.get(2).center()));
+        }
+        return deduplicateRings(variants);
+    }
+
+    private List<List<RoadNode>> buildBalancedVarietyRings(RoadNode start, List<TileCandidate> anchors) {
+        int sectorCount = Math.max(4, config.getSectorCount());
+        List<TileCandidate> ordered = anchors.stream()
+            .sorted(Comparator.comparingInt(anchor -> calculateSector(start, anchor.center(), sectorCount)))
+            .toList();
+        List<List<RoadNode>> variants = new ArrayList<>();
+        for (int waypointCount : List.of(3, 4, 5)) {
+            if (ordered.size() < waypointCount) {
+                continue;
+            }
+            List<RoadNode> ring = new ArrayList<>();
+            ring.add(start);
+            for (int i = 0; i < waypointCount; i++) {
+                int index = (int) Math.floor((double) i * ordered.size() / waypointCount);
+                ring.add(ordered.get(index).center());
+            }
+            variants.add(List.copyOf(ring));
+        }
+        return deduplicateRings(variants);
+    }
+
+    private List<TileCandidate> selectStrategyAnchors(List<TileCandidate> scoredTiles,
+                                                      double minRadiusKm,
+                                                      double maxRadiusKm,
+                                                      ToDoubleFunction<TileCandidate> scorer) {
+        List<TileCandidate> anchors = new ArrayList<>();
+        scoredTiles.stream()
+            .filter(candidate -> candidate.distanceKm() >= minRadiusKm && candidate.distanceKm() <= maxRadiusKm)
+            .sorted(Comparator.comparingDouble(scorer).reversed())
+            .forEach(candidate -> {
+                if (anchors.size() >= STRATEGY_ANCHOR_LIMIT) {
+                    return;
+                }
+                boolean tooClose = anchors.stream()
+                    .anyMatch(anchor -> distanceKm(anchor.center(), candidate.center()) < STRATEGY_ANCHOR_MIN_SEPARATION_KM);
+                if (!tooClose) {
+                    anchors.add(candidate);
+                }
+            });
+        return List.copyOf(anchors);
+    }
+
+    private double strategyAnchorScore(TileCandidate candidate,
+                                       VibeCatalog.BlendedVibeProfile vibeProfile,
+                                       GeometryStrategy geometryStrategy) {
+        ScenicScoreTile tile = candidate.tile();
+        ComponentScores components = componentScores(tile);
+        double vibeFit = vibeFitScore(tile, vibeProfile);
+        double lowUrban = 1.0 - computeUrbanPressureScore(List.of(tile));
+        double lowRoadDensity = 1.0 - clamp01(tile.getRoadDensity());
+        double photoPeak = Math.max(components.water(), Math.max(components.elevation(), components.poi()));
+        return clamp01(switch (geometryStrategy) {
+            case WATER_FOLLOWING -> (components.water() * 0.58)
+                + (components.greenery() * 0.12)
+                + (vibeFit * 0.20)
+                + (lowUrban * 0.10);
+            case OPEN_SPACE_ESCAPE -> (openSpaceScore(tile, components) * 0.55)
+                + (components.solitude() * 0.20)
+                + (lowUrban * 0.15)
+                + (lowRoadDensity * 0.10);
+            case QUIET_LOW_PRESSURE -> (components.solitude() * 0.48)
+                + (components.greenery() * 0.20)
+                + (lowUrban * 0.22)
+                + (clamp01(tile.getDarknessScore()) * 0.10);
+            case PHOTO_PEAKS -> (photoPeak * 0.48)
+                + (components.poi() * 0.18)
+                + (vibeFit * 0.22)
+                + (candidate.scenicScore() * 0.12);
+            case CURVY_ELEVATION -> (components.curves() * 0.45)
+                + (components.elevation() * 0.30)
+                + (vibeFit * 0.15)
+                + (lowUrban * 0.10);
+            case BALANCED_VARIETY -> (candidate.scenicScore() * 0.42)
+                + (vibeFit * 0.34)
+                + (landscapeVarietyScore(components) * 0.24);
+        });
+    }
+
+    private double strategyMinRadiusRatio(GeometryStrategy geometryStrategy) {
+        return switch (geometryStrategy) {
+            case OPEN_SPACE_ESCAPE, CURVY_ELEVATION -> 0.65;
+            case QUIET_LOW_PRESSURE -> 0.95;
+            case PHOTO_PEAKS, WATER_FOLLOWING -> 0.45;
+            case BALANCED_VARIETY -> 0.50;
+        };
+    }
+
+    private double strategyMaxRadiusRatio(GeometryStrategy geometryStrategy) {
+        return switch (geometryStrategy) {
+            case OPEN_SPACE_ESCAPE, CURVY_ELEVATION -> 2.15;
+            case QUIET_LOW_PRESSURE -> 3.20;
+            case PHOTO_PEAKS -> 1.75;
+            case WATER_FOLLOWING -> 1.90;
+            case BALANCED_VARIETY -> 2.0;
+        };
+    }
+
+    private double strategyMaxTimeRadiusKm(int timeBudgetMinutes, GeometryStrategy geometryStrategy) {
+        return switch (geometryStrategy) {
+            case QUIET_LOW_PRESSURE -> Math.max(8.0, timeBudgetMinutes / 1.35);
+            default -> Math.max(3.0, timeBudgetMinutes / 2.1);
+        };
+    }
+
+    private double landscapeVarietyScore(ComponentScores components) {
+        List<Double> values = List.of(
+            components.water(),
+            components.greenery(),
+            components.elevation(),
+            components.solitude(),
+            components.curves()
+        );
+        double mean = averageScores(values);
+        double usefulSignals = values.stream()
+            .filter(value -> value >= 0.35)
+            .count() / (double) values.size();
+        return clamp01((mean * 0.55) + (usefulSignals * 0.45));
+    }
+
+    private GeometryStrategy resolveGeometryStrategy(VibeCatalog.BlendedVibeProfile vibeProfile) {
+        if (vibeProfile == null || vibeProfile.profiles().isEmpty()) {
+            return GeometryStrategy.BALANCED_VARIETY;
+        }
+
+        Set<String> profileIds = vibeProfile.profiles().stream()
+            .map(VibeCatalog.VibeProfile::id)
+            .collect(Collectors.toSet());
+        if (containsAny(profileIds, "photo_worthy", "photo_run", "date_night", "hidden_gems")) {
+            return GeometryStrategy.PHOTO_PEAKS;
+        }
+        if (containsAny(profileIds, "coastal", "riverside", "golden_hour", "sunset", "sunrise")) {
+            return GeometryStrategy.WATER_FOLLOWING;
+        }
+        if (containsAny(profileIds, "open_roads")) {
+            return GeometryStrategy.OPEN_SPACE_ESCAPE;
+        }
+        if (containsAny(profileIds, "quiet", "minimal_traffic", "clear_my_head", "relaxing", "smooth_cruise", "countryside", "forest", "nature_escape", "scenic_reset", "sunday_cruise")) {
+            return GeometryStrategy.QUIET_LOW_PRESSURE;
+        }
+        if (containsAny(profileIds, "mountain", "winding_roads", "adventure")) {
+            return GeometryStrategy.CURVY_ELEVATION;
+        }
+        return GeometryStrategy.BALANCED_VARIETY;
+    }
+
+    private boolean containsAny(Set<String> values, String... expected) {
+        if (values == null || values.isEmpty() || expected == null) {
+            return false;
+        }
+        for (String value : expected) {
+            if (values.contains(value)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private List<List<RoadNode>> buildWaypointRings(RoadNode start,
                                                     List<TileCandidate> scoredTiles,
                                                     int timeBudgetMinutes,
                                                     VibeCatalog.BlendedVibeProfile vibeProfile) {
+        return buildWaypointRings(start, scoredTiles, timeBudgetMinutes, vibeProfile, DurationCalibrationHint.empty());
+    }
+
+    private List<List<RoadNode>> buildWaypointRings(RoadNode start,
+                                                    List<TileCandidate> scoredTiles,
+                                                    int timeBudgetMinutes,
+                                                    VibeCatalog.BlendedVibeProfile vibeProfile,
+                                                    DurationCalibrationHint durationCalibration) {
         if (scoredTiles.isEmpty()) {
             return List.of();
         }
 
         int sectorCount = Math.max(4, config.getSectorCount());
-        double targetRadiusKm = targetWaypointRadiusKm(timeBudgetMinutes, vibeProfile);
+        double targetRadiusKm = targetWaypointRadiusKm(timeBudgetMinutes, vibeProfile, durationCalibration);
         boolean outwardRouting = usesTargetAnchors(vibeProfile);
         double minRadiusKm = targetRadiusKm * (outwardRouting ? 0.50 : 0.45);
         double maxRadiusKm = targetRadiusKm * (outwardRouting ? 1.90 : 2.0);
@@ -935,7 +1446,7 @@ public class RoutePlanner {
             .toList();
 
         List<List<RoadNode>> variants = new ArrayList<>();
-        for (Integer waypointCount : WAYPOINT_VARIANTS) {
+        for (Integer waypointCount : waypointVariants(durationCalibration)) {
             if (orderedSectorTiles.size() < waypointCount) {
                 continue;
             }
@@ -974,11 +1485,19 @@ public class RoutePlanner {
                                                                List<TileCandidate> scoredTiles,
                                                                int timeBudgetMinutes,
                                                                VibeCatalog.BlendedVibeProfile vibeProfile) {
+        return buildTargetAnchorWaypointRings(start, scoredTiles, timeBudgetMinutes, vibeProfile, DurationCalibrationHint.empty());
+    }
+
+    private List<List<RoadNode>> buildTargetAnchorWaypointRings(RoadNode start,
+                                                               List<TileCandidate> scoredTiles,
+                                                               int timeBudgetMinutes,
+                                                               VibeCatalog.BlendedVibeProfile vibeProfile,
+                                                               DurationCalibrationHint durationCalibration) {
         if (scoredTiles == null || scoredTiles.isEmpty()) {
             return List.of();
         }
 
-        double targetRadiusKm = targetWaypointRadiusKm(timeBudgetMinutes, vibeProfile);
+        double targetRadiusKm = targetWaypointRadiusKm(timeBudgetMinutes, vibeProfile, durationCalibration);
         double minRadiusKm = Math.max(3.0, targetRadiusKm * 0.55);
         double maxRadiusKm = Math.max(minRadiusKm + 1.0, Math.min(timeBudgetMinutes / 2.2, targetRadiusKm * 1.85));
         int sectorCount = Math.max(4, config.getSectorCount());
@@ -1131,9 +1650,33 @@ public class RoutePlanner {
     }
 
     private double targetWaypointRadiusKm(int timeBudgetMinutes, VibeCatalog.BlendedVibeProfile vibeProfile) {
+        return targetWaypointRadiusKm(timeBudgetMinutes, vibeProfile, DurationCalibrationHint.empty());
+    }
+
+    private double targetWaypointRadiusKm(int timeBudgetMinutes,
+                                          VibeCatalog.BlendedVibeProfile vibeProfile,
+                                          DurationCalibrationHint durationCalibration) {
         boolean outwardRouting = usesTargetAnchors(vibeProfile);
         double target = outwardRouting ? timeBudgetMinutes / 4.2 : timeBudgetMinutes / 6.5;
-        return Math.max(2.5, target);
+        double radiusMultiplier = durationCalibration.active() ? durationCalibration.radiusMultiplier() : 1.0;
+        return Math.max(2.5, target * radiusMultiplier);
+    }
+
+    private List<Integer> waypointVariants(DurationCalibrationHint durationCalibration) {
+        if (!durationCalibration.active()) {
+            return WAYPOINT_VARIANTS;
+        }
+
+        int learned = (int) Math.round(durationCalibration.learnedWaypointCount());
+        learned = Math.max(MIN_LEARNED_WAYPOINT_COUNT, Math.min(MAX_LEARNED_WAYPOINT_COUNT, learned));
+        List<Integer> variants = new ArrayList<>();
+        variants.add(learned);
+        variants.add(Math.max(MIN_LEARNED_WAYPOINT_COUNT, learned - 1));
+        variants.add(Math.min(MAX_LEARNED_WAYPOINT_COUNT, learned + 1));
+        variants.addAll(WAYPOINT_VARIANTS);
+        return variants.stream()
+            .distinct()
+            .toList();
     }
 
     private boolean usesTargetAnchors(VibeCatalog.BlendedVibeProfile vibeProfile) {
@@ -1201,31 +1744,335 @@ public class RoutePlanner {
         return normalized;
     }
 
+    private RouteScoreResult computeHybridV2RouteScore(List<RoadNode> path,
+                                                       PreferenceWeights preferences,
+                                                       VibeCatalog.BlendedVibeProfile vibeProfile,
+                                                       int targetMinutes,
+                                                       int durationMinutes,
+                                                       GeometryStrategy geometryStrategy) {
+        if (path == null || path.size() < 2) {
+            return new RouteScoreResult(0.0, Map.of("final_score", 0.0));
+        }
+
+        CorridorTileCoverage coverage = findCorridorTileCoverage(path);
+        List<ScenicScoreTile> tiles = coverage.orderedTiles();
+        if (tiles.isEmpty()) {
+            return fallbackRouteScoreResult(path, preferences, targetMinutes, durationMinutes, geometryStrategy);
+        }
+
+        List<Double> landscapeScores = tiles.stream()
+            .map(tile -> scoreTile(tile, preferences))
+            .toList();
+        double landscapeScore = averageScores(landscapeScores);
+        double vibeFitScore = tiles.stream()
+            .mapToDouble(tile -> vibeFitScore(tile, vibeProfile))
+            .average()
+            .orElse(landscapeScore);
+        double driveQualityScore = computeDriveQualityScore(path, tiles);
+        double routeShapeScore = computeRouteShapeScore(path, targetMinutes, durationMinutes);
+        double scenicMomentsScore = computeScenicMomentsScore(landscapeScores);
+        double urbanPenalty = computeUrbanPressureScore(tiles);
+        double edgePenalty = computeStartEndPenalty(tiles, preferences);
+        StrategyCorridorMetrics strategyMetrics = computeStrategyCorridorMetrics(tiles, landscapeScores, geometryStrategy);
+
+        double weightedScore = (landscapeScore * V2_LANDSCAPE_WEIGHT)
+            + (vibeFitScore * V2_VIBE_FIT_WEIGHT)
+            + (driveQualityScore * V2_DRIVE_QUALITY_WEIGHT)
+            + (routeShapeScore * V2_ROUTE_SHAPE_WEIGHT)
+            + (scenicMomentsScore * V2_SCENIC_MOMENTS_WEIGHT)
+            - (urbanPenalty * V2_URBAN_PENALTY_WEIGHT)
+            - (edgePenalty * V2_START_END_PENALTY_WEIGHT)
+            - (strategyMetrics.mismatchPenalty() * V2_STRATEGY_MISMATCH_PENALTY_WEIGHT);
+
+        double finalScore = clamp01(weightedScore);
+        Map<String, Double> breakdown = new LinkedHashMap<>();
+        breakdown.put("final_score", finalScore);
+        breakdown.put("landscape_score", landscapeScore);
+        breakdown.put("vibe_fit_score", vibeFitScore);
+        breakdown.put("drive_quality_score", driveQualityScore);
+        breakdown.put("route_shape_score", routeShapeScore);
+        breakdown.put("scenic_moments_score", scenicMomentsScore);
+        breakdown.put("urban_penalty", urbanPenalty);
+        breakdown.put("start_end_penalty", edgePenalty);
+        breakdown.put("strategy_fit_score", strategyMetrics.strategyFitScore());
+        breakdown.put("strategy_mismatch_penalty", strategyMetrics.mismatchPenalty());
+        breakdown.put("water_corridor_share", strategyMetrics.waterCorridorShare());
+        breakdown.put("open_space_corridor_share", strategyMetrics.openSpaceCorridorShare());
+        breakdown.put("quiet_corridor_share", strategyMetrics.quietCorridorShare());
+        breakdown.put("photo_peak_score", strategyMetrics.photoPeakScore());
+        breakdown.put("curve_elevation_corridor_share", strategyMetrics.curveElevationCorridorShare());
+        breakdown.put("corridor_tile_samples", (double) tiles.size());
+        breakdown.put("target_minutes", (double) targetMinutes);
+        breakdown.put("duration_minutes", (double) durationMinutes);
+        breakdown.put("geometry_strategy_code", geometryStrategyCode(geometryStrategy));
+        return new RouteScoreResult(finalScore, breakdown);
+    }
+
+    private RouteScoreResult fallbackRouteScoreResult(List<RoadNode> path,
+                                                      PreferenceWeights preferences,
+                                                      int targetMinutes,
+                                                      int durationMinutes,
+                                                      GeometryStrategy geometryStrategy) {
+        double fallbackScore = estimateFallbackScenicDensity(path, preferences);
+        Map<String, Double> breakdown = new LinkedHashMap<>();
+        breakdown.put("final_score", fallbackScore);
+        breakdown.put("fallback_scenic_density", fallbackScore);
+        breakdown.put("landscape_score", fallbackScore);
+        breakdown.put("vibe_fit_score", fallbackScore);
+        breakdown.put("drive_quality_score", estimateCurvatureScore(path));
+        breakdown.put("route_shape_score", computeRouteShapeScore(path, targetMinutes, durationMinutes));
+        breakdown.put("scenic_moments_score", fallbackScore);
+        breakdown.put("urban_penalty", 0.0);
+        breakdown.put("start_end_penalty", 0.0);
+        breakdown.put("strategy_fit_score", fallbackScore);
+        breakdown.put("strategy_mismatch_penalty", 0.0);
+        breakdown.put("water_corridor_share", fallbackScore);
+        breakdown.put("open_space_corridor_share", fallbackScore);
+        breakdown.put("quiet_corridor_share", fallbackScore);
+        breakdown.put("photo_peak_score", fallbackScore);
+        breakdown.put("curve_elevation_corridor_share", fallbackScore);
+        breakdown.put("corridor_tile_samples", 0.0);
+        breakdown.put("target_minutes", (double) targetMinutes);
+        breakdown.put("duration_minutes", (double) durationMinutes);
+        breakdown.put("geometry_strategy_code", geometryStrategyCode(geometryStrategy));
+        return new RouteScoreResult(fallbackScore, breakdown);
+    }
+
+    private Map<String, Double> withDurationCalibrationBreakdown(Map<String, Double> source,
+                                                                 List<RoadNode> requestedWaypoints,
+                                                                 RoadNode start,
+                                                                 int targetMinutes,
+                                                                 int durationMinutes) {
+        Map<String, Double> breakdown = new LinkedHashMap<>(source == null ? Map.of() : source);
+        double requestedRadiusKm = requestedAverageRadiusKm(start, requestedWaypoints);
+        int requestedWaypointCount = requestedWaypointCount(requestedWaypoints);
+        breakdown.put("requested_avg_radius_km", requestedRadiusKm);
+        breakdown.put("requested_waypoint_count", (double) requestedWaypointCount);
+        breakdown.put("duration_fit_ratio", targetMinutes <= 0 ? 1.0 : durationMinutes / (double) targetMinutes);
+        breakdown.put("duration_calibration_bucket_minutes", (double) RouteDurationCalibration.bucketMinutes(targetMinutes));
+        return breakdown;
+    }
+
+    private RoadNode startNode(RouteJob job) {
+        return new RoadNode(job.getStartLatitude(), job.getStartLongitude());
+    }
+
+    private double requestedAverageRadiusKm(RoadNode start, List<RoadNode> requestedWaypoints) {
+        if (start == null || requestedWaypoints == null || requestedWaypoints.size() < 2) {
+            return 0.0;
+        }
+        return requestedWaypoints.stream()
+            .skip(1)
+            .mapToDouble(point -> distanceKm(start, point))
+            .average()
+            .orElse(0.0);
+    }
+
+    private int requestedWaypointCount(List<RoadNode> requestedWaypoints) {
+        if (requestedWaypoints == null || requestedWaypoints.size() < 2) {
+            return 0;
+        }
+        return requestedWaypoints.size() - 1;
+    }
+
+    private double geometryStrategyCode(GeometryStrategy geometryStrategy) {
+        GeometryStrategy activeStrategy = geometryStrategy == null ? GeometryStrategy.BALANCED_VARIETY : geometryStrategy;
+        return activeStrategy.ordinal();
+    }
+
+    private StrategyCorridorMetrics computeStrategyCorridorMetrics(List<ScenicScoreTile> tiles,
+                                                                   List<Double> landscapeScores,
+                                                                   GeometryStrategy geometryStrategy) {
+        if (tiles == null || tiles.isEmpty()) {
+            return new StrategyCorridorMetrics(0.0, 0.0, 0.0, 0.0, 0.0, DEFAULT_SCENIC_FALLBACK, 0.0);
+        }
+
+        double waterShare = 0.0;
+        double openShare = 0.0;
+        double quietShare = 0.0;
+        double curveElevationShare = 0.0;
+        double photoPeak = 0.0;
+        List<Double> openSignals = new ArrayList<>();
+        List<Double> quietSignals = new ArrayList<>();
+        List<Double> curveElevationSignals = new ArrayList<>();
+        for (ScenicScoreTile tile : tiles) {
+            ComponentScores components = componentScores(tile);
+            double urbanPressure = computeUrbanPressureScore(List.of(tile));
+            double openSpace = openSpaceScore(tile, components);
+            double photoSignal = Math.max(components.water(), Math.max(components.elevation(), components.poi()));
+            double curveElevationSignal = Math.max(components.curves(), components.elevation());
+
+            double lowUrbanPressure = 1.0 - urbanPressure;
+            double quietSignal = clamp01(
+                (components.solitude() * 0.48)
+                    + (components.greenery() * 0.18)
+                    + (lowUrbanPressure * 0.24)
+                    + (clamp01(tile.getDarknessScore()) * 0.10)
+            );
+            double openSignal = clamp01((openSpace * 0.74) + (lowUrbanPressure * 0.26));
+
+            double openMembership = gradedMembership(openSignal, 0.40, 0.72);
+            double quietMembership = gradedMembership(quietSignal, 0.40, 0.72);
+            double curveElevationMembership = gradedMembership(curveElevationSignal, 0.38, 0.70);
+
+            waterShare += gradedMembership(components.water(), 0.38, 0.70);
+            openShare += openMembership;
+            quietShare += quietMembership;
+            curveElevationShare += curveElevationMembership;
+            openSignals.add(openMembership);
+            quietSignals.add(quietMembership);
+            curveElevationSignals.add(curveElevationMembership);
+            photoPeak = Math.max(photoPeak, photoSignal);
+        }
+
+        double sampleCount = Math.max(1.0, tiles.size());
+        waterShare = clamp01(waterShare / sampleCount);
+        openShare = clamp01(openShare / sampleCount);
+        quietShare = clamp01(quietShare / sampleCount);
+        curveElevationShare = clamp01(curveElevationShare / sampleCount);
+        double scenicPeak = landscapeScores == null || landscapeScores.isEmpty()
+            ? DEFAULT_SCENIC_FALLBACK
+            : landscapeScores.stream().mapToDouble(Double::doubleValue).max().orElse(DEFAULT_SCENIC_FALLBACK);
+        photoPeak = clamp01(Math.max(photoPeak, scenicPeak));
+
+        GeometryStrategy activeStrategy = geometryStrategy == null ? GeometryStrategy.BALANCED_VARIETY : geometryStrategy;
+        double strategyFit = switch (activeStrategy) {
+            case WATER_FOLLOWING -> waterShare;
+            case OPEN_SPACE_ESCAPE -> corridorStretchFit(openShare, openSignals);
+            case QUIET_LOW_PRESSURE -> corridorStretchFit(quietShare, quietSignals);
+            case PHOTO_PEAKS -> photoPeak;
+            case CURVY_ELEVATION -> corridorStretchFit(curveElevationShare, curveElevationSignals);
+            case BALANCED_VARIETY -> computeBalancedStrategyFit(waterShare, openShare, quietShare, photoPeak, curveElevationShare);
+        };
+        double mismatchPenalty = strategyMismatchPenalty(activeStrategy, strategyFit);
+        return new StrategyCorridorMetrics(
+            waterShare,
+            openShare,
+            quietShare,
+            curveElevationShare,
+            photoPeak,
+            clamp01(strategyFit),
+            mismatchPenalty
+        );
+    }
+
+    private double computeBalancedStrategyFit(double waterShare,
+                                              double openShare,
+                                              double quietShare,
+                                              double photoPeak,
+                                              double curveElevationShare) {
+        double shareVariety = List.of(waterShare, openShare, quietShare, curveElevationShare).stream()
+            .filter(value -> value >= 0.25)
+            .count() / 4.0;
+        return clamp01((shareVariety * 0.58) + (photoPeak * 0.22) + (average(waterShare, openShare, quietShare, curveElevationShare) * 0.20));
+    }
+
+    private double strategyMismatchPenalty(GeometryStrategy geometryStrategy, double strategyFit) {
+        double expectedFit = switch (geometryStrategy) {
+            case PHOTO_PEAKS -> 0.68;
+            case BALANCED_VARIETY -> 0.38;
+            case WATER_FOLLOWING, OPEN_SPACE_ESCAPE, QUIET_LOW_PRESSURE, CURVY_ELEVATION -> 0.34;
+        };
+        return clamp01((expectedFit - strategyFit) / Math.max(0.1, expectedFit));
+    }
+
+    private double corridorStretchFit(double averageMembership, List<Double> memberships) {
+        return clamp01((averageMembership * 0.62) + (topAverage(memberships, 0.35) * 0.38));
+    }
+
+    private double topAverage(List<Double> values, double topFraction) {
+        if (values == null || values.isEmpty()) {
+            return 0.0;
+        }
+        int limit = Math.max(1, (int) Math.ceil(values.size() * clamp01(topFraction)));
+        return values.stream()
+            .sorted(Comparator.reverseOrder())
+            .limit(limit)
+            .mapToDouble(Double::doubleValue)
+            .average()
+            .orElse(0.0);
+    }
+
+    private double gradedMembership(double value, double floor, double fullCreditAt) {
+        double span = Math.max(0.01, fullCreditAt - floor);
+        return clamp01((value - floor) / span);
+    }
+
+    private double computeDriveQualityScore(List<RoadNode> path, List<ScenicScoreTile> tiles) {
+        double curvature = estimateCurvatureScore(path);
+        double lowUrbanPressure = 1.0 - computeUrbanPressureScore(tiles);
+        return clamp01((curvature * 0.62) + (lowUrbanPressure * 0.38));
+    }
+
+    private double computeRouteShapeScore(List<RoadNode> path, int targetMinutes, int durationMinutes) {
+        double safeTarget = Math.max(1.0, targetMinutes);
+        double budgetFit = 1.0 - clamp01(Math.abs(durationMinutes - safeTarget) / safeTarget);
+        double utilization = clamp01(durationMinutes / safeTarget);
+        double closureDistanceKm = distanceKm(path.getFirst(), path.getLast());
+        double closureScore = clamp01(1.0 - (closureDistanceKm / 10.0));
+        return clamp01((budgetFit * 0.45) + (utilization * 0.25) + (closureScore * 0.30));
+    }
+
+    private double computeScenicMomentsScore(List<Double> landscapeScores) {
+        if (landscapeScores == null || landscapeScores.isEmpty()) {
+            return DEFAULT_SCENIC_FALLBACK;
+        }
+
+        double peakScore = landscapeScores.stream()
+            .mapToDouble(Double::doubleValue)
+            .max()
+            .orElse(DEFAULT_SCENIC_FALLBACK);
+        double continuityScore = landscapeScores.stream()
+            .filter(score -> score >= V2_CONTINUITY_THRESHOLD)
+            .count() / (double) landscapeScores.size();
+        double consistencyScore = 1.0 - clamp01(standardDeviation(landscapeScores) / 0.35);
+
+        return clamp01((peakScore * 0.32) + (continuityScore * 0.46) + (consistencyScore * 0.22));
+    }
+
+    private double computeUrbanPressureScore(List<ScenicScoreTile> tiles) {
+        if (tiles == null || tiles.isEmpty()) {
+            return 0.0;
+        }
+        return clamp01(
+            tiles.stream()
+                .mapToDouble(tile -> (clamp01(tile.getUrbanPenaltyScore()) * 0.65)
+                    + (clamp01(tile.getBuildingDensityScore()) * 0.25)
+                    + (clamp01(tile.getRoadDensity()) * 0.10))
+                .average()
+                .orElse(0.0)
+        );
+    }
+
+    private double computeStartEndPenalty(List<ScenicScoreTile> orderedTiles, PreferenceWeights preferences) {
+        if (orderedTiles == null || orderedTiles.isEmpty()) {
+            return 0.0;
+        }
+
+        List<ScenicScoreTile> edgeTiles = new ArrayList<>();
+        int edgeCount = Math.min(V2_EDGE_SAMPLE_COUNT, orderedTiles.size());
+        for (int i = 0; i < edgeCount; i++) {
+            edgeTiles.add(orderedTiles.get(i));
+        }
+        int trailingStart = Math.max(edgeCount, orderedTiles.size() - edgeCount);
+        for (int i = trailingStart; i < orderedTiles.size(); i++) {
+            edgeTiles.add(orderedTiles.get(i));
+        }
+
+        double edgeScenic = edgeTiles.stream()
+            .mapToDouble(tile -> scoreTile(tile, preferences))
+            .average()
+            .orElse(DEFAULT_SCENIC_FALLBACK);
+        double edgeUrbanPressure = computeUrbanPressureScore(edgeTiles);
+        return clamp01(((1.0 - edgeScenic) * 0.55) + (edgeUrbanPressure * 0.45));
+    }
+
     private double computeScenicDensity(List<RoadNode> path, PreferenceWeights preferences) {
         if (path == null || path.size() < 2) {
             return 0.0;
         }
 
-        List<RoadNode> samples = samplePath(path, Math.max(100, config.getCorridorSampleMeters()));
-        if (samples.isEmpty()) {
-            return 0.0;
-        }
-
-        int configuredResolution = Math.max(0, config.getH3Resolution());
-        List<ScenicScoreTile> tiles = findTilesForSamples(samples, configuredResolution, false);
-        if (tiles.isEmpty() && configuredResolution != DEFAULT_H3_RESOLUTION) {
-            tiles = findTilesForSamples(samples, DEFAULT_H3_RESOLUTION, false);
-            if (!tiles.isEmpty()) {
-                logger.debug(
-                    "No corridor tiles found at configured H3 resolution {}; scoring corridor at fallback resolution {}",
-                    configuredResolution,
-                    DEFAULT_H3_RESOLUTION
-                );
-            }
-        }
-        if (tiles.isEmpty()) {
-            tiles = findTilesForSamples(samples, DEFAULT_H3_RESOLUTION, true);
-        }
+        List<ScenicScoreTile> tiles = findCorridorTileCoverage(path).orderedTiles();
         if (tiles.isEmpty()) {
             return estimateFallbackScenicDensity(path, preferences);
         }
@@ -1241,6 +2088,30 @@ public class RoutePlanner {
             return estimateFallbackScenicDensity(path, preferences);
         }
         return clamp01(weightedScoreSum / coveredTiles);
+    }
+
+    private CorridorTileCoverage findCorridorTileCoverage(List<RoadNode> path) {
+        List<RoadNode> samples = samplePath(path, Math.max(100, config.getCorridorSampleMeters()));
+        if (samples.isEmpty()) {
+            return new CorridorTileCoverage(List.of());
+        }
+
+        int configuredResolution = Math.max(0, config.getH3Resolution());
+        CorridorTileCoverage coverage = findTilesForSamples(samples, configuredResolution, false);
+        if (coverage.orderedTiles().isEmpty() && configuredResolution != DEFAULT_H3_RESOLUTION) {
+            coverage = findTilesForSamples(samples, DEFAULT_H3_RESOLUTION, false);
+            if (!coverage.orderedTiles().isEmpty()) {
+                logger.debug(
+                    "No corridor tiles found at configured H3 resolution {}; scoring corridor at fallback resolution {}",
+                    configuredResolution,
+                    DEFAULT_H3_RESOLUTION
+                );
+            }
+        }
+        if (coverage.orderedTiles().isEmpty()) {
+            coverage = findTilesForSamples(samples, DEFAULT_H3_RESOLUTION, true);
+        }
+        return coverage;
     }
 
     private double estimateFallbackScenicDensity(List<RoadNode> path, PreferenceWeights preferences) {
@@ -1266,12 +2137,14 @@ public class RoutePlanner {
         return clamp01((DEFAULT_SCENIC_FALLBACK * 0.7) + (curvature * 0.2) + (closureBonus * 0.1));
     }
 
-    private List<ScenicScoreTile> findTilesForSamples(List<RoadNode> samples,
-                                                      int resolution,
-                                                      boolean includeNeighborExpansion) {
+    private CorridorTileCoverage findTilesForSamples(List<RoadNode> samples,
+                                                     int resolution,
+                                                     boolean includeNeighborExpansion) {
+        List<String> orderedSampleIndexes = new ArrayList<>();
         Set<String> h3Indexes = new HashSet<>();
         for (RoadNode point : samples) {
             String h3Index = H3Utils.getH3Index(point.getLatitude(), point.getLongitude(), resolution);
+            orderedSampleIndexes.add(h3Index);
             h3Indexes.add(h3Index);
             if (includeNeighborExpansion) {
                 h3Indexes.addAll(H3Utils.getKRing(h3Index, SAMPLE_NEIGHBOR_EXPANSION_RING));
@@ -1279,9 +2152,28 @@ public class RoutePlanner {
         }
 
         if (h3Indexes.isEmpty()) {
-            return List.of();
+            return new CorridorTileCoverage(List.of());
         }
-        return scenicScoreTileRepository.findByH3IndexIn(h3Indexes);
+        List<ScenicScoreTile> fetchedTiles = scenicScoreTileRepository.findByH3IndexIn(h3Indexes);
+        if (fetchedTiles.isEmpty()) {
+            return new CorridorTileCoverage(List.of());
+        }
+
+        Map<String, ScenicScoreTile> tileByH3 = fetchedTiles.stream()
+            .collect(Collectors.toMap(
+                ScenicScoreTile::getH3Index,
+                tile -> tile,
+                (left, right) -> left
+            ));
+        List<ScenicScoreTile> orderedTiles = orderedSampleIndexes.stream()
+            .map(tileByH3::get)
+            .filter(tile -> tile != null)
+            .toList();
+
+        if (orderedTiles.isEmpty()) {
+            orderedTiles = fetchedTiles;
+        }
+        return new CorridorTileCoverage(orderedTiles);
     }
 
     private List<RoadNode> samplePath(List<RoadNode> path, int sampleMeters) {
@@ -1495,6 +2387,46 @@ public class RoutePlanner {
 
     private double clamp01(double value) {
         return Math.max(0.0, Math.min(1.0, value));
+    }
+
+    private double clamp(double value, double min, double max) {
+        return Math.max(min, Math.min(max, value));
+    }
+
+    private record CorridorTileCoverage(List<ScenicScoreTile> orderedTiles) {
+    }
+
+    private record RouteScoreResult(double finalScore, Map<String, Double> breakdown) {
+    }
+
+    private record StrategyCorridorMetrics(double waterCorridorShare,
+                                           double openSpaceCorridorShare,
+                                           double quietCorridorShare,
+                                           double curveElevationCorridorShare,
+                                           double photoPeakScore,
+                                           double strategyFitScore,
+                                           double mismatchPenalty) {
+    }
+
+    private record DurationCalibrationHint(double radiusMultiplier,
+                                           double learnedWaypointCount,
+                                           int sampleCount) {
+        private boolean active() {
+            return sampleCount >= MIN_DURATION_CALIBRATION_SAMPLES;
+        }
+
+        private static DurationCalibrationHint empty() {
+            return new DurationCalibrationHint(1.0, 6.0, 0);
+        }
+    }
+
+    private enum GeometryStrategy {
+        WATER_FOLLOWING,
+        OPEN_SPACE_ESCAPE,
+        PHOTO_PEAKS,
+        QUIET_LOW_PRESSURE,
+        CURVY_ELEVATION,
+        BALANCED_VARIETY
     }
 
     private record TileCandidate(ScenicScoreTile tile,

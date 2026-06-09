@@ -20,7 +20,7 @@ public class GraphCacheWarmupScheduler {
     public GraphCacheWarmupScheduler(
             GraphService graphService,
             WorkerCacheMetricsService metricsService,
-            @Value("${moodride.cache.graph-warmup.enabled:true}") boolean enabled
+            @Value("${moodride.cache.graph-warmup.enabled:false}") boolean enabled
     ) {
         this.graphService = graphService;
         this.metricsService = metricsService;

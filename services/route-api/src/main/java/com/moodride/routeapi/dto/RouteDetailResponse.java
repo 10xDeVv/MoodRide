@@ -10,6 +10,7 @@ public record RouteDetailResponse(
         UUID jobId,
         String routeUrl,
         double scenicScore,
+        Map<String, Double> scoreBreakdown,
         String qualityTier,
         double totalDistanceKm,
         int estimatedDurationMinutes,

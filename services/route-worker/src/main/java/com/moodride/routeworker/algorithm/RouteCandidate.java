@@ -10,6 +10,7 @@ public class RouteCandidate implements Comparable<RouteCandidate> {
     private final int estimatedMinutes;
     private final String algorithmVersion;
     private final Integer beamCandidates;
+    private final Map<String, Double> scoreBreakdown;
     
     public RouteCandidate(List<RoadNode> waypoints, double scenicScore, 
                          double distanceKm, int minutes) {
@@ -19,12 +20,20 @@ public class RouteCandidate implements Comparable<RouteCandidate> {
     public RouteCandidate(List<RoadNode> waypoints, double scenicScore,
                          double distanceKm, int minutes,
                          String algorithmVersion, Integer beamCandidates) {
+        this(waypoints, scenicScore, distanceKm, minutes, algorithmVersion, beamCandidates, Map.of());
+    }
+
+    public RouteCandidate(List<RoadNode> waypoints, double scenicScore,
+                         double distanceKm, int minutes,
+                         String algorithmVersion, Integer beamCandidates,
+                         Map<String, Double> scoreBreakdown) {
         this.waypoints = new ArrayList<>(waypoints);
         this.totalScenicScore = scenicScore;
         this.totalDistanceKm = distanceKm;
         this.estimatedMinutes = minutes;
         this.algorithmVersion = algorithmVersion;
         this.beamCandidates = beamCandidates;
+        this.scoreBreakdown = scoreBreakdown == null ? Map.of() : Map.copyOf(scoreBreakdown);
     }
     
     public List<RoadNode> getWaypoints() {
@@ -49,6 +58,10 @@ public class RouteCandidate implements Comparable<RouteCandidate> {
 
     public Integer getBeamCandidates() {
         return beamCandidates;
+    }
+
+    public Map<String, Double> getScoreBreakdown() {
+        return Map.copyOf(scoreBreakdown);
     }
     
     @Override

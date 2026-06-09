@@ -18,7 +18,11 @@ public record RouteJobStatusResponse(
         Integer estimatedRemainingSeconds,
         int retryCount,
         int maxRetries,
-        String routeMode
+        String routeMode,
+        String failureCode,
+        String userMessage,
+        List<String> suggestedVibes,
+        List<String> suggestedActions
 ) {
 }
 

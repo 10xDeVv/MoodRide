@@ -133,5 +133,113 @@
     "lng": -52.7126,
     "timeBudgetMinutes": 60,
     "vibes": ["coastal"]
+  },
+  {
+    "id": "vancouver-forest-75",
+    "city": "Vancouver",
+    "region": "British Columbia",
+    "lat": 49.2827,
+    "lng": -123.1207,
+    "timeBudgetMinutes": 75,
+    "vibes": ["forest"]
+  },
+  {
+    "id": "calgary-country-60",
+    "city": "Calgary",
+    "region": "Alberta",
+    "lat": 51.0447,
+    "lng": -114.0719,
+    "timeBudgetMinutes": 60,
+    "vibes": ["country"]
+  },
+  {
+    "id": "fredericton-cruise-60",
+    "city": "Fredericton",
+    "region": "New Brunswick",
+    "lat": 45.9636,
+    "lng": -66.6431,
+    "timeBudgetMinutes": 60,
+    "vibes": ["cruise"]
+  },
+  {
+    "id": "regina-low-traffic-60",
+    "city": "Regina",
+    "region": "Saskatchewan",
+    "lat": 50.4452,
+    "lng": -104.6189,
+    "timeBudgetMinutes": 60,
+    "vibes": ["low_traffic"]
+  },
+  {
+    "id": "quebec-city-hidden-gems-75",
+    "city": "Quebec City",
+    "region": "Quebec",
+    "lat": 46.8139,
+    "lng": -71.208,
+    "timeBudgetMinutes": 75,
+    "vibes": ["hidden_gems"]
+  },
+  {
+    "id": "vancouver-sunset-60",
+    "city": "Vancouver",
+    "region": "British Columbia",
+    "lat": 49.2827,
+    "lng": -123.1207,
+    "timeBudgetMinutes": 60,
+    "vibes": ["sunset"]
+  },
+  {
+    "id": "quebec-city-photo-60",
+    "city": "Quebec City",
+    "region": "Quebec",
+    "lat": 46.8139,
+    "lng": -71.208,
+    "timeBudgetMinutes": 60,
+    "vibes": ["photo"]
+  },
+  {
+    "id": "vancouver-nature-75",
+    "city": "Vancouver",
+    "region": "British Columbia",
+    "lat": 49.2827,
+    "lng": -123.1207,
+    "timeBudgetMinutes": 75,
+    "vibes": ["nature"]
+  },
+  {
+    "id": "calgary-sunday-60",
+    "city": "Calgary",
+    "region": "Alberta",
+    "lat": 51.0447,
+    "lng": -114.0719,
+    "timeBudgetMinutes": 60,
+    "vibes": ["sunday"]
+  },
+  {
+    "id": "banff-adventure-90",
+    "city": "Banff",
+    "region": "Alberta",
+    "lat": 51.1784,
+    "lng": -115.5708,
+    "timeBudgetMinutes": 90,
+    "vibes": ["adventure"]
+  },
+  {
+    "id": "halifax-scenic-60",
+    "city": "Halifax",
+    "region": "Nova Scotia",
+    "lat": 44.6488,
+    "lng": -63.5752,
+    "timeBudgetMinutes": 60,
+    "vibes": ["scenic"]
+  },
+  {
+    "id": "banff-winding-90",
+    "city": "Banff",
+    "region": "Alberta",
+    "lat": 51.1784,
+    "lng": -115.5708,
+    "timeBudgetMinutes": 90,
+    "vibes": ["winding"]
   }
 ]

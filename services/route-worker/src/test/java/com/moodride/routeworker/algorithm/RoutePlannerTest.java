@@ -9,6 +9,7 @@ import com.moodride.geo.H3Utils;
 import com.moodride.routeworker.config.ApplicationConfiguration;
 import com.moodride.routeworker.graph.RoadNode;
 import com.moodride.routeworker.repository.RouteWeightCalibrationRepository;
+import com.moodride.routeworker.repository.RouteDurationCalibrationRepository;
 import com.moodride.routeworker.repository.ScenicScoreTileRepository;
 import com.moodride.routeworker.service.OsrmTripClient;
 import org.junit.jupiter.api.BeforeEach;
@@ -22,6 +23,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import java.time.Instant;
 import java.util.Collection;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -48,6 +50,9 @@ class RoutePlannerTest {
     @Mock
     private RouteWeightCalibrationRepository routeWeightCalibrationRepository;
 
+    @Mock
+    private RouteDurationCalibrationRepository routeDurationCalibrationRepository;
+
     private RoutePlanner routePlanner;
 
     @BeforeEach
@@ -63,12 +68,14 @@ class RoutePlannerTest {
         routePlanner = new RoutePlanner(
             scenicScoreTileRepository,
             routeWeightCalibrationRepository,
+            routeDurationCalibrationRepository,
             osrmTripClient,
             config,
             new ObjectMapper(),
             new ScenicScoreCalculator()
         );
         when(routeWeightCalibrationRepository.findByVibeIn(anyCollection())).thenReturn(List.of());
+        when(routeDurationCalibrationRepository.findById(org.mockito.ArgumentMatchers.anyString())).thenReturn(Optional.empty());
     }
 
     @Test
@@ -115,7 +122,23 @@ class RoutePlannerTest {
 
         assertThat(options).hasSize(3);
         assertThat(options.stream().map(RouteCandidate::getAlgorithmVersion).collect(Collectors.toSet()))
-            .containsExactly("hybrid_osrm_v1");
+            .containsExactly("hybrid_osrm_v2");
+        assertThat(options.getFirst().getScoreBreakdown())
+            .containsKeys(
+                "final_score",
+                "landscape_score",
+                "vibe_fit_score",
+                "urban_penalty",
+                "strategy_fit_score",
+                "strategy_mismatch_penalty",
+                "water_corridor_share",
+                "requested_avg_radius_km",
+                "requested_waypoint_count",
+                "duration_fit_ratio",
+                "duration_calibration_bucket_minutes"
+            );
+        assertThat(options.getFirst().getScoreBreakdown().get("geometry_strategy_code"))
+            .isEqualTo(0.0);
         assertThat(options.stream().map(this::pathSignature).collect(Collectors.toSet()))
             .hasSizeGreaterThanOrEqualTo(2);
         assertThat(options.stream().map(RouteCandidate::getTotalScenicScore).collect(Collectors.toSet()))
@@ -125,6 +148,56 @@ class RoutePlannerTest {
             .max()
             .orElse(0.0);
         assertThat(options.getFirst().getTotalScenicScore()).isEqualTo(maxScenicScore);
+    }
+
+    @Test
+    void openRoadsUsesOpenSpaceGeometryStrategy() {
+        when(scenicScoreTileRepository.findByH3IndexIn(anyCollection())).thenReturn(highScenicTilesAroundStart());
+        when(osrmTripClient.requestRoundTrip(anyList(), eq(RouteMode.DRIVE))).thenAnswer(invocation -> {
+            @SuppressWarnings("unchecked")
+            List<RoadNode> variant = invocation.getArgument(0);
+            return Optional.of(new OsrmTripClient.TripResult(variant, variant.size() * 2.5, variant.size() * 8));
+        });
+
+        List<RouteCandidate> options = routePlanner.generateRouteOptions(sampleJob(45, "open_roads"));
+
+        assertThat(options).hasSize(3);
+        assertThat(options.getFirst().getScoreBreakdown().get("geometry_strategy_code"))
+            .isEqualTo(1.0);
+        assertThat(options.getFirst().getScoreBreakdown())
+            .containsKeys("strategy_fit_score", "strategy_mismatch_penalty", "open_space_corridor_share");
+    }
+
+    @Test
+    void countrysideUsesGradedQuietStrategyFitForModerateCorridors() {
+        when(scenicScoreTileRepository.findByH3IndexIn(anyCollection())).thenReturn(moderateQuietTilesAroundStart());
+        when(osrmTripClient.requestRoundTrip(anyList(), eq(RouteMode.DRIVE))).thenAnswer(invocation -> {
+            @SuppressWarnings("unchecked")
+            List<RoadNode> variant = invocation.getArgument(0);
+            return Optional.of(new OsrmTripClient.TripResult(variant, variant.size() * 2.5, variant.size() * 8));
+        });
+
+        List<RouteCandidate> options = routePlanner.generateRouteOptions(sampleJob(45, "countryside"));
+        Map<String, Double> breakdown = options.getFirst().getScoreBreakdown();
+
+        assertThat(options).hasSize(3);
+        assertThat(breakdown.get("geometry_strategy_code")).isEqualTo(3.0);
+        assertThat(breakdown.get("strategy_fit_score")).isGreaterThan(0.30);
+        assertThat(breakdown.get("strategy_mismatch_penalty")).isLessThan(0.50);
+    }
+
+    @Test
+    void countrysideRejectsUrbanCorridorsInsteadOfPretendingTheyFit() {
+        when(scenicScoreTileRepository.findByH3IndexIn(anyCollection())).thenReturn(urbanQuietTilesAroundStart());
+        when(osrmTripClient.requestRoundTrip(anyList(), eq(RouteMode.DRIVE))).thenAnswer(invocation -> {
+            @SuppressWarnings("unchecked")
+            List<RoadNode> variant = invocation.getArgument(0);
+            return Optional.of(new OsrmTripClient.TripResult(variant, variant.size() * 2.5, variant.size() * 8));
+        });
+
+        assertThatThrownBy(() -> routePlanner.generateRouteOptions(sampleJob(45, "countryside")))
+            .isInstanceOf(NoFeasibleRouteException.class)
+            .hasMessageContaining("No strong Countryside route found");
     }
 
     @Test
@@ -200,7 +273,11 @@ class RoutePlannerTest {
     }
 
     private RouteJob sampleJob(int timeBudgetMinutes) {
-        RouteJob job = new RouteJob(UUID.randomUUID(), 46.0945, -64.7809, timeBudgetMinutes, "coastal");
+        return sampleJob(timeBudgetMinutes, "coastal");
+    }
+
+    private RouteJob sampleJob(int timeBudgetMinutes, String vibe) {
+        RouteJob job = new RouteJob(UUID.randomUUID(), 46.0945, -64.7809, timeBudgetMinutes, vibe);
         job.setId(UUID.randomUUID());
         return job;
     }
@@ -231,6 +308,50 @@ class RoutePlannerTest {
             scenicTile("dry-3", 46.0800, -64.7420, 0.04, 0.65, 0.35, 0.68, 0.50, 0.20),
             scenicTile("dry-4", 46.0600, -64.7700, 0.06, 0.72, 0.45, 0.76, 0.50, 0.20)
         );
+    }
+
+    private List<ScenicScoreTile> moderateQuietTilesAroundStart() {
+        return List.of(
+            moderateQuietTile("quiet-1", 46.1100, -64.7800),
+            moderateQuietTile("quiet-2", 46.1030, -64.7500),
+            moderateQuietTile("quiet-3", 46.0800, -64.7420),
+            moderateQuietTile("quiet-4", 46.0600, -64.7700),
+            moderateQuietTile("quiet-5", 46.0720, -64.8120),
+            moderateQuietTile("quiet-6", 46.1050, -64.8250),
+            moderateQuietTile("quiet-7", 46.1250, -64.8000),
+            moderateQuietTile("quiet-8", 46.1250, -64.7500)
+        );
+    }
+
+    private ScenicScoreTile moderateQuietTile(String h3Index, double latitude, double longitude) {
+        ScenicScoreTile tile = scenicTile(h3Index, latitude, longitude, 0.18, 0.52, 0.32, 0.54, 0.42, 0.22);
+        tile.setRoadDensity(0.28);
+        tile.setBuildingDensityScore(0.18);
+        tile.setUrbanPenaltyScore(0.24);
+        tile.setDarknessScore(0.42);
+        return tile;
+    }
+
+    private List<ScenicScoreTile> urbanQuietTilesAroundStart() {
+        return List.of(
+            urbanQuietTile("urban-1", 46.1100, -64.7800),
+            urbanQuietTile("urban-2", 46.1030, -64.7500),
+            urbanQuietTile("urban-3", 46.0800, -64.7420),
+            urbanQuietTile("urban-4", 46.0600, -64.7700),
+            urbanQuietTile("urban-5", 46.0720, -64.8120),
+            urbanQuietTile("urban-6", 46.1050, -64.8250),
+            urbanQuietTile("urban-7", 46.1250, -64.8000),
+            urbanQuietTile("urban-8", 46.1250, -64.7500)
+        );
+    }
+
+    private ScenicScoreTile urbanQuietTile(String h3Index, double latitude, double longitude) {
+        ScenicScoreTile tile = scenicTile(h3Index, latitude, longitude, 0.12, 0.70, 0.25, 0.78, 0.30, 0.20);
+        tile.setRoadDensity(0.90);
+        tile.setBuildingDensityScore(0.92);
+        tile.setUrbanPenaltyScore(0.95);
+        tile.setDarknessScore(0.10);
+        return tile;
     }
 
     private OsrmTripClient.TripResult defaultTrip(int durationMinutes) {

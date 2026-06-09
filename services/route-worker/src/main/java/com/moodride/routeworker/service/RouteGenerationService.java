@@ -3,7 +3,12 @@ package com.moodride.routeworker.service;
 import java.util.ArrayList;
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.moodride.datamodels.RouteDurationCalibration;
+import com.moodride.geo.H3Utils;
 import org.locationtech.jts.geom.Coordinate;
 import org.locationtech.jts.geom.GeometryFactory;
 import org.locationtech.jts.geom.LineString;
@@ -18,6 +23,7 @@ import com.moodride.routeworker.algorithm.RouteCandidate;
 import com.moodride.routeworker.algorithm.RoutePlanner;
 import com.moodride.routeworker.graph.RoadNode;
 import com.moodride.routeworker.repository.RouteJobRepository;
+import com.moodride.routeworker.repository.RouteDurationCalibrationRepository;
 import com.moodride.routeworker.repository.RouteRepository;
 import com.moodride.routeworker.repository.RouteWaypointRepository;
 
@@ -30,22 +36,37 @@ public class RouteGenerationService {
         "balanced",
         "shorter"
     );
+    private static final int DURATION_CALIBRATION_H3_RESOLUTION = 5;
+    private static final String[] GEOMETRY_STRATEGY_NAMES = {
+        "WATER_FOLLOWING",
+        "OPEN_SPACE_ESCAPE",
+        "PHOTO_PEAKS",
+        "QUIET_LOW_PRESSURE",
+        "CURVY_ELEVATION",
+        "BALANCED_VARIETY"
+    };
     
     private final RoutePlanner routePlanner;
     private final RouteJobRepository jobRepository;
     private final RouteRepository routeRepository;
     private final RouteWaypointRepository waypointRepository;
+    private final RouteDurationCalibrationRepository routeDurationCalibrationRepository;
     private final GeometryFactory geometryFactory;
+    private final ObjectMapper objectMapper;
     
     public RouteGenerationService(RoutePlanner routePlanner,
                                   RouteJobRepository jobRepository,
                                   RouteRepository routeRepository,
-                                  RouteWaypointRepository waypointRepository) {
+                                  RouteWaypointRepository waypointRepository,
+                                  RouteDurationCalibrationRepository routeDurationCalibrationRepository,
+                                  ObjectMapper objectMapper) {
         this.routePlanner = routePlanner;
         this.jobRepository = jobRepository;
         this.routeRepository = routeRepository;
         this.waypointRepository = waypointRepository;
+        this.routeDurationCalibrationRepository = routeDurationCalibrationRepository;
         this.geometryFactory = new GeometryFactory();
+        this.objectMapper = objectMapper.copy().findAndRegisterModules();
     }
     
     public RouteGenerationResult processRoute(RouteJob job) {
@@ -73,10 +94,12 @@ public class RouteGenerationService {
             route.setTotalDistanceKm(candidate.getTotalDistanceKm());
             route.setEstimatedDurationMinutes(candidate.getEstimatedMinutes());
             route.setScenicScore(candidate.getTotalScenicScore());
+            route.setScoreBreakdownJson(serializeScoreBreakdown(candidate.getScoreBreakdown()));
             route.setGeneratedAt(generatedAtBase.plusMillis(i));
             route.setExpiresAt(route.getGeneratedAt().plusSeconds(24 * 60 * 60));
 
             routeRepository.save(route);
+            recordDurationCalibration(job, candidate);
 
             List<RouteWaypoint> waypoints = persistWaypoints(route, candidate.getWaypoints());
             if (i == 0) {
@@ -120,6 +143,78 @@ public class RouteGenerationService {
             waypoints.add(wp);
         }
         return waypoints;
+    }
+
+    private String serializeScoreBreakdown(Map<String, Double> scoreBreakdown) {
+        if (scoreBreakdown == null || scoreBreakdown.isEmpty()) {
+            return null;
+        }
+        try {
+            return objectMapper.writeValueAsString(scoreBreakdown);
+        } catch (JsonProcessingException ex) {
+            throw new IllegalStateException("Failed to serialize route score breakdown", ex);
+        }
+    }
+
+    private void recordDurationCalibration(RouteJob job, RouteCandidate candidate) {
+        Map<String, Double> breakdown = candidate.getScoreBreakdown();
+        Double requestedRadiusKm = getBreakdownNumber(breakdown, "requested_avg_radius_km");
+        Double requestedWaypointCount = getBreakdownNumber(breakdown, "requested_waypoint_count");
+        Double geometryStrategyCode = getBreakdownNumber(breakdown, "geometry_strategy_code");
+        if (requestedRadiusKm == null
+            || requestedWaypointCount == null
+            || geometryStrategyCode == null
+            || requestedRadiusKm <= 0.0
+            || requestedWaypointCount <= 0.0
+            || job.getTimeBudgetMinutes() <= 0
+            || candidate.getEstimatedMinutes() <= 0) {
+            return;
+        }
+
+        String regionKey = H3Utils.getH3Index(
+            job.getStartLatitude(),
+            job.getStartLongitude(),
+            DURATION_CALIBRATION_H3_RESOLUTION
+        );
+        int timeBudgetBucket = RouteDurationCalibration.bucketMinutes(job.getTimeBudgetMinutes());
+        String geometryStrategy = geometryStrategyName(geometryStrategyCode);
+        String routeMode = job.getRouteMode().apiValue();
+        String calibrationId = RouteDurationCalibration.idFor(
+            routeMode,
+            regionKey,
+            timeBudgetBucket,
+            geometryStrategy
+        );
+        RouteDurationCalibration calibration = routeDurationCalibrationRepository.findById(calibrationId)
+            .orElseGet(() -> new RouteDurationCalibration(
+                routeMode,
+                regionKey,
+                timeBudgetBucket,
+                geometryStrategy
+            ));
+        calibration.observe(
+            requestedRadiusKm,
+            Math.max(1, (int) Math.round(requestedWaypointCount)),
+            job.getTimeBudgetMinutes(),
+            candidate.getEstimatedMinutes(),
+            Instant.now()
+        );
+        routeDurationCalibrationRepository.save(calibration);
+    }
+
+    private Double getBreakdownNumber(Map<String, Double> breakdown, String key) {
+        if (breakdown == null || key == null) {
+            return null;
+        }
+        return breakdown.get(key);
+    }
+
+    private String geometryStrategyName(double geometryStrategyCode) {
+        int index = (int) Math.round(geometryStrategyCode);
+        if (index < 0 || index >= GEOMETRY_STRATEGY_NAMES.length) {
+            return "BALANCED_VARIETY";
+        }
+        return GEOMETRY_STRATEGY_NAMES[index];
     }
     
     private LineString buildLineString(List<RoadNode> nodes) {

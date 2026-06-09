@@ -1,6 +1,6 @@
 # MoodRide Engineering Specification (As-Built)
 
-Last reconciled: 2026-05-11
+Last reconciled: 2026-06-08
 
 ## 1) Document Intent
 This file is the current, code-aligned engineering specification for MoodRide. It replaces the previous oversized historical spec and focuses on the system that actually runs today.
@@ -69,7 +69,7 @@ These are intentionally treated as batch/offline tools for now (data refresh/rec
 ## 4) End-to-End Flow
 1. Frontend submits route request to `POST /api/routes`.
 2. `route-api` validates request, persists `route_jobs` row, publishes `route-jobs` Kafka message.
-3. `route-worker` consumes job, marks status `PROCESSING`, generates route candidates using `hybrid_osrm_v1` path.
+3. `route-worker` consumes job, marks status `PROCESSING`, generates route candidates using `hybrid_osrm_v2` path.
 4. Worker persists route records + waypoints, marks job `COMPLETED`, emits `route-completions` event.
 5. `notification-service` consumes event and pushes websocket message on `/topic/job/{jobId}`.
 6. Frontend fetches route detail from `GET /api/routes/route/{routeId}`.
@@ -80,19 +80,21 @@ Failure path:
 - websocket failure notification includes polling fallback URL
 
 ## 5) Routing Algorithm (Current Implementation)
-Primary algorithm path in worker is hybrid OSRM:
-- score nearby H3 tiles using weighted preference vector
-- build waypoint ring variants
+Primary algorithm path in worker is hybrid OSRM v2:
+- score nearby H3 tiles using weighted preference vector and blended vibe profile
+- build sector waypoint rings plus intent-anchor variants
 - call OSRM trip API for loop candidates
-- compute scenic density along returned path
+- compute route quality along returned path, including landscape average, vibe fit, drive quality, route shape, scenic moments, urban pressure, and start/end penalty
 - deduplicate and select top options
 - persist options as route profiles
 
-Current algorithm version persisted on jobs: `hybrid_osrm_v1`.
+Current algorithm version persisted on jobs: `hybrid_osrm_v2`.
 
 Fallback behavior implemented:
 - synthetic radial waypoint variants when initial candidate set is weak
 - beam-search implementation (`beam_v1`) still exists in code but is not the primary route option generator path
+
+See [Hybrid OSRM v2](HybridOsrmV2.md) for the algorithm contract and comparison with v1 and beam search.
 
 ## 6) API Surface (Current)
 
@@ -140,12 +142,13 @@ Core persisted entities:
   - preference vector JSON text
 - `routes`
   - route profile, geometry, distance/duration, scenic score
+  - v2 `score_breakdown_json` for route-quality components and penalties
   - rating fields (user rating + rated timestamp)
 - `route_waypoints`
   - ordered waypoint sequence and per-segment distances
 - `road_segments`
 - `scenic_score_tiles`
-  - composite + component score fields (including traffic and component breakdown)
+  - composite + component score fields, including water/green/elevation/solitude/curve/poi, traffic, `park_score`, and 3.0 enrichment fields (`overture_poi_score`, `building_density_score`, `darkness_score`, `urban_penalty_score`)
 
 ## 9) Caching + Invalidation
 - Route details cached (`routeResults` cache key by route ID).
@@ -193,13 +196,20 @@ Current production state:
 - `OSRM_DATASET_BASENAME=canada-latest` is deployed for nationwide routing.
 
 ### 11.4 Scenic data lifecycle
-- run nationwide recompute locally using `scripts/setup/data-quality-upgrade-batched.sql` (single-pass target: `2.6-raster-data-quality-upgrade-national-batched`)
+- run nationwide recompute locally using versioned SQL scripts:
+  - `scripts/setup/data-quality-upgrade-batched.sql` for the 2.6 land-cover baseline
+  - `scripts/setup/data-quality-calibration-v28.sql` for 2.8 calibration
+  - `scripts/setup/data-quality-parks-v29.sql` for 2.9 protected-area enrichment
+  - `scripts/setup/data-quality-enrichment-v30.sql` for 3.0 Overture/light-pollution enrichment
 - publish versioned scenic release artifact (`publish_scenic_release.ps1`)
 - deploy scenic release via `.github/workflows/deploy-scenic-release.yml`
 - restart `route-api` + `route-worker` to refresh runtime caches
 
-Current production state:
-- `scenic_score_tiles` is fully on `2.6-raster-data-quality-upgrade-national-batched` (211,510 tiles)
+Current verified repo state:
+- 2.8 national land-cover/DEM calibration is documented as complete for 211,510 tiles.
+- 2.9 protected-area enrichment has local release artifacts.
+- 3.0 Overture/light-pollution enrichment is implemented in schema, scripts, shared scoring, worker scoring, and route-quality evals.
+- This shell could not verify current GitHub release publication or live DB deployment for `3.0-overture-lightpollution-enrichment` because GitHub CLI was unauthenticated and Docker/Postgres were unavailable.
 
 ### 11.5 Release QA baseline
 - run `scripts/deploy/run_release_qa_baseline.ps1` after release

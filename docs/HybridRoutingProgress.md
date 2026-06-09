@@ -1,11 +1,12 @@
 # Hybrid Routing Progress Tracker
 
-Last updated: 2026-05-18 (route-worker time-budget and option-diversity tuning)
+Last updated: 2026-06-09 (`hybrid_osrm_v2` completion, rural honesty, unavailable-vibe UX/API)
 Source plan: `docs/Hybrid Routing Execution.md`
 
 ## Current Status
-- Phase: Week 3 active (multi-option response delivered)
-- Route worker runs hybrid-only route generation (no beam-search fallback path).
+- Phase: `hybrid_osrm_v2` is the default route-generation contract for the current release.
+- Route worker runs hybrid-only route generation; beam search is not used as a fallback.
+- Core v2 work is complete: per-vibe geometry strategies, v2 route scoring, score breakdowns, duration calibration, rural/country honesty gates, fixed-start QA evaluation, and unavailable-vibe API/frontend guidance are implemented.
 
 ## Execution Checklist
 
@@ -28,6 +29,24 @@ Source plan: `docs/Hybrid Routing Execution.md`
 - [x] Replace hardcoded route algorithm metadata (`beam_v1`) with persisted generation metadata
 
 ## Completed In This Iteration
+- Completed `hybrid_osrm_v2` route-quality contract:
+  - algorithm version now persists as `hybrid_osrm_v2`
+  - candidate generation uses calibrated sector rings, intent anchors, and strategy variants
+  - scoring separates landscape quality, vibe fit, drive quality, route shape, scenic moments, urban pressure, start/end quality, and strategy fit
+  - route options expose persisted `scoreBreakdown` values for QA and future explanations
+  - duration calibration persists successful OSRM duration/radius/waypoint aggregates for future requests
+- Added rural/country honesty behavior:
+  - quiet/country-style requests try farther quiet-escape rings before giving up
+  - Countryside and Sunday Cruise require strong low-urban strategy fit across all three route options
+  - if the region cannot honestly satisfy the vibe, the job fails as unavailable instead of returning urban loops
+- Added unavailable-vibe API and frontend handling:
+  - route status responses now include `failureCode`, `userMessage`, `suggestedVibes`, and `suggestedActions`
+  - the web planner renders a `Vibe Unavailable` failed state with fallback vibe chips and practical next-step guidance
+  - backend coverage added in `RouteServiceTest`
+- Archived a full local v2 rural-escape QA run:
+  - artifact: `artifacts/route-quality-eval-local-v2-rural-escape-full/route-quality-eval-20260608-183929.md`
+  - result: 27 scenarios, 23 completed, 4 unavailable
+  - unavailable outcomes were expected honesty cases: Regina mountain mismatch and Calgary country/countryside/Sunday Cruise urban-start mismatch
 - Hardened route-worker time-budget behavior:
   - route generation now uses a hard effective duration cap of at most `15%` over the requested budget
   - over-budget-only candidate sets are rejected instead of being returned to users
@@ -170,8 +189,9 @@ Source plan: `docs/Hybrid Routing Execution.md`
 
 ## Known Gaps / Next Build Slice
 - Execution-plan checklist items are completed.
-- UX proof is complete for multi-option rendering and completed-state flows.
-- Remaining quality hardening:
-  - Re-run live route jobs after worker deploy and confirm short budgets do not return large over-budget loops.
-  - Re-run Banff/Rockies release QA and confirm route-option spread improves versus the previous `1.19-1.55` point spread.
-  - If Banff spread is still too low, add waypoint-sector exclusion per profile so secondary options are forced into different bearings/corridors.
+- UX proof is complete for multi-option rendering, completed-state flows, and unavailable-vibe guidance.
+- Remaining work is calibration and operational hardening:
+  - collect real user feedback/completed-drive signals and use them to tune v2 component weights
+  - keep archiving fixed-start QA runs after routing/data changes
+  - tune duration-calibration thresholds once enough local buckets have meaningful sample counts
+  - add more precise fallback suggestions per vibe family and region type

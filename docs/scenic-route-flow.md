@@ -42,15 +42,15 @@ The frontend submits a payload shaped like this:
 
 ## 3. Route Generation Logic
 
-The current implementation uses OSRM's trip endpoint against the local Canada OSRM dataset.
+The current implementation uses `hybrid_osrm_v2` with OSRM's trip endpoint against the local Canada OSRM dataset.
 
 The route worker:
 
 - scores nearby H3 scenic tiles using the selected vibes and numeric `preferenceVector`
 - divides nearby candidate tiles into directional sectors
-- builds waypoint rings from the best tile per sector
+- builds sector waypoint rings plus intent-anchor variants for the active vibe
 - asks OSRM for a round trip from the start through those waypoints
-- samples the returned OSRM geometry and computes scenic density from nearby H3 tiles
+- samples the returned OSRM geometry and computes route quality from nearby H3 tiles
 - filters out candidates that exceed the hard effective time budget
 - selects up to three route options with profile-specific scoring and diversity penalties
 
@@ -60,7 +60,7 @@ The current hard budget cap is at most `15%` over the requested time. If no rout
 
 Intermediate waypoints are chosen from scenic tiles directly.
 
-[RoutePlanner](../services/route-worker/src/main/java/com/moodride/routeworker/algorithm/RoutePlanner.java) selects nearby candidate tiles by H3 ring, scores them with the request's effective component weights, groups them by sector, and builds waypoint rings. If tile-derived rings do not produce enough valid OSRM routes, it falls back to synthetic radial rings and then smaller budget-rescue rings.
+[RoutePlanner](../services/route-worker/src/main/java/com/moodride/routeworker/algorithm/RoutePlanner.java) selects nearby candidate tiles by H3 ring, scores them with the request's effective component weights, groups them by sector, and builds waypoint rings. V2 also creates intent-anchor variants from high-fit tiles so vibes such as `coastal`, `open_roads`, `photo_worthy`, and balanced `scenic` can shape the candidate geometry before OSRM solves the roads. If tile-derived rings do not produce enough valid OSRM routes, it falls back to synthetic radial rings and then smaller budget-rescue rings.
 
 ## 5. Scenic Scoring
 
@@ -83,7 +83,9 @@ The tile recompute pipeline sources values from `road_segments`, water/land-use 
 
 ### Route scoring
 
-The route worker computes route-level scenic density by sampling the returned OSRM path, mapping samples to H3 scenic tiles, and averaging the request-weighted tile scores. The stored `Route.scenicScore` is a normalized decimal and is later rendered as a percentage in the API response.
+The route worker computes route-level quality by sampling the returned OSRM path, mapping samples to H3 scenic tiles, and blending landscape average, vibe fit, drive quality, route shape, scenic moments, urban pressure, and start/end penalty. The stored `Route.scenicScore` remains a normalized decimal and is later rendered as a percentage in the API response.
+
+See [Hybrid OSRM v2](HybridOsrmV2.md) for the full algorithm contract.
 
 Vibes translate into default component weights:
 

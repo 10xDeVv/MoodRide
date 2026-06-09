@@ -1,6 +1,6 @@
 # MoodRide Implementation Plan (Living)
 
-Last reconciled: 2026-05-11
+Last reconciled: 2026-06-08
 
 ## 1) Purpose
 This is the active execution plan. It replaces the older audit-heavy plan text and tracks what is done, what is in flight, and what is next.
@@ -11,7 +11,7 @@ This is the active execution plan. It replaces the older audit-heavy plan text a
 - Core microservices exist and build:
   - `route-api`, `route-worker`, `notification-service`
   - optional: `ingestion-service`, `scenic-scoring-service`, `cdc-service`
-- PostGIS schema + migrations are in place (V1-V17 chain in route-api).
+- PostGIS schema + migrations are in place (V1-V22 chain in route-api).
 - Async route job pipeline works end-to-end (`route-jobs` -> worker -> `route-completions`).
 - Frontend integration works against live API and websocket notifications.
 - Production deployment on GCP VM is live for `app.moodrides.com`.
@@ -29,7 +29,9 @@ This is the active execution plan. It replaces the older audit-heavy plan text a
 
 ### 2.3 Current data scope
 - OSRM runtime dataset is nationwide (`canada-latest`) in production.
-- Scenic tile data is deployed at `2.6-raster-data-quality-upgrade-national-batched` for all 211,510 tiles.
+- Scenic tile data has completed the 2.8 national land-cover/DEM calibration and 2.9 protected-area enrichment locally.
+- 3.0 Overture/light-pollution enrichment is implemented in schema, scripts, shared scoring, and route-quality eval flows.
+- This shell could not verify GitHub release publication or live DB deployment for `3.0-overture-lightpollution-enrichment` because `gh` was unauthenticated and Docker/Postgres were unavailable.
 - Versioned release/deploy workflows exist for both OSRM and scenic tiles.
 
 ## 3) Priority Plan (Now)
@@ -76,6 +78,7 @@ Outcome required:
 ### P1: Transition to scheduled recompute jobs
 Current state:
 - release-driven manual data updates
+- 3.0 import/recompute scripts are present, but publication/deployment verification needs authenticated release or DB access
 
 Near-term target:
 - scheduled recompute pipeline for regular data refreshes and scoring updates
@@ -102,7 +105,8 @@ Outcome required:
 1. What SLO do you want to enforce for async route completion (for example p95 under N seconds) once nationwide data is deployed?
 
 ## 8) Immediate Next Action
-1. Run/record release QA baseline after each production release.
-2. Add deploy smoke checks directly into workflow summaries.
-3. Plan first scheduled recompute cadence (monthly OSM + scenic release train).
+1. Verify `3.0-overture-lightpollution-enrichment` publication/deployment with authenticated `gh release list` and a production `scenic_score_tiles` scoring-version count.
+2. Run/record release QA baseline after each production release.
+3. Add deploy smoke checks directly into workflow summaries.
+4. Plan first scheduled recompute cadence (monthly OSM + scenic release train).
 
