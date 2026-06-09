@@ -107,8 +107,11 @@ MoodRide generates a loop route optimized for:
 **Data Sources:**
 - OpenStreetMap - road network
 - Natural Earth - water bodies
-- Canada Land Cover - land use (upgrade in progress)
-- Copernicus DEM - elevation (upgrade in progress)
+- Canada Land Cover - land use
+- Copernicus DEM - elevation
+- Protected/conserved areas - park proximity and park boost
+- Overture Places/Buildings - POI quality and urban-density signals
+- Light pollution / nighttime lights - darkness and solitude signal
 - OpenTopoData - elevation profiles (optional)
 
 **Observability:**
@@ -119,8 +122,8 @@ MoodRide generates a loop route optimized for:
 
 ## 🎨 Key Innovations
 
-1. **Hybrid OSRM Loop Generation**: Tile-based waypoint rings + corridor scoring (`hybrid_osrm_v1`)
-2. **H3 Scenic Intelligence**: Component scores (water/green/elevation/solitude/curve/poi) + preferences
+1. **Hybrid OSRM Loop Generation**: intent-aware waypoint rings + corridor-quality scoring (`hybrid_osrm_v2`)
+2. **H3 Scenic Intelligence**: Component scores (water/green/elevation/solitude/curve/poi/park/urban/darkness) + preferences
 3. **Multi-Option Routes**: `most_scenic` / `balanced` / `shorter` profiles persisted per job
 4. **Async Job Architecture**: Kafka workers + WebSocket completion/failure updates
 5. **Versioned Data Releases**: OSRM + scenic tiles released through GitHub Actions
@@ -226,16 +229,17 @@ See [PROJECT_STRUCTURE.md](PROJECT_STRUCTURE.md) for detailed breakdown.
 
 ---
 
-## ✅ Current Status (May 2026)
+## ✅ Current Status (June 2026)
 
-- Hybrid OSRM routing (`hybrid_osrm_v1`) is the default generator; beam-search fallback removed.
+- Hybrid OSRM routing (`hybrid_osrm_v2`) is the default generator; beam-search fallback removed.
 - Multi-option routes are persisted and exposed in API + UI (`most_scenic`, `balanced`, `shorter`).
 - Start Drive (Google/Apple) + GPX export shipped; mobile handoff validation still pending.
 - `/routes/*` aliases are in deprecation window; `/api/*` is canonical (sunset Aug 1, 2026).
 - Release QA baseline script and artifacts are in place for each deploy.
-- Data quality upgrade (land cover + DEM) is in progress; scoped runs complete, national coverage pending.
+- Core land-cover + DEM upgrade is complete nationally; 2.9 protected-area enrichment is locally artifacted.
+- 3.0 Overture/light-pollution enrichment is implemented in schema, scripts, shared scoring, and route-quality evals. Confirm the GitHub release/deploy state with authenticated `gh` access before treating publication as verified from a fresh machine.
 
-See [HybridRoutingProgress](docs/HybridRoutingProgress.md), [RouteExportAndUIPolishProgress](docs/RouteExportAndUIPolishProgress.md), and [DataQualityUpgradeProgress](docs/DataQualityUpgradeProgress.md).
+See [Hybrid OSRM v2](docs/HybridOsrmV2.md), [HybridRoutingProgress](docs/HybridRoutingProgress.md), [RouteExportAndUIPolishProgress](docs/RouteExportAndUIPolishProgress.md), [DataQualityUpgradeProgress](docs/DataQualityUpgradeProgress.md), and [DataEnrichment30Plan](docs/DataEnrichment30Plan.md).
 
 ---
 

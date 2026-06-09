@@ -100,6 +100,15 @@ SELECT
     MIN(ST_SRID(rast)) AS min_srid,
     MAX(ST_SRID(rast)) AS max_srid
 FROM $qualifiedTable;
+DO $$
+DECLARE
+    raster_tiles BIGINT;
+BEGIN
+    SELECT COUNT(*) INTO raster_tiles FROM $qualifiedTable;
+    IF raster_tiles = 0 THEN
+        RAISE EXCEPTION 'Raster import produced 0 rows in $qualifiedTable.';
+    END IF;
+END $$;
 "@
 }
 
@@ -176,6 +185,15 @@ SELECT
     MIN(ST_SRID(rast)) AS min_srid,
     MAX(ST_SRID(rast)) AS max_srid
 FROM $qualifiedTable;
+DO $$
+DECLARE
+    raster_tiles BIGINT;
+BEGIN
+    SELECT COUNT(*) INTO raster_tiles FROM $qualifiedTable;
+    IF raster_tiles = 0 THEN
+        RAISE EXCEPTION 'Raster import produced 0 rows in $qualifiedTable.';
+    END IF;
+END $$;
 "@
     $execArgs = @("exec")
     if ($Password) { $execArgs += @("-e", "PGPASSWORD=$Password") }

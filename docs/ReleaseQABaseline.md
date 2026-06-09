@@ -54,4 +54,4 @@ The JSON includes full route options. The Markdown summary includes route-option
 - For PowerShell web requests, use this script or `curl.exe` to avoid browser-parsing prompts from `curl` alias behavior.
 - Keep each output artifact as a baseline record for regressions between releases.
 - The route request uses the current numeric `preferenceVector` schema (`water`, `greenery`, `elevation`, `solitude`, `curves`, `poi`).
-- Current production scenic data is `2.8-urban-aware-elevation-calibration`.
+- This baseline script is data-release agnostic. Record the active `scenic_score_tiles.scoring_version` alongside each run; 3.0 publication/deployment should be verified with authenticated GitHub release metadata and a production DB scoring-version count.

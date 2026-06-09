@@ -73,6 +73,15 @@ SELECT
     MIN(ST_SRID(rast)) AS min_srid,
     MAX(ST_SRID(rast)) AS max_srid
 FROM public.$TargetTable;
+DO $$
+DECLARE
+    raster_tiles BIGINT;
+BEGIN
+    SELECT COUNT(*) INTO raster_tiles FROM public.$TargetTable;
+    IF raster_tiles = 0 THEN
+        RAISE EXCEPTION 'Light-pollution raster import produced 0 rows in public.$TargetTable.';
+    END IF;
+END $$;
 "@
 
 $psql = Get-Command psql -ErrorAction SilentlyContinue

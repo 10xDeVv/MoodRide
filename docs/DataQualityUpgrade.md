@@ -1,6 +1,8 @@
 # MoodRide Data Quality Upgrade
 
-Status: completed and deployed to production on 2026-05-18. Current production scenic data is calibrated through `2.8-urban-aware-elevation-calibration`.
+Status: completed and deployed to production on 2026-05-18.
+
+Historical scope note: this document records the completed 2.8 land-cover/DEM calibration release. It is not the latest overall scenic-enrichment status; see `docs/DataEnrichment30Plan.md` for the later 2.9 protected-area and 3.0 Overture/light-pollution enrichment state.
 
 This document records the completed core data upgrade for scenic routing. The original plan was to replace weak OSM-only scenic components with real raster-backed data for land cover and elevation. That work is now complete for the current national Canada operating dataset.
 
@@ -29,7 +31,7 @@ Existing `water_score`, `curve_score`, and `poi_score` were retained.
 
 ## Current 2.8 Metrics
 
-`2.8` is the current production calibration release. It keeps the completed national DEM coverage from `2.7`, corrects the NALCMS land-cover class legend, recomputes `green_score` and `solitude_score`, and downweights DEM surface-model elevation where land cover is urban/built-up.
+`2.8` was the production calibration release for the core land-cover/DEM upgrade. It keeps the completed national DEM coverage from `2.7`, corrects the NALCMS land-cover class legend, recomputes `green_score` and `solitude_score`, and downweights DEM surface-model elevation where land cover is urban/built-up.
 
 ```text
 scoring_version: 2.8-urban-aware-elevation-calibration

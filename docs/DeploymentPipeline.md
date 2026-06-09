@@ -106,24 +106,28 @@ The workflow downloads the release asset, copies it to VM, updates `OSRM_DATASET
 
 ```powershell
 ./scripts/deploy/run_nationwide_scenic_recompute.ps1 `
-  -SqlScriptPath "scripts/setup/data-quality-upgrade-batched.sql" `
-  -ChunkSize 500 `
-  -ExpectedScoringVersion "2.6-raster-data-quality-upgrade-national-batched"
+  -SqlScriptPath "scripts/setup/data-quality-enrichment-v30.sql" `
+  -ChunkSize 1000 `
+  -ExpectedScoringVersion "3.0-overture-lightpollution-enrichment"
 ```
 
-This executes the batched raster/DEM scoring SQL over your local `moodride` database.
+This executes the selected versioned scenic scoring SQL over your local `moodride` database.
 
 Important behavior:
 
-- `scripts/setup/data-quality-upgrade-batched.sql` is now a single-pass target to `2.6-raster-data-quality-upgrade-national-batched`.
-- The run is resumable. Re-running after interruption continues from remaining tiles not already at `2.6`.
+- Use the SQL script that matches the release train you are publishing:
+  - `scripts/setup/data-quality-upgrade-batched.sql` for `2.6-raster-data-quality-upgrade-national-batched`
+  - `scripts/setup/data-quality-calibration-v28.sql` for `2.8-urban-aware-elevation-calibration`
+  - `scripts/setup/data-quality-parks-v29.sql` for `2.9-protected-areas-enrichment`
+  - `scripts/setup/data-quality-enrichment-v30.sql` for `3.0-overture-lightpollution-enrichment`
+- The run is resumable. Re-running after interruption continues from remaining tiles not already at the expected scoring version.
 
 ### 5B. Publish scenic tile release from your local machine
 
 ```powershell
 ./scripts/deploy/publish_scenic_release.ps1 `
-  -ScoringVersion "2.6-raster-data-quality-upgrade-national-batched" `
-  -ReleaseTag "scenic-2.6-raster-data-quality-upgrade-national-batched-20260506" `
+  -ScoringVersion "3.0-overture-lightpollution-enrichment" `
+  -ReleaseTag "scenic-3.0-overture-lightpollution-enrichment-$(Get-Date -Format 'yyyyMMdd-HHmm')" `
   -Repo "10xDeVv/MoodRide"
 ```
 
@@ -136,8 +140,8 @@ This uploads:
 
 Run workflow `.github/workflows/deploy-scenic-release.yml` with:
 
-- `release_tag`: example `scenic-2.6-raster-data-quality-upgrade-national-batched-20260506`
-- `scoring_version`: example `2.6-raster-data-quality-upgrade-national-batched`
+- `release_tag`: example `scenic-3.0-overture-lightpollution-enrichment-20260527-1230`
+- `scoring_version`: example `3.0-overture-lightpollution-enrichment`
 - `asset_name`: optional (defaults from `scoring_version`)
 
 The workflow downloads the scenic asset, uploads it to VM, applies score updates into `scenic_score_tiles`, and restarts `route-api` + `route-worker`.
