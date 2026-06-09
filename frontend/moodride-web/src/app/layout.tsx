@@ -1,30 +1,38 @@
 import "./globals.css";
 import type { Metadata } from "next";
 import type { ReactNode } from "react";
-import { Manrope, Space_Grotesk } from "next/font/google";
+import localFont from "next/font/local";
 
-const manrope = Manrope({
-  subsets: ["latin"],
+const displayFont = localFont({
+  src: [
+    { path: "../assets/fonts/Anton-Regular.ttf", weight: "900", style: "normal" },
+  ],
+  variable: "--font-display",
+  display: "swap"
+});
+
+const dmSans = localFont({
+  src: [
+    { path: "../assets/fonts/DMSans-Regular.ttf", weight: "400", style: "normal" },
+    { path: "../assets/fonts/DMSans-Medium.ttf", weight: "500", style: "normal" },
+    { path: "../assets/fonts/DMSans-SemiBold.ttf", weight: "600", style: "normal" },
+    { path: "../assets/fonts/DMSans-Bold.ttf", weight: "700", style: "normal" },
+    { path: "../assets/fonts/DMSans-ExtraBold.ttf", weight: "800", style: "normal" },
+    { path: "../assets/fonts/DMSans-Black.ttf", weight: "900", style: "normal" },
+  ],
   variable: "--font-body",
   display: "swap"
 });
 
-const spaceGrotesk = Space_Grotesk({
-  subsets: ["latin"],
-  variable: "--font-heading",
-  display: "swap"
-});
-
 export const metadata: Metadata = {
-  title: "MoodRide | Scenic Route Intelligence",
-  description: "Generate scenic loops for drives, walks, and rides, starting with Canada-wide driving routes."
+  title: "MoodRide — Scenic Route Generator",
+  description: "Generate scenic loop drives from a starting point. Compare route personalities, then launch navigation or export GPX."
 };
 
 export default function RootLayout({ children }: { children: ReactNode }) {
   return (
-    <html lang="en">
-      <body className={`${manrope.variable} ${spaceGrotesk.variable}`}>{children}</body>
+    <html lang="en" className={`${displayFont.variable} ${dmSans.variable}`}>
+      <body>{children}</body>
     </html>
   );
 }
-

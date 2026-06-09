@@ -1,185 +1,306 @@
 "use client";
 
-import { useEffect, useState, useRef } from "react";
-import type { Map as MapboxMap } from "mapbox-gl";
+import { useEffect, useRef, type MutableRefObject } from "react";
 import type { RouteDetailResponse } from "@/lib/types";
 
-interface Props {
+interface RouteMapProps {
   route: RouteDetailResponse | null;
+  selectedRouteId?: string;
+  centerLat?: number;
+  centerLng?: number;
+  theme?: "day" | "night";
+  onRouteSelect?: (routeId: string) => void;
 }
 
+const MAPBOX_TOKEN = process.env.NEXT_PUBLIC_MAPBOX_ACCESS_TOKEN;
+const ALL_ROUTES_SOURCE_ID = "all-routes";
+
+const ROUTE_BLUE = "#2563eb";
+const ROUTE_LIME = "#e8f04a";
+
+const MAPBOX_STYLES = {
+  day: "mapbox://styles/mapbox/outdoors-v12",
+  night: "mapbox://styles/mapbox/dark-v11"
+} as const;
+
 const PROFILE_COLORS: Record<string, string> = {
-  most_scenic: "#0D78FF",
-  balanced: "#118AB2",
-  shorter: "#1E5AA6"
+  most_scenic: ROUTE_BLUE,
+  balanced: ROUTE_BLUE,
+  shorter: ROUTE_BLUE
 };
 
-type LngLat = [number, number];
+function TopoBackground({ theme }: { theme: "day" | "night" }) {
+  const topoStroke = theme === "night" ? "#e8f04a" : "#1a3020";
+  const topoOpacity = theme === "night" ? 0.12 : 0.18;
 
-function buildRouteFeature(route: RouteDetailResponse): GeoJSON.FeatureCollection<GeoJSON.LineString> {
+  return (
+    <svg
+      style={{ position: "absolute", inset: 0, width: "100%", height: "100%", opacity: topoOpacity }}
+      viewBox="0 0 1200 700"
+      preserveAspectRatio="xMidYMid slice"
+      aria-hidden="true"
+    >
+      <ellipse cx="600" cy="350" rx="560" ry="320" fill="none" stroke={topoStroke} strokeWidth="1" />
+      <ellipse cx="600" cy="350" rx="480" ry="270" fill="none" stroke={topoStroke} strokeWidth="1" />
+      <ellipse cx="600" cy="350" rx="400" ry="220" fill="none" stroke={topoStroke} strokeWidth="1" />
+      <ellipse cx="600" cy="350" rx="320" ry="170" fill="none" stroke={topoStroke} strokeWidth="1" />
+      <ellipse cx="600" cy="350" rx="240" ry="125" fill="none" stroke={topoStroke} strokeWidth="1" />
+      <ellipse cx="600" cy="350" rx="160" ry="80" fill="none" stroke={topoStroke} strokeWidth="1.5" />
+      <ellipse cx="600" cy="350" rx="80" ry="40" fill="none" stroke={topoStroke} strokeWidth="1.5" />
+      <ellipse cx="200" cy="180" rx="200" ry="140" fill="none" stroke={topoStroke} strokeWidth="1" />
+      <ellipse cx="200" cy="180" rx="140" ry="100" fill="none" stroke={topoStroke} strokeWidth="1" />
+      <ellipse cx="200" cy="180" rx="80" ry="60" fill="none" stroke={topoStroke} strokeWidth="1" />
+      <ellipse cx="1000" cy="520" rx="220" ry="160" fill="none" stroke={topoStroke} strokeWidth="1" />
+      <ellipse cx="1000" cy="520" rx="150" ry="110" fill="none" stroke={topoStroke} strokeWidth="1" />
+      <ellipse cx="1000" cy="520" rx="80" ry="60" fill="none" stroke={topoStroke} strokeWidth="1" />
+      {Array.from({ length: 14 }).map((_, i) => (
+        <line key={`v${i}`} x1={i * 90} y1="0" x2={i * 90} y2="700" stroke={topoStroke} strokeWidth="0.4" />
+      ))}
+      {Array.from({ length: 9 }).map((_, i) => (
+        <line key={`h${i}`} x1="0" y1={i * 90} x2="1200" y2={i * 90} stroke={topoStroke} strokeWidth="0.4" />
+      ))}
+    </svg>
+  );
+}
+
+function SchematicMap({ route, theme }: { route: RouteDetailResponse | null; theme: "day" | "night" }) {
+  if (!route) {
+    return (
+      <div className="map-schematic">
+        <div className="map-schematic-topo" />
+        <TopoBackground theme={theme} />
+        <div className="map-notice">Add NEXT_PUBLIC_MAPBOX_ACCESS_TOKEN to enable live maps</div>
+      </div>
+    );
+  }
+
+  const coords = route.geometry?.geometry?.coordinates ?? [];
+  if (coords.length < 2) {
+    return (
+      <div className="map-schematic">
+        <div className="map-schematic-topo" />
+        <TopoBackground theme={theme} />
+        <div className="map-notice">Route geometry unavailable</div>
+      </div>
+    );
+  }
+
+  const W = 880;
+  const H = 520;
+  const PAD = 60;
+  const lngs = coords.map(([lng]) => lng);
+  const lats = coords.map(([, lat]) => lat);
+  const minLng = Math.min(...lngs);
+  const maxLng = Math.max(...lngs);
+  const minLat = Math.min(...lats);
+  const maxLat = Math.max(...lats);
+  const scaleX = (W - PAD * 2) / (maxLng - minLng || 1);
+  const scaleY = (H - PAD * 2) / (maxLat - minLat || 1);
+  const scale = Math.min(scaleX, scaleY);
+  const offsetX = (W - (maxLng - minLng) * scale) / 2;
+  const offsetY = (H - (maxLat - minLat) * scale) / 2;
+  const project = ([lng, lat]: [number, number]) => ({
+    x: offsetX + (lng - minLng) * scale,
+    y: H - offsetY - (lat - minLat) * scale
+  });
+  const points = coords.map(project);
+  const pathD = points.map((p, i) => `${i === 0 ? "M" : "L"} ${p.x.toFixed(1)} ${p.y.toFixed(1)}`).join(" ");
+  const activeOption = route.routeOptions?.find((o) => o.routeId === route.routeId);
+  const color = theme === "night"
+    ? ROUTE_LIME
+    : PROFILE_COLORS[activeOption?.profile ?? "most_scenic"] ?? ROUTE_BLUE;
+
+  return (
+    <div className="map-schematic">
+      <div className="map-schematic-topo" />
+      <TopoBackground theme={theme} />
+      <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="xMidYMid meet" style={{ position: "relative", width: "100%", height: "100%", display: "block", zIndex: 1 }} aria-label="Schematic route map">
+        <path d={pathD} fill="none" stroke="rgba(229,234,109,0.15)" strokeWidth={18} strokeLinecap="round" strokeLinejoin="round" />
+        <path d={pathD} fill="none" stroke="rgba(26,48,32,0.5)" strokeWidth={10} strokeLinecap="round" strokeLinejoin="round" />
+        <path d={pathD} fill="none" stroke={color} strokeWidth={5} strokeLinecap="round" strokeLinejoin="round" />
+        <circle cx={points[0].x} cy={points[0].y} r={10} fill="#1a3020" stroke="#e5ea6d" strokeWidth={2.5} />
+        <circle cx={points[0].x} cy={points[0].y} r={4} fill="#e5ea6d" />
+        <circle cx={points[points.length - 1].x} cy={points[points.length - 1].y} r={10} fill={color} stroke="#fff" strokeWidth={2.5} />
+        <circle cx={points[points.length - 1].x} cy={points[points.length - 1].y} r={4} fill="#fff" />
+      </svg>
+      <div className="map-notice">Schematic view — add Mapbox token for live map</div>
+    </div>
+  );
+}
+
+function lightenColor(hex: string, amount = 0.62): string {
+  const cleanHex = hex.replace("#", "");
+  const r = parseInt(cleanHex.substring(0, 2), 16);
+  const g = parseInt(cleanHex.substring(2, 4), 16);
+  const b = parseInt(cleanHex.substring(4, 6), 16);
+  const newR = Math.round(r + (255 - r) * amount);
+  const newG = Math.round(g + (255 - g) * amount);
+  const newB = Math.round(b + (255 - b) * amount);
+  return `rgb(${newR}, ${newG}, ${newB})`;
+}
+
+function routesToGeoJson(route: RouteDetailResponse, selectedRouteId: string | undefined, theme: "day" | "night") {
+  const activeOption = route.routeOptions?.find((option) => option.routeId === (selectedRouteId ?? route.routeId));
+  const color = theme === "night"
+    ? ROUTE_LIME
+    : PROFILE_COLORS[activeOption?.profile ?? "most_scenic"] ?? ROUTE_BLUE;
+  const coordinates = route.geometry?.geometry?.coordinates ?? [];
+
   return {
     type: "FeatureCollection",
-    features: [
-      {
-        type: "Feature",
-        properties: {},
-        geometry: {
-          type: "LineString",
-          coordinates: route.geometry.geometry.coordinates
-        }
-      }
-    ]
+    features: coordinates.length > 1
+      ? [{
+          type: "Feature",
+          id: route.routeId,
+          properties: {
+            routeId: route.routeId,
+            color,
+            lightColor: lightenColor(color),
+            selected: true,
+            offset: 0,
+            order: 1
+          },
+          geometry: {
+            type: "LineString",
+            coordinates
+          }
+        }]
+      : []
   };
 }
 
-function resolveRouteColor(route: RouteDetailResponse): string {
-  const activeProfile = route.routeOptions.find((option) => option.routeId === route.routeId)?.profile ?? "most_scenic";
-  return PROFILE_COLORS[activeProfile] ?? PROFILE_COLORS.most_scenic;
-}
-
-function buildSchematicPoints(coordinates: LngLat[], width: number, height: number, padding: number): string {
-  if (coordinates.length === 0) {
-    return "";
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function ensureRouteLayers(map: any) {
+  if (!map.getLayer("routes-alternate-bg")) {
+    map.addLayer({
+      id: "routes-alternate-bg",
+      type: "line",
+      source: ALL_ROUTES_SOURCE_ID,
+      filter: ["!=", ["get", "selected"], true],
+      layout: { "line-cap": "round", "line-join": "round" },
+      paint: { "line-color": "#ffffff", "line-width": 13, "line-opacity": 0.9, "line-offset": ["get", "offset"] }
+    });
   }
 
-  const lngValues = coordinates.map((point) => point[0]);
-  const latValues = coordinates.map((point) => point[1]);
-  const minLng = Math.min(...lngValues);
-  const maxLng = Math.max(...lngValues);
-  const minLat = Math.min(...latValues);
-  const maxLat = Math.max(...latValues);
-  const deltaLng = Math.max(maxLng - minLng, 0.0001);
-  const deltaLat = Math.max(maxLat - minLat, 0.0001);
-  const renderWidth = width - padding * 2;
-  const renderHeight = height - padding * 2;
+  if (!map.getLayer("routes-alternate-stroke")) {
+    map.addLayer({
+      id: "routes-alternate-stroke",
+      type: "line",
+      source: ALL_ROUTES_SOURCE_ID,
+      filter: ["!=", ["get", "selected"], true],
+      layout: { "line-cap": "round", "line-join": "round" },
+      paint: { "line-color": ["get", "color"], "line-width": 7, "line-opacity": 0.98, "line-offset": ["get", "offset"] }
+    });
+  }
 
-  return coordinates
-    .map(([lng, lat]) => {
-      const x = padding + ((lng - minLng) / deltaLng) * renderWidth;
-      const y = padding + (1 - (lat - minLat) / deltaLat) * renderHeight;
-      return `${x.toFixed(1)},${y.toFixed(1)}`;
-    })
-    .join(" ");
+  if (!map.getLayer("routes-selected-bg")) {
+    map.addLayer({
+      id: "routes-selected-bg",
+      type: "line",
+      source: ALL_ROUTES_SOURCE_ID,
+      filter: ["==", ["get", "selected"], true],
+      layout: { "line-cap": "round", "line-join": "round" },
+      paint: { "line-color": ["get", "color"], "line-width": 8, "line-opacity": 0.35, "line-blur": 6, "line-offset": ["get", "offset"] }
+    });
+  }
+
+  if (!map.getLayer("routes-selected-stroke")) {
+    map.addLayer({
+      id: "routes-selected-stroke",
+      type: "line",
+      source: ALL_ROUTES_SOURCE_ID,
+      filter: ["==", ["get", "selected"], true],
+      layout: { "line-cap": "round", "line-join": "round" },
+      paint: { "line-color": ["get", "color"], "line-width": 5, "line-opacity": 1, "line-offset": ["get", "offset"] }
+    });
+  }
 }
 
-export function RouteMap({ route }: Props) {
-  const containerRef = useRef<HTMLDivElement | null>(null);
-  const mapRef = useRef<MapboxMap | null>(null);
-  const [mapReady, setMapReady] = useState(false);
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function ensureRouteInteractions(map: any, onSelectRef: MutableRefObject<((routeId: string) => void) | undefined>) {
+  if (map.__moodrideRouteInteractionsBound) return;
+
+  const handleRouteClick = (event: { features?: Array<{ properties?: { routeId?: string } }> }) => {
+    const routeId = event.features?.[0]?.properties?.routeId;
+    if (routeId) onSelectRef.current?.(routeId);
+  };
+
+  map.on("click", "routes-alternate-stroke", handleRouteClick);
+  map.on("click", "routes-selected-stroke", handleRouteClick);
+  map.on("mouseenter", "routes-alternate-stroke", () => { map.getCanvas().style.cursor = "pointer"; });
+  map.on("mouseleave", "routes-alternate-stroke", () => { map.getCanvas().style.cursor = ""; });
+  map.__moodrideRouteInteractionsBound = true;
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function renderAllRoutes(map: any, route: RouteDetailResponse, selectedRouteId: string | undefined, theme: "day" | "night") {
+  const geojson = routesToGeoJson(route, selectedRouteId, theme);
+
+  if (!map.getSource(ALL_ROUTES_SOURCE_ID)) {
+    map.addSource(ALL_ROUTES_SOURCE_ID, { type: "geojson", data: geojson });
+    ensureRouteLayers(map);
+  } else {
+    const source = map.getSource(ALL_ROUTES_SOURCE_ID);
+    source.setData(geojson);
+    ensureRouteLayers(map);
+  }
+
+  const coordinates = geojson.features.flatMap((feature) => feature?.geometry.coordinates ?? []);
+  if (coordinates.length > 1) {
+    const lngs = coordinates.map(([lng]) => lng);
+    const lats = coordinates.map(([, lat]) => lat);
+    map.fitBounds([[Math.min(...lngs), Math.min(...lats)], [Math.max(...lngs), Math.max(...lats)]], { padding: 70, duration: 900 });
+  }
+}
+
+export function RouteMap({ route, selectedRouteId, centerLat = 49.28, centerLng = -123.12, theme = "day", onRouteSelect }: RouteMapProps) {
+  const mapContainerRef = useRef<HTMLDivElement>(null);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const mapRef = useRef<any>(null);
+  const onRouteSelectRef = useRef(onRouteSelect);
+  const routeRef = useRef(route);
+  const selectedRouteIdRef = useRef(selectedRouteId);
+  const themeRef = useRef(theme);
+  const hasToken = Boolean(MAPBOX_TOKEN);
 
   useEffect(() => {
-    setMapReady(false);
-  }, [route?.routeId]);
+    onRouteSelectRef.current = onRouteSelect;
+  }, [onRouteSelect]);
 
   useEffect(() => {
-    if (!containerRef.current || !route) {
-      return;
-    }
+    routeRef.current = route;
+    selectedRouteIdRef.current = selectedRouteId;
+    themeRef.current = theme;
+  }, [route, selectedRouteId, theme]);
 
-    const token = process.env.NEXT_PUBLIC_MAPBOX_ACCESS_TOKEN;
-    if (!token) {
-      return;
-    }
 
+  useEffect(() => {
+    if (!hasToken || !mapContainerRef.current) return;
     let disposed = false;
 
     const initMap = async () => {
-      const mapboxModule = await import("mapbox-gl");
-      const mapboxgl = mapboxModule.default;
-      mapboxgl.accessToken = token;
+      const mapboxgl = (await import("mapbox-gl")).default;
+      // @ts-expect-error — CSS module import, handled by Next.js
+      await import("mapbox-gl/dist/mapbox-gl.css");
+      if (disposed || !mapContainerRef.current) return;
 
-      if (disposed || !containerRef.current) {
-        return;
-      }
-
+      mapboxgl.accessToken = MAPBOX_TOKEN!;
       const map = new mapboxgl.Map({
-        container: containerRef.current,
-        style: "mapbox://styles/mapbox/streets-v12",
-        center: [route.startLng, route.startLat],
-        zoom: 11
-      });
-
-      map.on("load", () => {
-        const sourceId = "route-source";
-        const casingLayerId = "route-casing-layer";
-        const glowLayerId = "route-glow-layer";
-        const lineLayerId = "route-line-layer";
-
-        const routeColor = resolveRouteColor(route);
-        const featureCollection = buildRouteFeature(route);
-
-        [lineLayerId, glowLayerId, casingLayerId].forEach((id) => {
-          if (map.getLayer(id)) {
-            map.removeLayer(id);
-          }
-        });
-        if (map.getSource(sourceId)) {
-          map.removeSource(sourceId);
-        }
-
-        map.addSource(sourceId, {
-          type: "geojson",
-          data: featureCollection
-        });
-
-        map.addLayer({
-          id: casingLayerId,
-          type: "line",
-          source: sourceId,
-          layout: {
-            "line-join": "round",
-            "line-cap": "round"
-          },
-          paint: {
-            "line-color": "#0B203A",
-            "line-width": 11,
-            "line-opacity": 0.68
-          }
-        });
-
-        map.addLayer({
-          id: glowLayerId,
-          type: "line",
-          source: sourceId,
-          layout: {
-            "line-join": "round",
-            "line-cap": "round"
-          },
-          paint: {
-            "line-color": "#8FD3FF",
-            "line-width": 14,
-            "line-blur": 3.4,
-            "line-opacity": 0.38
-          }
-        });
-
-        map.addLayer({
-          id: lineLayerId,
-          type: "line",
-          source: sourceId,
-          layout: {
-            "line-join": "round",
-            "line-cap": "round"
-          },
-          paint: {
-            "line-color": routeColor,
-            "line-width": 6.4,
-            "line-opacity": 0.98
-          }
-        });
-
-        if (route.geometry.geometry.coordinates.length > 1) {
-          const bounds = route.geometry.geometry.coordinates.reduce(
-            (acc, point) => acc.extend(point as [number, number]),
-            new mapboxgl.LngLatBounds(route.geometry.geometry.coordinates[0], route.geometry.geometry.coordinates[0])
-          );
-          map.fitBounds(bounds, { padding: 40, duration: 700 });
-        }
-
-        setMapReady(true);
+        container: mapContainerRef.current,
+        style: MAPBOX_STYLES[themeRef.current],
+        center: [centerLng, centerLat],
+        zoom: 10,
+        attributionControl: false
       });
 
       mapRef.current = map;
+
+      map.on("load", () => {
+        if (route) {
+          renderAllRoutes(map, route, selectedRouteId, themeRef.current);
+          ensureRouteInteractions(map, onRouteSelectRef);
+        }
+      });
     };
 
     void initMap();
@@ -191,53 +312,40 @@ export function RouteMap({ route }: Props) {
         mapRef.current = null;
       }
     };
-  }, [route]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hasToken]);
 
-  if (!route) {
-    return <div className="map map-placeholder small">Route map appears here after job completion.</div>;
+  useEffect(() => {
+    if (!hasToken || !mapRef.current) return;
+    const map = mapRef.current;
+
+    map.setStyle(MAPBOX_STYLES[theme]);
+    map.once("style.load", () => {
+      const currentRoute = routeRef.current;
+      if (currentRoute) {
+        renderAllRoutes(map, currentRoute, selectedRouteIdRef.current, theme);
+        ensureRouteInteractions(map, onRouteSelectRef);
+      }
+    });
+  }, [theme, hasToken]);
+
+  useEffect(() => {
+    if (!hasToken || !mapRef.current || !route) return;
+    const map = mapRef.current;
+    if (map.loaded()) {
+      renderAllRoutes(map, route, selectedRouteId, theme);
+      ensureRouteInteractions(map, onRouteSelectRef);
+    } else {
+      map.once("load", () => {
+        renderAllRoutes(map, route, selectedRouteId, theme);
+        ensureRouteInteractions(map, onRouteSelectRef);
+      });
+    }
+  }, [route, selectedRouteId, theme, hasToken]);
+
+  if (!hasToken) {
+    return <SchematicMap route={route} theme={theme} />;
   }
 
-  if (!process.env.NEXT_PUBLIC_MAPBOX_ACCESS_TOKEN) {
-    const coordinates = route.geometry.geometry.coordinates as LngLat[];
-    const routeColor = resolveRouteColor(route);
-    const pathPoints = buildSchematicPoints(coordinates, 880, 520, 34);
-    const startPoint = pathPoints.split(" ")[0];
-    const endPoint = pathPoints.split(" ").at(-1);
-    return (
-      <div className="map map-fallback" role="img" aria-label="Route preview map">
-        <svg viewBox="0 0 880 520" className="map-fallback-svg">
-          <defs>
-            <linearGradient id="routeGlowGradient" x1="0%" y1="0%" x2="100%" y2="0%">
-              <stop offset="0%" stopColor="#9ed0ff" />
-              <stop offset="100%" stopColor={routeColor} />
-            </linearGradient>
-          </defs>
-          <rect x="0" y="0" width="880" height="520" className="map-fallback-bg" />
-          <polyline points={pathPoints} className="map-fallback-shadow" />
-          <polyline points={pathPoints} className="map-fallback-route" style={{ stroke: "url(#routeGlowGradient)" }} />
-          {startPoint && <circle cx={startPoint.split(",")[0]} cy={startPoint.split(",")[1]} r="7.5" className="map-fallback-start" />}
-          {endPoint && <circle cx={endPoint.split(",")[0]} cy={endPoint.split(",")[1]} r="6.5" className="map-fallback-end" />}
-        </svg>
-        <div className="map-fallback-caption small">
-          Live route preview ({coordinates.length} points). Set `NEXT_PUBLIC_MAPBOX_ACCESS_TOKEN` for full basemap tiles.
-        </div>
-      </div>
-    );
-  }
-
-  return (
-    <div className={`map ${mapReady ? "map-ready" : ""}`} aria-busy={!mapReady} role="status" aria-live="polite">
-      <div className="map-canvas" ref={containerRef} />
-      {!mapReady && (
-        <div className="map-skeleton" aria-label="Loading route map">
-          <div className="map-skeleton-line map-skeleton-line-long" />
-          <div className="map-skeleton-line" />
-          <div className="map-skeleton-line map-skeleton-line-short" />
-        </div>
-      )}
-    </div>
-  );
+  return <div ref={mapContainerRef} style={{ width: "100%", height: "100%" }} />;
 }
-
-
-

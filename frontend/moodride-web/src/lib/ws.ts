@@ -2,7 +2,7 @@ import { Client, IMessage } from "@stomp/stompjs";
 import SockJS from "sockjs-client";
 import { JobSocketEvent } from "@/lib/types";
 
-const wsBaseUrl = process.env.NEXT_PUBLIC_WS_BASE_URL ?? "http://localhost:8084/ws";
+const wsBaseUrl = process.env.NEXT_PUBLIC_WS_BASE_URL ?? "https://app.moodrides.com/ws";
 
 function normalizeWsChannel(wsChannel: string, jobId: string): string {
   if (wsChannel.startsWith("/topic/")) {
