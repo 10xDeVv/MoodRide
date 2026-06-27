@@ -25,7 +25,7 @@ const dmSans = localFont({
 });
 
 export const metadata: Metadata = {
-  title: "MoodRide — Scenic Route Generator",
+  title: "Wayward — Scenic Route Generator",
   description: "Generate scenic loop drives from a starting point. Compare route personalities, then launch navigation or export GPX."
 };
 

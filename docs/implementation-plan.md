@@ -1,4 +1,4 @@
-# MoodRide Implementation Plan (Living)
+# Wayward Implementation Plan (Living)
 
 Last reconciled: 2026-06-08
 

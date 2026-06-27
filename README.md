@@ -1,8 +1,8 @@
-# MoodRide - Scenic Driving Route Generator 🚗🌄
+# Wayward - Scenic Driving Route Generator 🚗🌄
 
 **A distributed microservices platform that generates beautiful scenic driving loops based on time budget and vibe preferences.**
 
-> "Instead of getting you somewhere fast, MoodRide shows you something beautiful."
+> "Instead of getting you somewhere fast, Wayward shows you something beautiful."
 
 [![Java](https://img.shields.io/badge/Java-25-orange.svg)](https://openjdk.java.net/)
 [![Spring Boot](https://img.shields.io/badge/Spring%20Boot-3.3-brightgreen.svg)](https://spring.io/projects/spring-boot)
@@ -27,18 +27,18 @@
 
 ---
 
-## 🎯 What is MoodRide?
+## 🎯 What is Wayward?
 
-MoodRide is a **scenic route generation platform** that inverts traditional navigation:
+Wayward is a **scenic route generation platform** that inverts traditional navigation:
 
 - ❌ Traditional GPS: **Minimize time** from Point A → Point B
-- ✅ MoodRide: **Maximize scenic beauty** over a circular loop with a time budget
+- ✅ Wayward: **Maximize scenic beauty** over a circular loop with a time budget
 
 ### Example Use Case
 
 > "I have 90 minutes free on Saturday morning. Generate me a beautiful coastal drive that starts and ends at my house."
 
-MoodRide generates a loop route optimized for:
+Wayward generates a loop route optimized for:
 - 🌊 **Coastal views** (water proximity)
 - ⛰️ **Elevation changes** (mountain roads)
 - 🌲 **Natural scenery** (forests, parks)

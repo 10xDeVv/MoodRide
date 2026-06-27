@@ -10,7 +10,7 @@
     <version>1.0.0-SNAPSHOT</version>
     <packaging>pom</packaging>
 
-    <name>MoodRide Parent</name>
+    <name>Wayward Parent</name>
     <description>Scenic driving route generation platform</description>
 
     <parent>

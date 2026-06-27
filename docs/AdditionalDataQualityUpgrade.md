@@ -1,6 +1,6 @@
 
 
-# MoodRide – Extended Data Sources Execution Plan
+# Wayward – Extended Data Sources Execution Plan
 
 ## 🧭 Context
 
@@ -376,7 +376,7 @@ GET https://api.open-meteo.com/v1/forecast
 
 ## 🔮 Future Sources (Not Now)
 
-These are valuable but significantly more complex. Consider only if pursuing MoodRide as a real product beyond portfolio.
+These are valuable but significantly more complex. Consider only if pursuing Wayward as a real product beyond portfolio.
 
 | Source | What It Does | Why Defer |
 |---|---|---|

@@ -1,4 +1,4 @@
-# MoodRide Data Enrichment 3.0
+# Wayward Data Enrichment 3.0
 
 ## Status
 
@@ -42,7 +42,7 @@ Treat 3.0 code support and local Overture/building-density enrichment as verifie
 
 ## Active Ownership
 
-MoodRide's production data pipeline is now script-driven and release-based:
+Wayward's production data pipeline is now script-driven and release-based:
 
 1. Download or import offline geospatial source data.
 2. Load source tables/rasters into PostGIS.

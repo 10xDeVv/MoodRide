@@ -6,7 +6,7 @@ import org.springframework.batch.core.configuration.annotation.EnableBatchProces
 import org.springframework.scheduling.annotation.EnableScheduling;
 
 /**
- * MoodRide Scenic Scoring Service
+ * Wayward Scenic Scoring Service
  * 
  * Weekly batch service for computing scenic scores of H3 hexagonal tiles.
  * Uses 6 external APIs to score water proximity, elevation, land use, etc.

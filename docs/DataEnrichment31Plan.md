@@ -1,4 +1,4 @@
-# MoodRide Data Enrichment 3.1
+# Wayward Data Enrichment 3.1
 
 ## Status
 
@@ -67,7 +67,7 @@ Source note:
 
 - EOG's VIIRS Nighttime Lights product page lists the annual VNL data as GeoTIFF, EPSG:4326, 15 arc-second resolution, with radiance units of `nW/cm^2/sr`.
 - The public product page states VIIRS Nighttime Lights data are licensed under CC BY 4.0.
-- The annual VNL V2.2 download endpoint requires EOG sign-in, so the raster must be supplied locally before MoodRide can run the real import.
+- The annual VNL V2.2 download endpoint requires EOG sign-in, so the raster must be supplied locally before Wayward can run the real import.
 
 Expected result:
 

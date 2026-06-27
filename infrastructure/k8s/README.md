@@ -1,4 +1,4 @@
-# MoodRide Kubernetes Assets
+# Wayward Kubernetes Assets
 
 This tree contains production-oriented manifests for app services and shared gateway/CDC infrastructure.
 

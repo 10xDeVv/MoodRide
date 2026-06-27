@@ -7,7 +7,7 @@ import org.springframework.cache.annotation.EnableCaching;
 import org.springframework.scheduling.annotation.EnableScheduling;
 
 /**
- * MoodRide Route API Service
+ * Wayward Route API Service
  * 
  * REST API for scenic route generation and job management.
  * Accepts route requests, publishes jobs to Kafka, and manages job status.

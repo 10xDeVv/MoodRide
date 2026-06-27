@@ -1,7 +1,7 @@
-# MoodRide Frontend Rebuild Implementation Plan
+# Wayward Frontend Rebuild Implementation Plan
 
 ## 1. Goal
-Rebuild the MoodRide Next.js frontend into a map-first, portfolio-grade scenic route generation interface, applying the "Sage + Cream" (Archetype E) design system and layout inspirations from the provided HTML references.
+Rebuild the Wayward Next.js frontend into a map-first, portfolio-grade scenic route generation interface, applying the "Sage + Cream" (Archetype E) design system and layout inspirations from the provided HTML references.
 
 ## 2. Component Architecture Refactoring
 

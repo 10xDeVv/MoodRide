@@ -1,4 +1,4 @@
-# MoodRide Web Frontend
+# Wayward Web Frontend
 
 Production-oriented Next.js frontend for route generation, async job tracking, and route visualization.
 

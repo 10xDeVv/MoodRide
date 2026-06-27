@@ -1,6 +1,6 @@
 # Route Quality Eval
 
-`scripts/monitoring/run-route-quality-eval.ps1` runs a fixed scenic-routing benchmark suite against a MoodRide API and writes machine-readable route-quality diagnostics.
+`scripts/monitoring/run-route-quality-eval.ps1` runs a fixed scenic-routing benchmark suite against a Wayward API and writes machine-readable route-quality diagnostics.
 
 The goal is to tune the routing engine with evidence instead of one-off manual checks.
 

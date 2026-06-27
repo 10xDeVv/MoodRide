@@ -1,6 +1,6 @@
 
 
-# MoodRide – Route Export & UI Polish Execution Plan
+# Wayward – Route Export & UI Polish Execution Plan
 
 ## 🧭 Context
 
@@ -179,7 +179,7 @@ function exportGpx(route: Route, routeName: string) {
     .join('\n');
 
   const gpx = `<?xml version="1.0" encoding="UTF-8"?>
-<gpx version="1.1" creator="MoodRide">
+<gpx version="1.1" creator="Wayward">
   <trk>
     <name>${routeName}</name>
     <trkseg>
@@ -231,7 +231,7 @@ ${points}
 | Retry: 0/2 | Hide |
 | Estimated completion: 5s | Hide |
 | "Route completed via polling fallback" | Hide |
-| Algorithm: hybrid_osrm_v1 | Hide |
+| Algorithm: hybrid_osrm_v2 | Hide |
 
 **Implementation:**
 - [ ] Add a `showDebug` state toggle (default: false)

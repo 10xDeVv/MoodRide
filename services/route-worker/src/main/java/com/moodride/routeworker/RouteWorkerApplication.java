@@ -8,7 +8,7 @@ import org.springframework.cache.annotation.EnableCaching;
 import org.springframework.scheduling.annotation.EnableScheduling;
 
 /**
- * MoodRide Route Worker Service
+ * Wayward Route Worker Service
  * 
  * Background service that processes route generation jobs using hybrid OSRM routing.
  * Consumes jobs from Kafka, generates scenic routes, and publishes completion events.

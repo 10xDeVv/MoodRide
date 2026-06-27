@@ -1,4 +1,4 @@
-# MoodRide Deployment Pipeline (GitHub Actions)
+# Wayward Deployment Pipeline (GitHub Actions)
 
 This pipeline removes the need to SSH into the VM for normal app deploys and data refreshes.
 

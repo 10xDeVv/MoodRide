@@ -1,9 +1,9 @@
-# MoodRide Engineering Specification (As-Built)
+# Wayward Engineering Specification (As-Built)
 
 Last reconciled: 2026-06-08
 
 ## 1) Document Intent
-This file is the current, code-aligned engineering specification for MoodRide. It replaces the previous oversized historical spec and focuses on the system that actually runs today.
+This file is the current, code-aligned engineering specification for Wayward. It replaces the previous oversized historical spec and focuses on the system that actually runs today.
 
 Use this document as the technical source of truth for:
 - runtime architecture
@@ -13,7 +13,7 @@ Use this document as the technical source of truth for:
 - operational constraints and risks
 
 ## 2) Product Scope (Current)
-MoodRide generates scenic driving loops from a start point and time budget, then returns route options with real-time status updates.
+Wayward generates scenic driving loops from a start point and time budget, then returns route options with real-time status updates.
 
 In-scope now:
 - async route job submission and tracking

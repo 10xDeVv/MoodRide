@@ -1,6 +1,6 @@
-# MoodRide Scenic Route Flow
+# Wayward Scenic Route Flow
 
-This document describes how MoodRide generates a scenic route today, based on the current implementation in `route-api`, `route-worker`, and `scenic-scoring-service`.
+This document describes how Wayward generates a scenic route today, based on the current implementation in `route-api`, `route-worker`, and `scenic-scoring-service`.
 
 ## 1. Entry Point
 
@@ -164,7 +164,7 @@ The current implementation is intentionally simpler than the design spec.
 
 ## Bottom Line
 
-MoodRide currently generates scenic driving loops by selecting scenic H3 waypoint candidates, asking local OSRM for real Canada driving loops, scoring returned corridors with request-weighted scenic tiles, and returning up to three diversified route options. The result is asynchronous, cache-aware, data-driven, and preference-aware, but it still needs stronger product handling for vibe mismatch and low-quality areas.
+Wayward currently generates scenic driving loops by selecting scenic H3 waypoint candidates, asking local OSRM for real Canada driving loops, scoring returned corridors with request-weighted scenic tiles, and returning up to three diversified route options. The result is asynchronous, cache-aware, data-driven, and preference-aware, but it still needs stronger product handling for vibe mismatch and low-quality areas.
 
 ## 10. Implementation Roadmap
 

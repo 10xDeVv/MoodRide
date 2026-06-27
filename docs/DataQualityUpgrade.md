@@ -1,4 +1,4 @@
-# MoodRide Data Quality Upgrade
+# Wayward Data Quality Upgrade
 
 Status: completed and deployed to production on 2026-05-18.
 

@@ -1,6 +1,6 @@
 # Vibe Profile Calibration
 
-MoodRide's vibe profiles are backend contracts for turning user-facing route moods into route-scoring behavior.
+Wayward's vibe profiles are backend contracts for turning user-facing route moods into route-scoring behavior.
 
 ## Current Status
 

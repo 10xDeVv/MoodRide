@@ -5,7 +5,7 @@ import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.kafka.annotation.EnableKafka;
 
 /**
- * MoodRide Notification Service
+ * Wayward Notification Service
  * 
  * WebSocket service for real-time route delivery to frontend clients.
  * Consumes route completion events from Kafka and delivers via WebSocket.

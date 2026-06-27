@@ -1,6 +1,6 @@
 # Hybrid OSRM v2
 
-`hybrid_osrm_v2` is the current MoodRide route generation algorithm. It keeps OSRM responsible for legal road geometry, while MoodRide decides what kinds of places should shape the loop and how good the returned corridor is for the user's vibe.
+`hybrid_osrm_v2` is the current Wayward route generation algorithm. It keeps OSRM responsible for legal road geometry, while Wayward decides what kinds of places should shape the loop and how good the returned corridor is for the user's vibe.
 
 The important change from v1 is that v2 is a clearer contract, not a random constant tweak. It separates:
 
@@ -35,7 +35,7 @@ The important change from v1 is that v2 is a clearer contract, not a random cons
    - `shorter`
 11. Persisted successful route options update the duration calibration aggregate for future requests.
 
-OSRM is not a paid external API in the default MoodRide stack. It is a local container/service built from the prepared OSM dataset.
+OSRM is not a paid external API in the default Wayward stack. It is a local container/service built from the prepared OSM dataset.
 
 ## V2 Route Score
 
@@ -118,7 +118,7 @@ Geometry strategy codes:
 
 ## Duration Calibration
 
-`route_duration_calibrations` learns how OSRM durations compare with the waypoint geometry MoodRide requested.
+`route_duration_calibrations` learns how OSRM durations compare with the waypoint geometry Wayward requested.
 
 The calibration key is:
 
@@ -140,7 +140,7 @@ This is deliberately conservative. Calibration nudges the main scenic/intent/str
 
 ## H3 Scenic Tiles
 
-The tile scores are not inherent labels in the raw datasets. MoodRide computes and stores them in `scenic_score_tiles`.
+The tile scores are not inherent labels in the raw datasets. Wayward computes and stores them in `scenic_score_tiles`.
 
 Examples:
 
@@ -159,7 +159,7 @@ Each H3 tile is a precomputed scenic feature vector. Runtime routing samples tho
 
 ## What Scenic Means
 
-MoodRide should treat `scenic` as a balanced default, not a universal truth. A user may mean:
+Wayward should treat `scenic` as a balanced default, not a universal truth. A user may mean:
 
 - nature: trees, parks, water, terrain, low urban density
 - driving pleasure: curves, elevation changes, lower urban pressure
@@ -192,7 +192,7 @@ The current `scenic` vibe is a balanced blend across water, greenery, elevation,
 
 The current implementation includes v2 candidate generation, per-vibe geometry strategies, graded strategy-specific soft corridor validation, rural/country unavailable gates, duration calibration, v2 route-quality scoring, persisted score breakdowns, QA evaluation flags, and frontend/API guidance for unavailable vibes.
 
-For the current release, `hybrid_osrm_v2` is functionally complete as MoodRide's default route-generation contract. Remaining work is product calibration and quality hardening, not the core v2 build:
+For the current release, `hybrid_osrm_v2` is functionally complete as Wayward's default route-generation contract. Remaining work is product calibration and quality hardening, not the core v2 build:
 
 - Tune strategy-fit expectations from archived QA runs and user feedback, then decide which mismatches should become hard filters instead of soft penalties.
 - Add route feedback calibration so thumbs-up/down and completed drives can tune component weights.

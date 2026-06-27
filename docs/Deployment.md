@@ -1,4 +1,4 @@
-# MoodRide – Cloud Deployment (GCP)
+# Wayward – Cloud Deployment (GCP)
 
 ## 🧭 Prerequisites
 
@@ -366,7 +366,7 @@ curl -X POST https://app.moodrides.com/api/routes \
 
 # Frontend loading?
 # Open https://app.moodrides.com in browser
-# Should see the MoodRide UI
+# Should see the Wayward UI
 ```
 
 ### 7B: Full Flow Test

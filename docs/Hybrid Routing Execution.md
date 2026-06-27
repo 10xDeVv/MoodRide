@@ -1,10 +1,10 @@
-# MoodRide – Scenic Routing System (Final Engineering Plan)
+# Wayward – Scenic Routing System (Final Engineering Plan)
 
 ## 🧭 Vision (DO NOT SKIP THIS)
 
-**MoodRide is NOT a routing engine.**
+**Wayward is NOT a routing engine.**
 
-👉 **MoodRide = Scenic Intelligence Layer**
+👉 **Wayward = Scenic Intelligence Layer**
 
 - You decide where to go (scenic waypoints)
 - OSRM decides how to get there (real roads, timing, legality)

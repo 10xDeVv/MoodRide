@@ -2,7 +2,7 @@
 
 ## Runtime Services
 
-These services are part of the active MoodRide runtime:
+These services are part of the active Wayward runtime:
 
 | Service | Status | Responsibility |
 |---|---|---|
@@ -41,7 +41,7 @@ This keeps expensive enrichment offline and keeps route generation fast, predict
 
 ## Future Decision Point
 
-If MoodRide needs incremental live data updates later, revisit one of these options:
+If Wayward needs incremental live data updates later, revisit one of these options:
 
 1. Rebuild CDC around Debezium and Redis invalidation with clear production ownership.
 2. Keep batch releases only and schedule periodic recomputes.
