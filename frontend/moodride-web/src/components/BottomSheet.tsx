@@ -2,7 +2,7 @@
 
 import React, { useState, useRef, useEffect } from 'react';
 
-export type BottomSheetState = 'minimized' | 'halfway' | 'expanded';
+export type BottomSheetState = 'peek' | 'mid' | 'full';
 export type BottomSheetTheme = 'planner' | 'results';
 
 interface BottomSheetProps {
@@ -15,12 +15,12 @@ interface BottomSheetProps {
 type TouchMode = 'sheet' | 'content' | null;
 
 const SNAP_POINTS: Record<BottomSheetState, number> = {
-  minimized: 10,
-  halfway: 50,
-  expanded: 100,
+  peek: 17,
+  mid: 52,
+  full: 100,
 };
 
-const SNAP_ORDER: BottomSheetState[] = ['minimized', 'halfway', 'expanded'];
+const SNAP_ORDER: BottomSheetState[] = ['peek', 'mid', 'full'];
 const SNAP_ANIMATION = 'height 0.42s cubic-bezier(0.22, 1, 0.36, 1)';
 
 export const BottomSheet: React.FC<BottomSheetProps> = ({
@@ -41,6 +41,7 @@ export const BottomSheet: React.FC<BottomSheetProps> = ({
   const startYRef = useRef(0);
   const lastYRef = useRef(0);
   const startHeightRef = useRef(0);
+  const suppressHandleClickRef = useRef(false);
 
   useEffect(() => {
     stateRef.current = state;
@@ -49,6 +50,12 @@ export const BottomSheet: React.FC<BottomSheetProps> = ({
   useEffect(() => {
     heightRef.current = currentHeight;
   }, [currentHeight]);
+
+  useEffect(() => {
+    return () => {
+      document.documentElement.style.removeProperty('--mobile-sheet-height');
+    };
+  }, []);
 
   // Render for phone and iPad portrait widths that use the bottom-sheet layout.
   useEffect(() => {
@@ -60,21 +67,31 @@ export const BottomSheet: React.FC<BottomSheetProps> = ({
     return () => window.removeEventListener('resize', checkMobile);
   }, []);
 
+  const getViewportHeight = () => window.visualViewport?.height ?? window.innerHeight;
+
+  const getHeaderClearance = () => {
+    const header = document.querySelector('.app-header');
+    if (header instanceof HTMLElement) {
+      return Math.ceil(header.getBoundingClientRect().bottom + 10);
+    }
+    return window.innerHeight < 720 ? 56 : 64;
+  };
+
   const getHeightForState = (s: BottomSheetState): number => {
     if (!isMobile) return 0;
-    const headerHeight = 64;
-    const viewportHeight = window.innerHeight;
-    const maxHeight = viewportHeight - headerHeight;
+    const viewportHeight = getViewportHeight();
+    const maxHeight = viewportHeight - getHeaderClearance();
     return (SNAP_POINTS[s] / 100) * maxHeight;
   };
 
   const setSheetHeight = (height: number) => {
-    const minHeight = getHeightForState('minimized');
-    const maxHeight = getHeightForState('expanded');
+    const minHeight = getHeightForState('peek');
+    const maxHeight = getHeightForState('full');
     const constrainedHeight = Math.max(minHeight, Math.min(height, maxHeight));
 
     heightRef.current = constrainedHeight;
     setCurrentHeight(constrainedHeight);
+    document.documentElement.style.setProperty('--mobile-sheet-height', `${Math.round(constrainedHeight)}px`);
     if (containerRef.current) {
       containerRef.current.style.height = `${constrainedHeight}px`;
     }
@@ -86,13 +103,17 @@ export const BottomSheet: React.FC<BottomSheetProps> = ({
     const updateHeight = () => {
       const height = getHeightForState(state);
       setSheetHeight(height);
-      if (state !== 'expanded') {
+      if (state !== 'full') {
         contentRef.current?.scrollTo({ top: 0 });
       }
     };
     updateHeight();
     window.addEventListener('resize', updateHeight);
-    return () => window.removeEventListener('resize', updateHeight);
+    window.visualViewport?.addEventListener('resize', updateHeight);
+    return () => {
+      window.removeEventListener('resize', updateHeight);
+      window.visualViewport?.removeEventListener('resize', updateHeight);
+    };
   }, [state, isMobile]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const getSnapFromHeight = (height: number): BottomSheetState => {
@@ -109,7 +130,7 @@ export const BottomSheet: React.FC<BottomSheetProps> = ({
 
     requestAnimationFrame(() => {
       setSheetHeight(getHeightForState(nextState));
-      if (nextState !== 'expanded') {
+      if (nextState !== 'full') {
         contentRef.current?.scrollTo({ top: 0, behavior: 'smooth' });
       }
     });
@@ -120,18 +141,18 @@ export const BottomSheet: React.FC<BottomSheetProps> = ({
     const currentState = stateRef.current;
     const activeHeight = heightRef.current;
     const directionalThreshold = 36;
-    const expandedHeight = getHeightForState('expanded');
-    const halfwayHeight = getHeightForState('halfway');
+    const fullHeight = getHeightForState('full');
+    const midHeight = getHeightForState('mid');
 
     let nextState = getSnapFromHeight(activeHeight);
 
     if (totalDeltaY < -directionalThreshold) {
-      nextState = activeHeight > halfwayHeight ? 'expanded' : 'halfway';
+      nextState = activeHeight > midHeight ? 'full' : 'mid';
     } else if (totalDeltaY > directionalThreshold) {
-      nextState = currentState === 'expanded' && activeHeight > halfwayHeight * 0.9
-        ? 'halfway'
-        : activeHeight < expandedHeight * 0.38
-          ? 'minimized'
+      nextState = currentState === 'full' && activeHeight > midHeight * 0.9
+        ? 'mid'
+        : activeHeight < fullHeight * 0.38
+          ? 'peek'
           : nextState;
     }
 
@@ -155,7 +176,7 @@ export const BottomSheet: React.FC<BottomSheetProps> = ({
     const startedOnHandle = Boolean(target.closest('.bottom-sheet-drag-zone'));
     const clientY = e.touches[0].clientY;
 
-    if (startedOnHandle || stateRef.current !== 'expanded') {
+    if (startedOnHandle || stateRef.current === 'peek') {
       beginTouch(clientY, 'sheet');
       return;
     }
@@ -172,9 +193,13 @@ export const BottomSheet: React.FC<BottomSheetProps> = ({
 
     if (touchModeRef.current === null) {
       const shouldCollapseSheet = startDeltaY > 4 && contentScrollTop <= 0;
-      const shouldLetContentScroll = stateRef.current === 'expanded' && !shouldCollapseSheet;
+      const shouldExpandSheet = stateRef.current === 'mid' && startDeltaY < -8;
+      const shouldLetContentScroll =
+        (stateRef.current === 'full' || stateRef.current === 'mid') &&
+        !shouldCollapseSheet &&
+        !shouldExpandSheet;
 
-      if (shouldCollapseSheet) {
+      if (shouldCollapseSheet || shouldExpandSheet) {
         touchModeRef.current = 'sheet';
         startYRef.current = clientY;
         lastYRef.current = clientY;
@@ -188,6 +213,9 @@ export const BottomSheet: React.FC<BottomSheetProps> = ({
     if (touchModeRef.current === 'sheet') {
       e.preventDefault();
       const nextHeight = startHeightRef.current - startDeltaY;
+      if (Math.abs(startDeltaY) > 8) {
+        suppressHandleClickRef.current = true;
+      }
       setSheetHeight(nextHeight);
     }
 
@@ -204,6 +232,21 @@ export const BottomSheet: React.FC<BottomSheetProps> = ({
     }
 
     touchModeRef.current = null;
+  };
+
+  const handleHandleClick = () => {
+    if (suppressHandleClickRef.current) {
+      suppressHandleClickRef.current = false;
+      return;
+    }
+
+    const nextState = stateRef.current === 'peek'
+      ? 'mid'
+      : stateRef.current === 'mid'
+        ? 'full'
+        : 'mid';
+
+    animateToState(nextState);
   };
 
   // Larger tablet and desktop layouts are handled by RoutePlanner's side panels.
@@ -224,9 +267,14 @@ export const BottomSheet: React.FC<BottomSheetProps> = ({
       onTouchEnd={handleTouchEnd}
       onTouchCancel={handleTouchEnd}
     >
-      <div className="bottom-sheet-drag-zone" aria-hidden="true">
+      <button
+        className="bottom-sheet-drag-zone"
+        type="button"
+        aria-label="Resize route planner"
+        onClick={handleHandleClick}
+      >
         <div className="bottom-sheet-handle" />
-      </div>
+      </button>
 
       <div ref={contentRef} className="bottom-sheet-content">
         {children}

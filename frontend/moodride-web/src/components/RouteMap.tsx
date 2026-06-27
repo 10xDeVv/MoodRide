@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, type MutableRefObject } from "react";
+import { Minus, Plus } from "lucide-react";
 import type { RouteDetailResponse } from "@/lib/types";
 
 interface RouteMapProps {
@@ -169,6 +170,33 @@ function routesToGeoJson(route: RouteDetailResponse, selectedRouteId: string | u
   };
 }
 
+function getRouteFitPadding() {
+  if (typeof window === "undefined") return 70;
+
+  const width = window.innerWidth;
+  const height = window.visualViewport?.height ?? window.innerHeight;
+
+  if (width < 768) {
+    return {
+      top: 88,
+      right: 28,
+      bottom: Math.round(height * 0.58),
+      left: 28
+    };
+  }
+
+  if (width <= 1366) {
+    return {
+      top: 96,
+      right: 56,
+      bottom: 48,
+      left: Math.round(width * 0.42)
+    };
+  }
+
+  return 70;
+}
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function ensureRouteLayers(map: any) {
   if (!map.getLayer("routes-alternate-bg")) {
@@ -249,7 +277,7 @@ function renderAllRoutes(map: any, route: RouteDetailResponse, selectedRouteId: 
   if (coordinates.length > 1) {
     const lngs = coordinates.map(([lng]) => lng);
     const lats = coordinates.map(([, lat]) => lat);
-    map.fitBounds([[Math.min(...lngs), Math.min(...lats)], [Math.max(...lngs), Math.max(...lats)]], { padding: 70, duration: 900 });
+    map.fitBounds([[Math.min(...lngs), Math.min(...lats)], [Math.max(...lngs), Math.max(...lats)]], { padding: getRouteFitPadding(), duration: 900 });
   }
 }
 
@@ -347,5 +375,25 @@ export function RouteMap({ route, selectedRouteId, centerLat = 49.28, centerLng 
     return <SchematicMap route={route} theme={theme} />;
   }
 
-  return <div ref={mapContainerRef} style={{ width: "100%", height: "100%" }} />;
+  const handleZoomIn = () => {
+    mapRef.current?.zoomIn({ duration: 220 });
+  };
+
+  const handleZoomOut = () => {
+    mapRef.current?.zoomOut({ duration: 220 });
+  };
+
+  return (
+    <div className="route-map-shell">
+      <div ref={mapContainerRef} className="route-mapbox-canvas" />
+      <div className="map-zoom-controls" aria-label="Map zoom controls">
+        <button className="map-zoom-button" type="button" aria-label="Zoom in" title="Zoom in" onClick={handleZoomIn}>
+          <Plus size={18} strokeWidth={2.6} />
+        </button>
+        <button className="map-zoom-button" type="button" aria-label="Zoom out" title="Zoom out" onClick={handleZoomOut}>
+          <Minus size={18} strokeWidth={2.6} />
+        </button>
+      </div>
+    </div>
+  );
 }

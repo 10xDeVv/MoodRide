@@ -3,16 +3,15 @@
 import { useState, useCallback, useRef, useEffect } from "react";
 import {
   MapPin, Navigation, Bike, Footprints, Car,
-  Sparkles, RefreshCw, ChevronDown, ChevronUp,
+  Clock, RefreshCw, ChevronDown, ChevronUp,
   AlertTriangle, Download, Map as MapIcon, ArrowRight, Loader2,
   Waves, Trees, Mountain, Eye, Route,
   Sunset, Camera, Compass, Wind, Coffee, Zap, Moon, Sun,
   type LucideIcon
 } from "lucide-react";
 import { RouteMap } from "./RouteMap";
-import { ScenicHighlightsPanel } from "./ScenicHighlightsPanel";
 import { BottomSheet, type BottomSheetState } from "./BottomSheet";
-import { submitRoute, getJobStatus, getRoute, submitRouteRating, searchLocations } from "@/lib/api";
+import { submitRoute, getJobStatus, getRoute, searchLocations } from "@/lib/api";
 import { connectJobChannel } from "@/lib/ws";
 import type {
   RouteDetailResponse,
@@ -67,12 +66,23 @@ const VIBE_PREFERENCE_DEFAULTS: Record<string, Record<string, number>> = {
   adventure:       { water: 0.4, greenery: 0.55, elevation: 0.9, solitude: 0.7, curves: 0.9, poi: 0.25 }
 };
 
-const COMPONENT_LABELS: Record<string, string> = {
-  water: "Water", greenery: "Greenery", elevation: "Elevation",
-  solitude: "Solitude", curves: "Curves", poi: "Stops"
+const USER_SIGNAL_ORDER = ["water", "elevation", "solitude", "greenery", "curves"];
+
+const ROUTE_SIGNAL_LABELS: Record<string, string> = {
+  water: "Waterfront",
+  greenery: "Green cover",
+  elevation: "Rolling terrain",
+  solitude: "Quiet roads",
+  curves: "Curves"
 };
 
-const COMPONENT_ORDER = ["water", "greenery", "elevation", "solitude", "curves", "poi"];
+const ROUTE_TAG_LABELS: Record<string, string> = {
+  water: "Water",
+  greenery: "Greenery",
+  elevation: "Elevation",
+  solitude: "Solitude",
+  curves: "Curves"
+};
 
 const TIME_BUDGET_OPTIONS = [30, 60, 90, 120] as const;
 
@@ -83,26 +93,11 @@ const ROUTE_MODES: Array<{ value: RouteMode; label: string; status: string; enab
 ];
 
 const LOADING_STEPS: Array<{ id: string; label: string; Icon: LucideIcon }> = [
-  { id: "submit",     label: "Submitting",  Icon: MapPin },
-  { id: "candidates", label: "Finding",     Icon: Compass },
-  { id: "scoring",    label: "Scoring",     Icon: Sparkles },
-  { id: "refining",   label: "Refining",    Icon: Route },
-  { id: "finalising", label: "Finalising",  Icon: Zap }
+  { id: "roads",     label: "Reading nearby roads",       Icon: MapIcon },
+  { id: "corridors", label: "Tracing scenic corridors",   Icon: Route },
+  { id: "time",      label: "Balancing drive time",       Icon: Clock },
+  { id: "options",   label: "Ranking route options",      Icon: Compass }
 ];
-
-const FEEDBACK_TAGS = [
-  { id: "more_like_this", label: "More Like This" },
-  { id: "loved_quiet", label: "Loved Quiet" },
-  { id: "loved_curves", label: "Loved Curves" },
-  { id: "loved_water", label: "Loved Water" },
-  { id: "loved_greenery", label: "Loved Green" },
-  { id: "loved_stops", label: "Loved Stops" },
-  { id: "too_urban", label: "Too Urban" },
-  { id: "too_long", label: "Too Long" },
-  { id: "too_short", label: "Too Short" },
-  { id: "too_boring", label: "Too Boring" },
-  { id: "not_scenic", label: "Not Scenic" }
-] as const;
 
 const GOOGLE_TRAVEL_MODES: Record<RouteMode, string> = { drive: "driving", walk: "walking", bike: "bicycling" };
 const APPLE_TRAVEL_FLAGS: Partial<Record<RouteMode, string>> = { drive: "d", walk: "w" };
@@ -128,7 +123,7 @@ function exportGpx(route: RouteDetailResponse, name: string) {
   const pts = route.geometry.geometry.coordinates
     .map(([lng, lat]) => `      <trkpt lat="${lat}" lon="${lng}" />`)
     .join("\n");
-  const gpx = `<?xml version="1.0" encoding="UTF-8"?>\n<gpx version="1.1" creator="MoodRide" xmlns="http://www.topografix.com/GPX/1/1">\n  <trk>\n    <name>${escapeXml(name)}</name>\n    <trkseg>\n${pts}\n    </trkseg>\n  </trk>\n</gpx>`;
+  const gpx = `<?xml version="1.0" encoding="UTF-8"?>\n<gpx version="1.1" creator="Wayward" xmlns="http://www.topografix.com/GPX/1/1">\n  <trk>\n    <name>${escapeXml(name)}</name>\n    <trkseg>\n${pts}\n    </trkseg>\n  </trk>\n</gpx>`;
   const blob = new Blob([gpx], { type: "application/gpx+xml" });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
@@ -183,6 +178,7 @@ function formatDur(minutes: number) {
 // ─── Types ────────────────────────────────────────────────────────────────────
 type Phase = "idle" | "submitting" | "tracking" | "completed" | "failed";
 type AppTheme = "day" | "night";
+type RouteSessionState = "planning" | "generating" | "resultsOpen" | "resultsMinimized" | "planningNewRoute";
 
 type FailureGuidance = {
   failureCode: string | null;
@@ -220,7 +216,7 @@ function AppHeader({ theme, onThemeToggle }: { theme: AppTheme; onThemeToggle: (
       </svg>
       <span className="header-glass-refraction" aria-hidden="true" />
       <div className="header-brand-block">
-        <h1 className="header-logo">MOODRIDE</h1>
+        <h1 className="header-logo">Wayward</h1>
       </div>
       <button
         className="theme-toggle-btn"
@@ -249,6 +245,7 @@ interface PlannerPanelProps {
   vibes: string[];
   phase: Phase;
   statusMessage: string;
+  compactVibeList?: boolean;
   onLatChange: (v: number) => void;
   onLngChange: (v: number) => void;
   onLocationQueryChange: (v: string) => void;
@@ -263,13 +260,18 @@ interface PlannerPanelProps {
 function PlannerPanel({
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   lat, lng, locationQuery, locationSuggestions, locationPending, locationError, showDropdown,
-  routeMode, timeBudget, vibes, phase, statusMessage,
+  routeMode, timeBudget, vibes, phase, statusMessage, compactVibeList = false,
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   onLatChange, onLngChange, onLocationQueryChange, onSuggestionSelect, onGeolocate,
   onModeChange, onTimeBudgetChange, onVibeToggle, onGenerate
 }: PlannerPanelProps) {
+  const [showAllVibes, setShowAllVibes] = useState(false);
   const canGenerate = routeMode === "drive" && vibes.length > 0 && phase === "idle";
   const isGenerating = phase === "submitting" || phase === "tracking";
+  const visibleVibes = compactVibeList && !showAllVibes
+    ? VIBE_CONFIG.slice(0, 9)
+    : VIBE_CONFIG;
+  const hiddenVibeCount = Math.max(VIBE_CONFIG.length - 9, 0);
 
   return (
     <aside className="planner-panel">
@@ -382,7 +384,7 @@ function PlannerPanel({
             <span className="vibe-count">{vibes.length}/3</span>
           </div>
           <div className="vibe-grid">
-            {VIBE_CONFIG.map(({ vibe, label, Icon }) => {
+            {visibleVibes.map(({ vibe, label, Icon }) => {
               const isActive = vibes.includes(vibe);
               const atLimit = vibes.length >= 3 && !isActive;
               return (
@@ -401,6 +403,26 @@ function PlannerPanel({
               );
             })}
           </div>
+          {compactVibeList && hiddenVibeCount > 0 && (
+            <button
+              className="vibe-expand-btn"
+              type="button"
+              aria-expanded={showAllVibes}
+              onClick={() => setShowAllVibes((value) => !value)}
+            >
+              {showAllVibes ? (
+                <>
+                  <ChevronUp size={14} />
+                  Show fewer vibes
+                </>
+              ) : (
+                <>
+                  <ChevronDown size={14} />
+                  {hiddenVibeCount} more vibes
+                </>
+              )}
+            </button>
+          )}
         </div>
 
       </div>
@@ -435,137 +457,460 @@ function LoadingOverlay({ phase, progressStep }: { phase: Phase; progressStep: n
   if (phase !== "submitting" && phase !== "tracking") return null;
 
   return (
-    <div className="loading-overlay" role="status" aria-live="polite" aria-label="Generating your scenic route">
-
-      {/* Background decorative blobs */}
-      <div style={{
-        position: "absolute", top: "-80px", left: "-80px",
-        width: "500px", height: "500px",
-        background: "rgba(26,61,26,0.06)",
-        borderRadius: "50%", filter: "blur(60px)", pointerEvents: "none"
-      }} />
-      <div style={{
-        position: "absolute", top: "40%", right: "-120px",
-        width: "600px", height: "600px",
-        background: "rgba(226,231,106,0.12)",
-        borderRadius: "50%", filter: "blur(80px)", pointerEvents: "none"
-      }} />
-
-      {/* Central content */}
+    <div className="loading-overlay" role="status" aria-live="polite" aria-label="Generating your route">
       <div className="loading-main">
-        {/* Brand above animation */}
-        <div className="loading-brand"><span className="display-squash">MoodRide</span></div>
+        <div className="loading-brand">Wayward</div>
 
-        {/* Compass animation */}
-        <div className="loading-compass">
-          <div className="loading-compass-ring" />
-          <div className="loading-compass-inner" />
-
-          {/* SVG path animation */}
-          <svg
-            style={{ width: "100%", height: "100%", position: "relative", zIndex: 1 }}
-            viewBox="0 0 200 200"
-            fill="none"
-            aria-hidden="true"
-          >
-            {/* Compass rose (decorative) */}
-            <g opacity="0.08" transform="translate(100,100)">
-              <circle r="80" stroke="var(--loading-graphic, #032707)" strokeWidth="2" fill="none" />
-              <path d="M0 -90 L8 0 L0 90 L-8 0 Z" fill="var(--loading-graphic, #032707)" />
-              <path d="M-90 0 L0 -8 L90 0 L0 8 Z" fill="var(--loading-graphic, #032707)" />
-            </g>
-            {/* Topo rings */}
-            <circle cx="100" cy="100" r="70" stroke="var(--loading-graphic-soft, rgba(3,39,7,0.07))" strokeWidth="1" />
-            <circle cx="100" cy="100" r="50" stroke="var(--loading-graphic-soft, rgba(3,39,7,0.07))" strokeWidth="1" />
-            <circle cx="100" cy="100" r="30" stroke="var(--loading-graphic-soft, rgba(3,39,7,0.07))" strokeWidth="1" />
-            {/* Animated route path */}
+        <div className="loading-route-mark" aria-hidden="true">
+          <div className="loading-map-scan" />
+          <svg className="loading-route-svg" viewBox="0 0 320 200" fill="none">
+            <path className="loading-map-road" d="M18 52 H302" />
+            <path className="loading-map-road" d="M36 142 H286" />
+            <path className="loading-map-road" d="M78 20 V182" />
+            <path className="loading-map-road" d="M216 18 V178" />
+            <path className="loading-map-road curved" d="M16 112 C62 82 102 93 142 118 S236 151 304 103" />
+            <path className="loading-map-road curved" d="M42 184 C78 138 112 144 148 108 S222 40 292 38" />
+            <path className="loading-map-contour" d="M34 78 C60 60 95 58 116 78 C138 99 126 126 96 130 C58 135 21 110 34 78Z" />
+            <path className="loading-map-contour" d="M226 72 C254 51 291 62 298 91 C306 124 270 147 238 135 C208 123 199 92 226 72Z" />
             <path
-              d="M40,160 C60,140 100,180 140,120 S180,40 100,60 S40,20 160,40"
-              stroke="var(--loading-graphic, #032707)"
-              strokeWidth="5"
-              strokeLinecap="round"
-              fill="none"
-              style={{
-                strokeDasharray: 1000,
-                strokeDashoffset: 1000,
-                animation: "drawPath 8s linear infinite"
-              }}
+              className="loading-route-candidate candidate-one"
+              d="M52 150 C86 110 118 132 150 98 S224 54 274 82"
             />
-            {/* Moving dot */}
-            <circle fill="var(--loading-graphic, #1a3020)" r="9">
+            <path
+              className="loading-route-candidate candidate-two"
+              d="M52 150 C92 164 130 139 162 112 S224 94 274 82"
+            />
+            <path
+              className="loading-route-line"
+              d="M52 150 C72 118 106 120 126 88 C149 51 191 53 204 88 C218 125 238 123 274 82"
+            />
+            <circle className="loading-route-node start" cx="52" cy="150" r="7" />
+            <circle className="loading-route-node end" cx="274" cy="82" r="7" />
+            <circle className="loading-route-traveler" r="6">
               <animateMotion
-                dur="8s"
-                path="M40,160 C60,140 100,180 140,120 S180,40 100,60 S40,20 160,40"
+                dur="3.4s"
+                path="M52 150 C72 118 106 120 126 88 C149 51 191 53 204 88 C218 125 238 123 274 82"
                 repeatCount="indefinite"
               />
             </circle>
+            <text className="loading-map-label" x="64" y="165">START</text>
+            <text className="loading-map-label" x="225" y="70">SCENIC</text>
           </svg>
-
-          {/* Glassmorphic center */}
-          <div style={{
-            position: "absolute", inset: "20px",
-            background: "rgba(255,255,255,0.2)",
-            backdropFilter: "blur(12px)",
-            borderRadius: "50%",
-            zIndex: 0,
-            border: "1px solid rgba(255,255,255,0.4)",
-            boxShadow: "0 20px 40px rgba(3,39,7,0.1)"
-          }} />
         </div>
 
-        {/* Title + subtitle */}
-        <div>
-          <h2 className="loading-title"><span className="display-squash">Crafting your journey…</span></h2>
+        <div className="loading-copy">
+          <h2 className="loading-title">Mapping your scenic loop</h2>
           <p className="loading-subtitle">
-            Aligning peaks, valleys, and vibes to match your current frequency.
+            Comparing road shape, water, terrain, and your time budget.
           </p>
         </div>
 
-        {/* Progress steps */}
         <div className="loading-steps">
-        {LOADING_STEPS.map((step, i) => {
-          const { Icon } = step;
-          const isDone = i < progressStep;
-          const isActive = i === progressStep;
-          return (
-            <div
-              key={step.id}
-              className={`loading-step${isActive ? " active" : ""}${isDone ? " done" : ""}`}
-            >
-              {isDone
-                ? <Icon size={20} className="loading-step-icon" />
-                : isActive
-                  ? <Loader2 size={20} className="loading-step-icon" style={{ animation: "spin 1s linear infinite" }} />
-                  : <Icon size={20} className="loading-step-icon" />
-              }
-              <span className="loading-step-label">{step.label}</span>
-            </div>
-          );
-        })}
+          {LOADING_STEPS.map((step, i) => {
+            const { Icon } = step;
+            const isDone = i < progressStep;
+            const isActive = i === progressStep;
+            return (
+              <div
+                key={step.id}
+                className={`loading-step${isActive ? " active" : ""}${isDone ? " done" : ""}`}
+              >
+                {isActive
+                  ? <Loader2 size={18} className="loading-step-icon" style={{ animation: "spin 1s linear infinite" }} />
+                  : <Icon size={18} className="loading-step-icon" />
+                }
+                <span className="loading-step-label">{step.label}</span>
+              </div>
+            );
+          })}
         </div>
       </div>
-
-      {/* Footer */}
-      <div className="loading-footer">
-        <div className="loading-footer-badge">
-          <Zap size={14} />
-          Secure Adventure Engine Active
-        </div>
-        <div className="loading-footer-copy">
-          &copy; 2024 MoodRide Discovery. All rights reserved.
-        </div>
-      </div>
-
-      {/* Keyframe injection */}
-      <style>{`
-        @keyframes drawPath {
-          0% { stroke-dashoffset: 1000; opacity: 0; }
-          10% { opacity: 1; }
-          100% { stroke-dashoffset: 0; }
-        }
-        @keyframes spin { to { transform: rotate(360deg); } }
-      `}</style>
     </div>
+  );
+}
+
+function formatProfileName(profile?: string | null) {
+  return profile?.split("_").map((w) => w[0].toUpperCase() + w.slice(1)).join(" ") ?? "Route";
+}
+
+function getSelectedRouteOption(route: RouteDetailResponse, selectedOptionId: string) {
+  return route.routeOptions?.find((o) => o.routeId === selectedOptionId)
+    ?? route.routeOptions?.[0];
+}
+
+function scenicFitLabel(score?: number | null) {
+  if (!Number.isFinite(score ?? NaN)) return "Scenic fit";
+  const score10 = (score ?? 0) > 10 ? (score ?? 0) / 10 : (score ?? 0);
+  if (score10 >= 7) return "Strong scenic fit";
+  if (score10 >= 4) return "Moderate scenic fit";
+  return "Light scenic fit";
+}
+
+type RouteSignal = {
+  key: string;
+  label: string;
+  tagLabel: string;
+  pct: number;
+};
+
+function getRouteSignals(option?: RouteOptionResponse | null): RouteSignal[] {
+  const averages = option?.explanation?.componentAverages ?? {};
+  const leading = option?.explanation?.leadingComponents ?? [];
+  const orderedKeys = [...leading, ...USER_SIGNAL_ORDER];
+  const seen = new Set<string>();
+
+  return orderedKeys
+    .filter((key) => {
+      if (seen.has(key) || key === "poi" || !ROUTE_SIGNAL_LABELS[key]) return false;
+      seen.add(key);
+      return Number.isFinite(averages[key]);
+    })
+    .map((key) => ({
+      key,
+      label: ROUTE_SIGNAL_LABELS[key],
+      tagLabel: ROUTE_TAG_LABELS[key],
+      pct: Math.round(Math.max(0, Math.min(1, averages[key] ?? 0)) * 100)
+    }));
+}
+
+function getRouteTags(option?: RouteOptionResponse | null, limit = 3) {
+  return getRouteSignals(option)
+    .slice(0, limit)
+    .map((signal) => signal.tagLabel);
+}
+
+function joinHumanList(items: string[]) {
+  if (items.length <= 1) return items[0] ?? "scenic roads";
+  if (items.length === 2) return `${items[0]} and ${items[1]}`;
+  return `${items.slice(0, -1).join(", ")}, and ${items[items.length - 1]}`;
+}
+
+function cleanRouteSummary(summary?: string | null) {
+  const text = summary?.trim().replace(/^["“”]+|["“”]+$/g, "");
+  if (!text) return null;
+  if (/%\s*contribution/i.test(text) || /\b(component|weighted|baseline|score)\b/i.test(text)) return null;
+  return text;
+}
+
+function buildHumanRouteReason(route: RouteDetailResponse, option?: RouteOptionResponse | null) {
+  const cleanSummary = cleanRouteSummary(option?.explanation?.summary);
+  if (cleanSummary) return cleanSummary;
+
+  const tags = getRouteTags(option);
+  const featureText = tags.length > 0 ? joinHumanList(tags.map((tag) => tag.toLowerCase())) : "the strongest scenic stretches";
+  const duration = option?.estimatedDurationMinutes ?? route.estimatedDurationMinutes ?? 0;
+  const budgetLine = duration > 0 ? "keeps the loop close to your time budget" : "keeps the loop practical";
+
+  return `This route ${budgetLine} while favoring ${featureText} where the road network allows it.`;
+}
+
+function SelectedRouteSummary({ route, option }: { route: RouteDetailResponse; option?: RouteOptionResponse | null }) {
+  if (!option) return null;
+  const distance = formatDistFromKm(option.totalDistanceKm ?? route.totalDistanceKm ?? 0);
+  const duration = formatDur(option.estimatedDurationMinutes ?? route.estimatedDurationMinutes ?? 0);
+
+  return (
+    <div className="selected-route-summary">
+      <div className="section-heading">Selected Route</div>
+      <div className="selected-route-line">
+        {formatProfileName(option.profile)} <span aria-hidden="true">·</span> {distance} km <span aria-hidden="true">·</span> {duration}
+      </div>
+    </div>
+  );
+}
+
+function SelectedRouteChip({
+  route,
+  selectedOptionId,
+  sheetState
+}: {
+  route: RouteDetailResponse;
+  selectedOptionId: string;
+  sheetState: BottomSheetState;
+}) {
+  const selectedOption = getSelectedRouteOption(route, selectedOptionId);
+  if (!selectedOption || sheetState === "full" || sheetState === "peek") return null;
+
+  return (
+    <div className="mobile-route-chip" aria-live="polite">
+      <span>{formatProfileName(selectedOption.profile)}</span>
+      <span>{formatDistFromKm(selectedOption.totalDistanceKm ?? route.totalDistanceKm ?? 0)} km</span>
+      <span>{formatDur(selectedOption.estimatedDurationMinutes ?? route.estimatedDurationMinutes ?? 0)}</span>
+    </div>
+  );
+}
+
+function MobileRouteDock({
+  route,
+  selectedOptionId,
+  sheetState,
+  onStartDrive,
+  onViewRoutes,
+  onPlanNewRoute
+}: {
+  route: RouteDetailResponse;
+  selectedOptionId: string;
+  sheetState: BottomSheetState;
+  onStartDrive: () => void;
+  onViewRoutes: () => void;
+  onPlanNewRoute: () => void;
+}) {
+  const selectedOption = getSelectedRouteOption(route, selectedOptionId);
+  if (!selectedOption || sheetState !== "peek") return null;
+
+  return (
+    <div className="mobile-route-dock" aria-live="polite">
+      <button className="mobile-route-dock-summary" type="button" onClick={onViewRoutes}>
+        <span>{formatProfileName(selectedOption.profile)}</span>
+        <span>{formatDistFromKm(selectedOption.totalDistanceKm ?? route.totalDistanceKm ?? 0)} km</span>
+        <span>{formatDur(selectedOption.estimatedDurationMinutes ?? route.estimatedDurationMinutes ?? 0)}</span>
+      </button>
+      <div className="mobile-route-dock-actions">
+        <button className="mobile-route-dock-start" type="button" onClick={onStartDrive}>
+          Start
+        </button>
+        <button className="mobile-route-dock-link" type="button" onClick={onViewRoutes}>
+          View Routes
+        </button>
+        <button className="mobile-route-dock-icon" type="button" aria-label="Plan new route" onClick={onPlanNewRoute}>
+          <RefreshCw size={13} />
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function RouteSessionDock({
+  route,
+  selectedOptionId,
+  mode,
+  onStartDrive,
+  onViewRoutes,
+  onPlanNewRoute
+}: {
+  route: RouteDetailResponse;
+  selectedOptionId: string;
+  mode: "resultsMinimized" | "planningNewRoute";
+  onStartDrive: () => void;
+  onViewRoutes: () => void;
+  onPlanNewRoute: () => void;
+}) {
+  const selectedOption = getSelectedRouteOption(route, selectedOptionId);
+  if (!selectedOption) return null;
+
+  return (
+    <div className={`route-session-dock route-session-dock-${mode}`} aria-live="polite">
+      <button className="route-session-dock-summary" type="button" onClick={onViewRoutes}>
+        <span className="route-session-dock-kicker">
+          {mode === "planningNewRoute" ? "Current Route" : "Selected Route"}
+        </span>
+        <span className="route-session-dock-route">
+          {formatProfileName(selectedOption.profile)}
+          <span aria-hidden="true"> · </span>
+          {formatDistFromKm(selectedOption.totalDistanceKm ?? route.totalDistanceKm ?? 0)} km
+          <span aria-hidden="true"> · </span>
+          {formatDur(selectedOption.estimatedDurationMinutes ?? route.estimatedDurationMinutes ?? 0)}
+        </span>
+      </button>
+      <div className="route-session-dock-actions">
+        <button className="route-session-dock-start" type="button" onClick={onStartDrive}>
+          Start
+        </button>
+        <button className="route-session-dock-secondary" type="button" onClick={onViewRoutes}>
+          View Routes
+        </button>
+        <button className="route-session-dock-icon" type="button" aria-label="Plan new route" onClick={onPlanNewRoute}>
+          <RefreshCw size={14} />
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function RouteDetailsSignals({ option }: { option?: RouteOptionResponse | null }) {
+  const [showAllSignals, setShowAllSignals] = useState(false);
+  const signals = getRouteSignals(option).sort((a, b) => b.pct - a.pct);
+  const visibleSignals = showAllSignals ? signals : signals.slice(0, 3);
+
+  if (signals.length === 0) return null;
+
+  return (
+    <div>
+      <div className="section-heading">Route Details</div>
+      <div className="route-detail-signals">
+        {visibleSignals.map((signal) => (
+          <div key={signal.key} className="route-detail-row">
+            <span className="route-detail-label">{signal.label}</span>
+            <div className="route-detail-track" aria-hidden="true">
+              <span className="route-detail-fill" style={{ width: `${signal.pct}%` }} />
+            </div>
+            <span className="route-detail-value">{signal.pct}%</span>
+          </div>
+        ))}
+      </div>
+      {signals.length > 3 && (
+        <button
+          className="route-details-toggle"
+          type="button"
+          aria-expanded={showAllSignals}
+          onClick={() => setShowAllSignals((value) => !value)}
+        >
+          {showAllSignals ? "Show fewer signals" : "Show all signals"}
+        </button>
+      )}
+    </div>
+  );
+}
+
+interface MobileResultsPanelProps {
+  route: RouteDetailResponse;
+  selectedOptionId: string;
+  sheetState: BottomSheetState;
+  onOptionSelect: (id: string) => void;
+  onStartDrive: () => void;
+  onPlanNewRoute: () => void;
+  onExpand: () => void;
+  onMinimize: () => void;
+}
+
+function MobileResultsPanel({
+  route, selectedOptionId, sheetState,
+  onOptionSelect, onStartDrive, onPlanNewRoute, onExpand, onMinimize
+}: MobileResultsPanelProps) {
+  const selectedOption = getSelectedRouteOption(route, selectedOptionId);
+  const routeOptions = route.routeOptions?.length ? route.routeOptions : selectedOption ? [selectedOption] : [];
+  const isPeek = sheetState === "peek";
+  const isFull = sheetState === "full";
+  const selectedTags = getRouteTags(selectedOption);
+  const routeReason = buildHumanRouteReason(route, selectedOption);
+
+  if (isPeek) {
+    return (
+      <div className="mobile-results-peek" onClick={onExpand} role="button" tabIndex={0} onKeyDown={(event) => {
+        if (event.key === "Enter" || event.key === " ") onExpand();
+      }}>
+        <div className="mobile-peek-hint">
+          {routeOptions.length} Scenic Route{routeOptions.length !== 1 ? "s" : ""} - Tap to explore
+        </div>
+        <div className="mobile-peek-routes">
+          {routeOptions.map((opt) => (
+            <button
+              key={opt.routeId}
+              className={`mobile-peek-route${selectedOptionId === opt.routeId ? " active" : ""}`}
+              type="button"
+              onClick={(event) => {
+                event.stopPropagation();
+                onOptionSelect(opt.routeId);
+              }}
+            >
+              <span className="mobile-peek-name">{formatProfileName(opt.profile)}</span>
+              <span className="mobile-peek-fit">{scenicFitLabel(opt.scenicScore)}</span>
+            </button>
+          ))}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <aside className={`results-panel mobile-results-panel mobile-results-${sheetState}`}>
+      <div className="results-header">
+        <div>
+          <h2 className="results-title">ROUTE FOUND</h2>
+          <p className="results-subtitle">
+            {routeOptions.length} option{routeOptions.length !== 1 ? "s" : ""} generated
+          </p>
+        </div>
+        <button
+          className="results-minimize-btn"
+          type="button"
+          aria-label="Minimize route results"
+          title="Minimize route results"
+          onClick={onMinimize}
+        >
+          <ChevronDown size={18} />
+        </button>
+      </div>
+
+      <div className="results-body">
+        {routeOptions.length > 0 && (
+          <div>
+            <div className="section-heading">Route Options</div>
+            <div className="route-options mobile-route-options">
+              {routeOptions.map((opt: RouteOptionResponse) => (
+                <button
+                  key={opt.routeId}
+                  className={`route-option-card${selectedOptionId === opt.routeId ? " active" : ""}`}
+                  onClick={() => onOptionSelect(opt.routeId)}
+                  type="button"
+                >
+                  <div className="route-option-header">
+                    <div>
+                      <div className="route-option-name">{formatProfileName(opt.profile)}</div>
+                      <div className="route-option-meta">
+                        {formatDistFromKm(opt.totalDistanceKm ?? 0)} km &bull; {formatDur(opt.estimatedDurationMinutes ?? 0)}
+                      </div>
+                    </div>
+                    <span className="route-option-fit">{scenicFitLabel(opt.scenicScore)}</span>
+                  </div>
+                  {getRouteTags(opt).length > 0 && (
+                    <div className="route-metrics">
+                      {getRouteTags(opt).map((tag) => (
+                        <div key={tag} className="metric-item">
+                          <span className="metric-label">{tag}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        <SelectedRouteSummary route={route} option={selectedOption} />
+
+        {!isFull && (
+          <button className="mobile-sheet-more" type="button" onClick={onExpand}>
+            <ChevronUp size={13} />
+            Swipe up - why and details
+          </button>
+        )}
+
+        {isFull && (
+          <>
+            <div className="route-summary-card">
+              <div className="section-heading route-summary-heading">Why this way?</div>
+              <p className="route-summary-text">{routeReason}</p>
+            </div>
+
+            {selectedTags.length > 0 && (
+              <div>
+                <div className="section-heading">Highlights</div>
+                <div className="route-highlights">
+                  {selectedTags.map((tag) => (
+                    <span key={tag} className="route-highlight-pill">{tag}</span>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            <RouteDetailsSignals option={selectedOption} />
+          </>
+        )}
+      </div>
+
+      <div className="results-footer">
+        <button className="btn-generate" onClick={onStartDrive} type="button">
+          <ArrowRight size={20} />
+          <span className="command-text">Start Drive</span>
+        </button>
+        <button onClick={onPlanNewRoute} type="button" className="btn-new-route">
+          <RefreshCw size={13} />
+          Plan New Route
+        </button>
+      </div>
+    </aside>
   );
 }
 
@@ -573,41 +918,41 @@ function LoadingOverlay({ phase, progressStep }: { phase: Phase; progressStep: n
 interface ResultsPanelProps {
   route: RouteDetailResponse;
   selectedOptionId: string;
-  userRating: number | null;
-  ratingSubmitted: boolean;
-  showDebug: boolean;
   onOptionSelect: (id: string) => void;
-  onRatingSelect: (rating: number, feedbackTags: string[]) => void;
   onStartDrive: () => void;
-  onReset: () => void;
-  onToggleDebug: () => void;
+  onPlanNewRoute: () => void;
+  onMinimize?: () => void;
 }
 
 function ResultsPanel({
-  route, selectedOptionId, userRating, ratingSubmitted, showDebug,
-  onOptionSelect, onRatingSelect, onStartDrive, onReset, onToggleDebug
+  route, selectedOptionId,
+  onOptionSelect, onStartDrive, onPlanNewRoute, onMinimize
 }: ResultsPanelProps) {
-  const [pendingRating, setPendingRating] = useState<number | null>(userRating);
-  const [feedbackTags, setFeedbackTags] = useState<string[]>([]);
   const selectedOption = route.routeOptions?.find((o) => o.routeId === selectedOptionId)
     ?? route.routeOptions?.[0];
-
-  const components = COMPONENT_ORDER
-    .map((key) => {
-      const avg = selectedOption?.explanation?.componentAverages?.[key];
-      const lift = selectedOption?.explanation?.componentLifts?.[key];
-      if (avg === undefined) return null;
-      return { key, label: COMPONENT_LABELS[key] ?? key, pct: avg, lift: lift ?? 0 };
-    })
-    .filter(Boolean) as { key: string; label: string; pct: number; lift: number }[];
+  const selectedTags = getRouteTags(selectedOption);
+  const routeReason = buildHumanRouteReason(route, selectedOption);
 
   return (
     <aside className="results-panel">
       <div className="results-header">
-        <h2 className="results-title">ROUTE FOUND</h2>
-        <p className="results-subtitle">
-          {route.routeOptions?.length ?? 1} option{(route.routeOptions?.length ?? 1) !== 1 ? "s" : ""} generated
-        </p>
+        <div>
+          <h2 className="results-title">ROUTE FOUND</h2>
+          <p className="results-subtitle">
+            {route.routeOptions?.length ?? 1} option{(route.routeOptions?.length ?? 1) !== 1 ? "s" : ""} generated
+          </p>
+        </div>
+        {onMinimize && (
+          <button
+            className="results-minimize-btn"
+            type="button"
+            aria-label="Minimize route results"
+            title="Minimize route results"
+            onClick={onMinimize}
+          >
+            <ChevronDown size={18} />
+          </button>
+        )}
       </div>
 
       <div className="results-body">
@@ -633,18 +978,13 @@ function ResultsPanel({
                         {formatDistFromKm(opt.totalDistanceKm ?? 0)} km &bull; {formatDur(opt.estimatedDurationMinutes ?? 0)}
                       </div>
                     </div>
-                    {opt.scenicScore != null && (
-                      <div className="route-option-score">
-                        <span className="score-value">{opt.scenicScore.toFixed(1)}</span>
-                        <span className="score-badge">Scenic</span>
-                      </div>
-                    )}
+                    <span className="route-option-fit">{scenicFitLabel(opt.scenicScore)}</span>
                   </div>
-                  {opt.explanation?.leadingComponents && opt.explanation.leadingComponents.length > 0 && (
+                  {getRouteTags(opt).length > 0 && (
                     <div className="route-metrics" style={{ marginTop: "var(--space-3)" }}>
-                      {opt.explanation.leadingComponents.slice(0, 3).map((r, i) => (
-                        <div key={i} className="metric-item">
-                          <span className="metric-label">{COMPONENT_LABELS[r] ?? r}</span>
+                      {getRouteTags(opt).map((tag) => (
+                        <div key={tag} className="metric-item">
+                          <span className="metric-label">{tag}</span>
                         </div>
                       ))}
                     </div>
@@ -655,158 +995,26 @@ function ResultsPanel({
           </div>
         )}
 
-        {/* ── Key Metrics ── */}
-        <div>
-          <div className="section-heading">Journey Stats</div>
-          <div className="handoff-stats" style={{ marginTop: "12px" }}>
-            {[
-              { label: "Distance", value: `${formatDistFromKm(route.totalDistanceKm ?? 0)} km` },
-              { label: "Duration", value: formatDur(route.estimatedDurationMinutes ?? 0) },
-              { label: "Scenic", value: `${(route.scenicScore ?? 0).toFixed(1)}/10` },
-            ].map(({ label, value }) => (
-              <div key={label} className="handoff-stat">
-                <span className="handoff-stat-label">{label}</span>
-                <span className="handoff-stat-value">{value}</span>
-              </div>
-            ))}
-          </div>
-        </div>
-
-        {/* ── Scenic Breakdown ── */}
-        {components.length > 0 && (
-          <div>
-            <div className="section-heading">Scenic Breakdown</div>
-            <div className="score-breakdown" style={{ marginTop: "var(--space-3)" }}>
-              {components.map(({ key, label, pct }) => {
-                const pctVal = Math.round(pct * 100);
-                return (
-                  <div key={key} className="score-bar-row">
-                    <span className="score-bar-label">{label}</span>
-                    <div className="score-bar-track">
-                      <div className="score-bar-fill" style={{ width: `${pctVal}%` }} />
-                    </div>
-                    <span className="score-bar-pct">{pctVal}%</span>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-        )}
+        <SelectedRouteSummary route={route} option={selectedOption} />
 
         {/* ── Route Summary ── */}
-        {selectedOption?.explanation?.summary && (
-          <div className="route-summary-card">
-            <div className="section-heading route-summary-heading">Why this route?</div>
-            <p className="route-summary-text">
-              &ldquo;{selectedOption.explanation.summary}&rdquo;
-            </p>
-          </div>
-        )}
-
-        {/* ── Scenic Highlights ── */}
-        {selectedOption && (
-          <div>
-            <div className="section-heading">Scenic Highlights</div>
-            <div style={{ marginTop: "var(--space-3)" }}>
-              <ScenicHighlightsPanel route={route} selectedOptionId={selectedOption.routeId} />
-            </div>
-          </div>
-        )}
-
-        {/* ── Rate this route ── */}
-        <div className="rating-card">
-          <div className="section-heading rating-heading">Rate this route</div>
-          <p className="rating-helper">
-            {ratingSubmitted ? "Thanks for your feedback. Future routes will learn from it." : "Help tune future route suggestions"}
-          </p>
-          <div className="rating-buttons">
-            {[1, 2, 3, 4, 5].map((n) => (
-              <button
-                key={n}
-                onClick={() => setPendingRating(n)}
-                disabled={ratingSubmitted}
-                aria-label={`Rate ${n} star${n !== 1 ? "s" : ""}`}
-                type="button"
-                className={`rating-button${pendingRating !== null && n <= pendingRating ? " active" : ""}`}
-              >
-                {n}
-              </button>
-            ))}
-          </div>
-          {!ratingSubmitted && (
-            <>
-              <div className="feedback-tags" aria-label="Route feedback reasons">
-                {FEEDBACK_TAGS.map((tag) => {
-                  const active = feedbackTags.includes(tag.id);
-                  return (
-                    <button
-                      key={tag.id}
-                      type="button"
-                      className={`feedback-tag${active ? " active" : ""}`}
-                      aria-pressed={active}
-                      onClick={() => setFeedbackTags((current) =>
-                        active
-                          ? current.filter((value) => value !== tag.id)
-                          : current.length < 4
-                            ? [...current, tag.id]
-                            : current
-                      )}
-                    >
-                      {tag.label}
-                    </button>
-                  );
-                })}
-              </div>
-              <button
-                type="button"
-                className="feedback-submit"
-                disabled={pendingRating == null}
-                onClick={() => {
-                  if (pendingRating == null) return;
-                  onRatingSelect(pendingRating, feedbackTags);
-                }}
-              >
-                Save Feedback
-              </button>
-            </>
-          )}
+        <div className="route-summary-card">
+          <div className="section-heading route-summary-heading">Why this way?</div>
+          <p className="route-summary-text">{routeReason}</p>
         </div>
 
-        {/* ── System details ── */}
-        <div>
-          <button
-            onClick={onToggleDebug}
-            type="button"
-            className="debug-toggle"
-          >
-            {showDebug ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
-            System details
-          </button>
-          {showDebug && (
-            <div style={{
-              background: "var(--clr-bg-alt)",
-              border: "2px solid var(--clr-border)",
-              padding: "12px", marginTop: "8px"
-            }}>
-              {[
-                ["Job ID",     route.jobId ?? "—"],
-                ["Route ID",   route.routeId ?? "—"],
-                ["Start",      `${route.startLat?.toFixed(4)}, ${route.startLng?.toFixed(4)}`],
-                ["Profile",    selectedOption?.profile ?? "—"],
-                ["Waypoints",  String(route.geometry?.geometry?.coordinates?.length ?? 0)]
-              ].map(([k, v]) => (
-                <div key={k} style={{
-                  display: "flex", justifyContent: "space-between",
-                  fontFamily: "var(--font-body)", fontSize: "11px",
-                  padding: "3px 0", borderBottom: "1px solid var(--clr-border)"
-                }}>
-                  <span style={{ fontWeight: 700, color: "var(--clr-text-muted)", textTransform: "uppercase", letterSpacing: "0.06em" }}>{k}</span>
-                  <span style={{ color: "var(--clr-primary)", fontFamily: "monospace" }}>{v}</span>
-                </div>
+        {selectedTags.length > 0 && (
+          <div>
+            <div className="section-heading">Highlights</div>
+            <div className="route-highlights">
+              {selectedTags.map((tag) => (
+                <span key={tag} className="route-highlight-pill">{tag}</span>
               ))}
             </div>
-          )}
-        </div>
+          </div>
+        )}
+
+        <RouteDetailsSignals option={selectedOption} />
 
       </div>
 
@@ -817,12 +1025,12 @@ function ResultsPanel({
           <span className="command-text">Start Drive</span>
         </button>
         <button
-          onClick={onReset}
+          onClick={onPlanNewRoute}
           type="button"
           className="btn-new-route"
         >
           <RefreshCw size={13} />
-          New Route
+          Plan New Route
         </button>
       </div>
     </aside>
@@ -844,7 +1052,9 @@ function HandoffModal({
   const appleMapsUrl = buildAppleMapsUrl(coords, routeMode);
   const routeName = route.routeOptions?.[0]?.profile
     ? route.routeOptions[0].profile.split("_").map((w) => w[0].toUpperCase() + w.slice(1)).join(" ")
-    : "MoodRide Route";
+    : "Wayward Route";
+  const handoffOption = route.routeOptions?.[0];
+  const handoffReason = buildHumanRouteReason(route, handoffOption);
 
   return (
     <div
@@ -869,7 +1079,7 @@ function HandoffModal({
           <div>
             <div className="handoff-route-name">{routeName.toUpperCase()}</div>
             <div className="handoff-meta">
-              {formatDistFromKm(route.totalDistanceKm ?? 0)} km &bull; {formatDur(route.estimatedDurationMinutes ?? 0)} &bull; Scenic {(route.scenicScore ?? 0).toFixed(1)}/10
+              {formatDistFromKm(route.totalDistanceKm ?? 0)} km &bull; {formatDur(route.estimatedDurationMinutes ?? 0)} &bull; {scenicFitLabel(handoffOption?.scenicScore ?? route.scenicScore)}
             </div>
           </div>
 
@@ -884,8 +1094,8 @@ function HandoffModal({
               <span className="handoff-stat-value">{formatDur(route.estimatedDurationMinutes ?? 0)}</span>
             </div>
             <div className="handoff-stat">
-              <span className="handoff-stat-label">Scenic Score</span>
-              <span className="handoff-stat-value">{(route.scenicScore ?? 0).toFixed(1)}<span style={{ fontSize: "12px", fontWeight: 400 }}>/10</span></span>
+              <span className="handoff-stat-label">Scenic Fit</span>
+              <span className="handoff-stat-value fit-label">{scenicFitLabel(handoffOption?.scenicScore ?? route.scenicScore).replace(" scenic fit", "")}</span>
             </div>
           </div>
 
@@ -919,16 +1129,15 @@ function HandoffModal({
             </button>
           </div>
 
-          {/* Summary quote */}
-          {route.routeOptions?.[0]?.explanation?.summary && (
+          {/* Route reason */}
+          {handoffReason && (
             <p style={{
               fontFamily: "var(--font-body)", fontSize: "12px",
               color: "var(--clr-text-muted)", lineHeight: 1.6,
-              fontStyle: "italic",
               borderLeft: "3px solid var(--clr-lime)",
               paddingLeft: "16px"
             }}>
-              &ldquo;{route.routeOptions[0].explanation!.summary}&rdquo;
+              {handoffReason}
             </p>
           )}
         </div>
@@ -1029,12 +1238,10 @@ export function RoutePlanner() {
   const [failureGuidance, setFailureGuidance] = useState<FailureGuidance | null>(null);
   const [route, setRoute] = useState<RouteDetailResponse | null>(null);
   const [selectedOptionId, setSelectedOptionId] = useState("");
-  const [userRating, setUserRating] = useState<number | null>(null);
-  const [ratingSubmitted, setRatingSubmitted] = useState(false);
   const [showHandoff, setShowHandoff] = useState(false);
-  const [showDebug, setShowDebug] = useState(false);
   const [progressStep, setProgressStep] = useState(0);
-  const [sheetState, setSheetState] = useState<BottomSheetState>('minimized');
+  const [sheetState, setSheetState] = useState<BottomSheetState>('mid');
+  const [largeResultsOpen, setLargeResultsOpen] = useState(true);
   const [viewportMode, setViewportMode] = useState<'mobile' | 'tablet' | 'desktop'>('desktop');
   const [theme, setTheme] = useState<AppTheme>("day");
   const [themePreferenceReady, setThemePreferenceReady] = useState(false);
@@ -1047,6 +1254,7 @@ export function RoutePlanner() {
   const pollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const routeDetailsRef = useRef<Record<string, RouteDetailResponse>>({});
   const seqRef = useRef(0);
+  const previousPhaseRef = useRef<Phase>("idle");
 
   useEffect(() => {
     try {
@@ -1145,8 +1353,7 @@ export function RoutePlanner() {
     setProgressStep(0);
     routeDetailsRef.current = {};
     setRoute(null);
-    setRatingSubmitted(false);
-    setUserRating(null);
+    setLargeResultsOpen(true);
 
     const stepTimer = setInterval(() => {
       setProgressStep((p) => Math.min(p + 1, LOADING_STEPS.length - 1));
@@ -1253,10 +1460,21 @@ export function RoutePlanner() {
     setStatusMessage("");
     setFailureGuidance(null);
     setSelectedOptionId("");
-    setUserRating(null);
-    setRatingSubmitted(false);
     setShowHandoff(false);
     setProgressStep(0);
+    setLargeResultsOpen(true);
+  }, []);
+
+  const handlePlanNewRoute = useCallback(() => {
+    if (stopWsRef.current) { stopWsRef.current(); stopWsRef.current = null; }
+    if (pollTimerRef.current) { clearInterval(pollTimerRef.current); pollTimerRef.current = null; }
+    setPhase("idle");
+    setStatusMessage("");
+    setFailureGuidance(null);
+    setShowHandoff(false);
+    setProgressStep(0);
+    setSheetState('mid');
+    setLargeResultsOpen(true);
   }, []);
 
   const handleTryVibe = useCallback((vibe: string) => {
@@ -1268,6 +1486,7 @@ export function RoutePlanner() {
     setFailureGuidance(null);
     setRoute(null);
     setSelectedOptionId("");
+    setLargeResultsOpen(true);
   }, []);
 
   const handleOptionSelect = useCallback(async (id: string) => {
@@ -1281,14 +1500,12 @@ export function RoutePlanner() {
     }
   }, [resolveRouteDetail]);
 
-  const handleRatingSelect = useCallback(async (rating: number, feedbackTags: string[]) => {
-    if (ratingSubmitted || !route) return;
-    setUserRating(rating);
-    try {
-      await submitRouteRating(route.routeId, rating, feedbackTags);
-      setRatingSubmitted(true);
-    } catch { /* ignore rating errors */ }
-  }, [ratingSubmitted, route]);
+  const handleViewRoutes = useCallback(() => {
+    if (!route) return;
+    setPhase("completed");
+    setLargeResultsOpen(true);
+    setSheetState('mid');
+  }, [route]);
 
   const handleThemeToggle = useCallback(() => {
     setTheme((current) => current === "day" ? "night" : "day");
@@ -1313,20 +1530,40 @@ export function RoutePlanner() {
 
   // Auto-adjust sheet state based on phase for phone bottom sheets.
   useEffect(() => {
-    if (!isMobile) return;
-    if (phase === 'completed' && route) {
-      setSheetState('halfway');
-    } else if (phase === 'submitting' || phase === 'tracking') {
-      setSheetState('expanded');
-    } else if (phase === 'failed') {
-      setSheetState('halfway');
-    } else if (phase === 'idle') {
-      setSheetState('minimized');
+    const previousPhase = previousPhaseRef.current;
+    if (phase === 'completed' && previousPhase !== 'completed') {
+      setLargeResultsOpen(true);
     }
-  }, [phase, route, isMobile]);
+
+    if (!isMobile) {
+      previousPhaseRef.current = phase;
+      return;
+    }
+
+    if (phase === 'completed' && previousPhase !== 'completed') {
+      setSheetState('peek');
+    } else if (phase === 'failed') {
+      setSheetState('mid');
+    } else if (phase === 'idle') {
+      setSheetState('mid');
+    }
+
+    previousPhaseRef.current = phase;
+  }, [phase, isMobile]);
+
+  const routeSessionState: RouteSessionState =
+    phase === "submitting" || phase === "tracking"
+      ? "generating"
+      : phase === "completed"
+        ? (isMobile && sheetState === "peek") || (!isMobile && !largeResultsOpen)
+          ? "resultsMinimized"
+          : "resultsOpen"
+        : phase === "idle" && route
+          ? "planningNewRoute"
+          : "planning";
 
   return (
-    <div className={`app-shell viewport-${viewportMode} theme-${theme}`}>
+    <div className={`app-shell viewport-${viewportMode} theme-${theme} route-session-${routeSessionState}`}>
       {/* ── Top bar ── */}
       <AppHeader theme={theme} onThemeToggle={handleThemeToggle} />
 
@@ -1365,18 +1602,14 @@ export function RoutePlanner() {
         </div>
 
         {/* ── Desktop: Results panel on right ── */}
-        {isDesktop && phase === "completed" && route && (
+        {isDesktop && phase === "completed" && route && largeResultsOpen && (
           <ResultsPanel
             route={route}
             selectedOptionId={selectedOptionId}
-            userRating={userRating}
-            ratingSubmitted={ratingSubmitted}
-            showDebug={showDebug}
             onOptionSelect={handleOptionSelect}
-            onRatingSelect={handleRatingSelect}
             onStartDrive={() => setShowHandoff(true)}
-            onReset={handleReset}
-            onToggleDebug={() => setShowDebug((v) => !v)}
+            onPlanNewRoute={handlePlanNewRoute}
+            onMinimize={() => setLargeResultsOpen(false)}
           />
         )}
 
@@ -1398,7 +1631,7 @@ export function RoutePlanner() {
         )}
 
         {/* ── Tablet: Google Maps-inspired left sliding panel ── */}
-        {isTablet && (
+        {isTablet && !(phase === "completed" && route && !largeResultsOpen) && (
           <aside className={`tablet-adaptive-panel tablet-panel-${phase === "completed" ? "results" : "planner"}`}>
             <div className="tablet-panel-handle" />
             <div className="tablet-panel-content">
@@ -1432,14 +1665,10 @@ export function RoutePlanner() {
                 <ResultsPanel
                   route={route}
                   selectedOptionId={selectedOptionId}
-                  userRating={userRating}
-                  ratingSubmitted={ratingSubmitted}
-                  showDebug={showDebug}
                   onOptionSelect={handleOptionSelect}
-                  onRatingSelect={handleRatingSelect}
                   onStartDrive={() => setShowHandoff(true)}
-                  onReset={handleReset}
-                  onToggleDebug={() => setShowDebug((v) => !v)}
+                  onPlanNewRoute={handlePlanNewRoute}
+                  onMinimize={() => setLargeResultsOpen(false)}
                 />
               )}
 
@@ -1454,77 +1683,92 @@ export function RoutePlanner() {
             </div>
           </aside>
         )}
+
+        {isMobile && phase !== "completed" && (
+          <div className={`mobile-planner-surface mobile-planner-${phase}`}>
+            {phase !== "failed" ? (
+              <PlannerPanel
+                lat={lat}
+                lng={lng}
+                locationQuery={locationQuery}
+                locationSuggestions={locationSuggestions}
+                locationPending={locationPending}
+                locationError={locationError}
+                showDropdown={showDropdown}
+                routeMode={routeMode}
+                timeBudget={timeBudget}
+                vibes={vibes}
+                phase={phase}
+                statusMessage={phase === "idle" ? statusMessage : ""}
+                compactVibeList
+                onLatChange={setLat}
+                onLngChange={setLng}
+                onLocationQueryChange={setLocationQuery}
+                onSuggestionSelect={handleSuggestionSelect}
+                onGeolocate={handleGeolocate}
+                onModeChange={setRouteMode}
+                onTimeBudgetChange={setTimeBudget}
+                onVibeToggle={handleVibeToggle}
+                onGenerate={handleGenerate}
+              />
+            ) : (
+              <FailedCard
+                message={statusMessage}
+                guidance={failureGuidance}
+                onReset={handleReset}
+                onTryVibe={handleTryVibe}
+              />
+            )}
+          </div>
+        )}
       </div>
 
-      {/* ── Mobile: Bottom Sheet ── */}
-      {isMobile && (
+      {!isMobile && route && (phase === "idle" || (phase === "completed" && !largeResultsOpen)) && (
+        <RouteSessionDock
+          route={route}
+          selectedOptionId={selectedOptionId}
+          mode={phase === "idle" ? "planningNewRoute" : "resultsMinimized"}
+          onStartDrive={() => setShowHandoff(true)}
+          onViewRoutes={handleViewRoutes}
+          onPlanNewRoute={handlePlanNewRoute}
+        />
+      )}
+
+      {/* ── Mobile: Results bottom sheet ── */}
+      {isMobile && phase === "completed" && route && (
+        <>
+          <SelectedRouteChip
+            route={route}
+            selectedOptionId={selectedOptionId}
+            sheetState={sheetState}
+          />
+          <MobileRouteDock
+            route={route}
+            selectedOptionId={selectedOptionId}
+            sheetState={sheetState}
+            onStartDrive={() => setShowHandoff(true)}
+            onViewRoutes={handleViewRoutes}
+            onPlanNewRoute={handlePlanNewRoute}
+          />
         <BottomSheet
           state={sheetState}
           onStateChange={setSheetState}
-          theme={phase === "completed" ? "results" : "planner"}
+          theme="results"
         >
-          {/* Planner panel (when not completed) */}
-          {phase !== "completed" && (
-            <PlannerPanel
-              lat={lat}
-              lng={lng}
-              locationQuery={locationQuery}
-              locationSuggestions={locationSuggestions}
-              locationPending={locationPending}
-              locationError={locationError}
-              showDropdown={showDropdown}
-              routeMode={routeMode}
-              timeBudget={timeBudget}
-              vibes={vibes}
-              phase={phase}
-              statusMessage={phase === "idle" || phase === "failed" ? statusMessage : ""}
-              onLatChange={setLat}
-              onLngChange={setLng}
-              onLocationQueryChange={setLocationQuery}
-              onSuggestionSelect={handleSuggestionSelect}
-              onGeolocate={handleGeolocate}
-              onModeChange={setRouteMode}
-              onTimeBudgetChange={setTimeBudget}
-              onVibeToggle={handleVibeToggle}
-              onGenerate={handleGenerate}
-            />
-          )}
-
-          {/* Results panel (when completed) */}
-          {phase === "completed" && route && (
-            <ResultsPanel
-              route={route}
-              selectedOptionId={selectedOptionId}
-              userRating={userRating}
-              ratingSubmitted={ratingSubmitted}
-              showDebug={showDebug}
-              onOptionSelect={handleOptionSelect}
-              onRatingSelect={handleRatingSelect}
-              onStartDrive={() => setShowHandoff(true)}
-              onReset={() => {
-                handleReset();
-                setSheetState('minimized');
-              }}
-              onToggleDebug={() => setShowDebug((v) => !v)}
-            />
-          )}
-
-          {/* Failed card (when failed) */}
-          {phase === "failed" && (
-            <FailedCard
-              message={statusMessage}
-              guidance={failureGuidance}
-              onReset={() => {
-                handleReset();
-                setSheetState('minimized');
-              }}
-              onTryVibe={(vibe) => {
-                handleTryVibe(vibe);
-                setSheetState('expanded');
-              }}
-            />
-          )}
+          <MobileResultsPanel
+            route={route}
+            selectedOptionId={selectedOptionId}
+            sheetState={sheetState}
+            onOptionSelect={(id) => {
+              void handleOptionSelect(id);
+            }}
+            onStartDrive={() => setShowHandoff(true)}
+            onPlanNewRoute={handlePlanNewRoute}
+            onExpand={() => setSheetState((current) => current === "peek" ? "mid" : "full")}
+            onMinimize={() => setSheetState('peek')}
+          />
         </BottomSheet>
+        </>
       )}
 
       {/* ── Loading overlay — full screen ── */}
