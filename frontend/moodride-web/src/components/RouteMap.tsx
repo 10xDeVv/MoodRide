@@ -176,7 +176,7 @@ function getRouteFitPadding() {
   const width = window.innerWidth;
   const height = window.visualViewport?.height ?? window.innerHeight;
 
-  if (width < 768) {
+  if (width <= 767) {
     return {
       top: 88,
       right: 28,
@@ -185,7 +185,7 @@ function getRouteFitPadding() {
     };
   }
 
-  if (width <= 1366) {
+  if (width <= 1440) {
     return {
       top: 96,
       right: 56,

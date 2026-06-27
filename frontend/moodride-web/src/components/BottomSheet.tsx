@@ -57,10 +57,10 @@ export const BottomSheet: React.FC<BottomSheetProps> = ({
     };
   }, []);
 
-  // Render for phone and iPad portrait widths that use the bottom-sheet layout.
+  // Render for phone widths that use the compact sheet layout.
   useEffect(() => {
     const checkMobile = () => {
-      setIsMobile(window.innerWidth <= 1024);
+      setIsMobile(window.innerWidth <= 767);
     };
     checkMobile();
     window.addEventListener('resize', checkMobile);

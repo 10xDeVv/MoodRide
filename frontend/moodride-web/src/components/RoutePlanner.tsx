@@ -76,14 +76,6 @@ const ROUTE_SIGNAL_LABELS: Record<string, string> = {
   curves: "Curves"
 };
 
-const ROUTE_TAG_LABELS: Record<string, string> = {
-  water: "Water",
-  greenery: "Greenery",
-  elevation: "Elevation",
-  solitude: "Solitude",
-  curves: "Curves"
-};
-
 const TIME_BUDGET_OPTIONS = [30, 60, 90, 120] as const;
 
 const ROUTE_MODES: Array<{ value: RouteMode; label: string; status: string; enabled: boolean }> = [
@@ -180,6 +172,9 @@ type Phase = "idle" | "submitting" | "tracking" | "completed" | "failed";
 type AppTheme = "day" | "night";
 type RouteSessionState = "planning" | "generating" | "resultsOpen" | "resultsMinimized" | "planningNewRoute";
 
+const PHONE_MAX_WIDTH = 767;
+const TABLET_MAX_WIDTH = 1440;
+
 type FailureGuidance = {
   failureCode: string | null;
   suggestedVibes: string[];
@@ -216,7 +211,7 @@ function AppHeader({ theme, onThemeToggle }: { theme: AppTheme; onThemeToggle: (
       </svg>
       <span className="header-glass-refraction" aria-hidden="true" />
       <div className="header-brand-block">
-        <h1 className="header-logo">Wayward</h1>
+        <h1 className="wayward-wordmark header-logo">Wayward</h1>
       </div>
       <button
         className="theme-toggle-btn"
@@ -459,43 +454,10 @@ function LoadingOverlay({ phase, progressStep }: { phase: Phase; progressStep: n
   return (
     <div className="loading-overlay" role="status" aria-live="polite" aria-label="Generating your route">
       <div className="loading-main">
-        <div className="loading-brand">Wayward</div>
+        <div className="wayward-wordmark loading-brand">Wayward</div>
 
-        <div className="loading-route-mark" aria-hidden="true">
-          <div className="loading-map-scan" />
-          <svg className="loading-route-svg" viewBox="0 0 320 200" fill="none">
-            <path className="loading-map-road" d="M18 52 H302" />
-            <path className="loading-map-road" d="M36 142 H286" />
-            <path className="loading-map-road" d="M78 20 V182" />
-            <path className="loading-map-road" d="M216 18 V178" />
-            <path className="loading-map-road curved" d="M16 112 C62 82 102 93 142 118 S236 151 304 103" />
-            <path className="loading-map-road curved" d="M42 184 C78 138 112 144 148 108 S222 40 292 38" />
-            <path className="loading-map-contour" d="M34 78 C60 60 95 58 116 78 C138 99 126 126 96 130 C58 135 21 110 34 78Z" />
-            <path className="loading-map-contour" d="M226 72 C254 51 291 62 298 91 C306 124 270 147 238 135 C208 123 199 92 226 72Z" />
-            <path
-              className="loading-route-candidate candidate-one"
-              d="M52 150 C86 110 118 132 150 98 S224 54 274 82"
-            />
-            <path
-              className="loading-route-candidate candidate-two"
-              d="M52 150 C92 164 130 139 162 112 S224 94 274 82"
-            />
-            <path
-              className="loading-route-line"
-              d="M52 150 C72 118 106 120 126 88 C149 51 191 53 204 88 C218 125 238 123 274 82"
-            />
-            <circle className="loading-route-node start" cx="52" cy="150" r="7" />
-            <circle className="loading-route-node end" cx="274" cy="82" r="7" />
-            <circle className="loading-route-traveler" r="6">
-              <animateMotion
-                dur="3.4s"
-                path="M52 150 C72 118 106 120 126 88 C149 51 191 53 204 88 C218 125 238 123 274 82"
-                repeatCount="indefinite"
-              />
-            </circle>
-            <text className="loading-map-label" x="64" y="165">START</text>
-            <text className="loading-map-label" x="225" y="70">SCENIC</text>
-          </svg>
+        <div className="loading-route-mark loading-blob-stage" aria-hidden="true">
+          <div className="loading-blob-loader" />
         </div>
 
         <div className="loading-copy">
@@ -539,17 +501,24 @@ function getSelectedRouteOption(route: RouteDetailResponse, selectedOptionId: st
 }
 
 function scenicFitLabel(score?: number | null) {
-  if (!Number.isFinite(score ?? NaN)) return "Scenic fit";
+  if (!Number.isFinite(score ?? NaN)) return "Scenic match";
   const score10 = (score ?? 0) > 10 ? (score ?? 0) / 10 : (score ?? 0);
-  if (score10 >= 7) return "Strong scenic fit";
-  if (score10 >= 4) return "Moderate scenic fit";
-  return "Light scenic fit";
+  if (score10 >= 7) return "Best scenic match";
+  if (score10 >= 4) return "Good scenic match";
+  return "Some scenic match";
+}
+
+function scenicFitBand(score?: number | null) {
+  if (!Number.isFinite(score ?? NaN)) return "Scenic";
+  const score10 = (score ?? 0) > 10 ? (score ?? 0) / 10 : (score ?? 0);
+  if (score10 >= 7) return "Best";
+  if (score10 >= 4) return "Good";
+  return "Some";
 }
 
 type RouteSignal = {
   key: string;
   label: string;
-  tagLabel: string;
   pct: number;
 };
 
@@ -568,15 +537,28 @@ function getRouteSignals(option?: RouteOptionResponse | null): RouteSignal[] {
     .map((key) => ({
       key,
       label: ROUTE_SIGNAL_LABELS[key],
-      tagLabel: ROUTE_TAG_LABELS[key],
       pct: Math.round(Math.max(0, Math.min(1, averages[key] ?? 0)) * 100)
     }));
 }
 
-function getRouteTags(option?: RouteOptionResponse | null, limit = 3) {
+function getRouteBestFor(option?: RouteOptionResponse | null, limit = 3) {
   return getRouteSignals(option)
     .slice(0, limit)
-    .map((signal) => signal.tagLabel);
+    .map((signal) => signal.label);
+}
+
+function getRouteFeaturePhrases(option?: RouteOptionResponse | null, limit = 3) {
+  const phraseByKey: Record<string, string> = {
+    water: "waterfront views",
+    greenery: "green cover",
+    elevation: "rolling terrain",
+    solitude: "quieter roads",
+    curves: "curvier roads"
+  };
+
+  return getRouteSignals(option)
+    .slice(0, limit)
+    .map((signal) => phraseByKey[signal.key] ?? signal.label.toLowerCase());
 }
 
 function joinHumanList(items: string[]) {
@@ -585,23 +567,32 @@ function joinHumanList(items: string[]) {
   return `${items.slice(0, -1).join(", ")}, and ${items[items.length - 1]}`;
 }
 
-function cleanRouteSummary(summary?: string | null) {
-  const text = summary?.trim().replace(/^["“”]+|["“”]+$/g, "");
-  if (!text) return null;
-  if (/%\s*contribution/i.test(text) || /\b(component|weighted|baseline|score)\b/i.test(text)) return null;
-  return text;
-}
-
 function buildHumanRouteReason(route: RouteDetailResponse, option?: RouteOptionResponse | null) {
-  const cleanSummary = cleanRouteSummary(option?.explanation?.summary);
-  if (cleanSummary) return cleanSummary;
-
-  const tags = getRouteTags(option);
-  const featureText = tags.length > 0 ? joinHumanList(tags.map((tag) => tag.toLowerCase())) : "the strongest scenic stretches";
+  const features = getRouteFeaturePhrases(option);
+  const featureText = features.length > 0 ? ` It is best for ${joinHumanList(features)}.` : "";
   const duration = option?.estimatedDurationMinutes ?? route.estimatedDurationMinutes ?? 0;
-  const budgetLine = duration > 0 ? "keeps the loop close to your time budget" : "keeps the loop practical";
+  const shortestDuration = Math.min(
+    ...((route.routeOptions ?? [])
+      .map((routeOption) => routeOption.estimatedDurationMinutes)
+      .filter((value): value is number => Number.isFinite(value)))
+  );
+  const isLonger = Number.isFinite(shortestDuration) && duration > shortestDuration + 5;
+  const tradeoffText = isLonger ? " It is longer than the other routes." : "";
+  const profile = option?.profile ?? route.routeOptions?.[0]?.profile ?? "";
 
-  return `This route ${budgetLine} while favoring ${featureText} where the road network allows it.`;
+  if (profile === "most_scenic") {
+    return `This is the most scenic option nearby.${featureText}${tradeoffText}`;
+  }
+
+  if (profile === "balanced") {
+    return `This route balances scenery with drive time.${featureText}`;
+  }
+
+  if (profile === "shorter") {
+    return `This is the shortest scenic option nearby.${featureText} It keeps the drive tighter than the other routes.`;
+  }
+
+  return `This route gives you a scenic loop nearby.${featureText}`;
 }
 
 function SelectedRouteSummary({ route, option }: { route: RouteDetailResponse; option?: RouteOptionResponse | null }) {
@@ -728,11 +719,25 @@ function RouteSessionDock({
 }
 
 function RouteDetailsSignals({ option }: { option?: RouteOptionResponse | null }) {
+  const [showDetails, setShowDetails] = useState(false);
   const [showAllSignals, setShowAllSignals] = useState(false);
   const signals = getRouteSignals(option).sort((a, b) => b.pct - a.pct);
   const visibleSignals = showAllSignals ? signals : signals.slice(0, 3);
 
   if (signals.length === 0) return null;
+
+  if (!showDetails) {
+    return (
+      <button
+        className="route-details-toggle route-details-toggle-primary"
+        type="button"
+        aria-expanded={false}
+        onClick={() => setShowDetails(true)}
+      >
+        Show route details
+      </button>
+    );
+  }
 
   return (
     <div>
@@ -748,16 +753,29 @@ function RouteDetailsSignals({ option }: { option?: RouteOptionResponse | null }
           </div>
         ))}
       </div>
-      {signals.length > 3 && (
+      <div className="route-detail-actions">
+        {signals.length > 3 && (
+          <button
+            className="route-details-toggle"
+            type="button"
+            aria-expanded={showAllSignals}
+            onClick={() => setShowAllSignals((value) => !value)}
+          >
+            {showAllSignals ? "Show fewer signals" : "Show all signals"}
+          </button>
+        )}
         <button
           className="route-details-toggle"
           type="button"
-          aria-expanded={showAllSignals}
-          onClick={() => setShowAllSignals((value) => !value)}
+          aria-expanded={showDetails}
+          onClick={() => {
+            setShowDetails(false);
+            setShowAllSignals(false);
+          }}
         >
-          {showAllSignals ? "Show fewer signals" : "Show all signals"}
+          Hide route details
         </button>
-      )}
+      </div>
     </div>
   );
 }
@@ -781,7 +799,7 @@ function MobileResultsPanel({
   const routeOptions = route.routeOptions?.length ? route.routeOptions : selectedOption ? [selectedOption] : [];
   const isPeek = sheetState === "peek";
   const isFull = sheetState === "full";
-  const selectedTags = getRouteTags(selectedOption);
+  const bestForTags = getRouteBestFor(selectedOption);
   const routeReason = buildHumanRouteReason(route, selectedOption);
 
   if (isPeek) {
@@ -804,7 +822,9 @@ function MobileResultsPanel({
               }}
             >
               <span className="mobile-peek-name">{formatProfileName(opt.profile)}</span>
-              <span className="mobile-peek-fit">{scenicFitLabel(opt.scenicScore)}</span>
+              <span className="mobile-peek-fit">
+                {formatDistFromKm(opt.totalDistanceKm ?? 0)} km · {formatDur(opt.estimatedDurationMinutes ?? 0)}
+              </span>
             </button>
           ))}
         </div>
@@ -851,17 +871,7 @@ function MobileResultsPanel({
                         {formatDistFromKm(opt.totalDistanceKm ?? 0)} km &bull; {formatDur(opt.estimatedDurationMinutes ?? 0)}
                       </div>
                     </div>
-                    <span className="route-option-fit">{scenicFitLabel(opt.scenicScore)}</span>
                   </div>
-                  {getRouteTags(opt).length > 0 && (
-                    <div className="route-metrics">
-                      {getRouteTags(opt).map((tag) => (
-                        <div key={tag} className="metric-item">
-                          <span className="metric-label">{tag}</span>
-                        </div>
-                      ))}
-                    </div>
-                  )}
                 </button>
               ))}
             </div>
@@ -873,22 +883,22 @@ function MobileResultsPanel({
         {!isFull && (
           <button className="mobile-sheet-more" type="button" onClick={onExpand}>
             <ChevronUp size={13} />
-            Swipe up - why and details
+            Swipe up - route details
           </button>
         )}
 
         {isFull && (
           <>
             <div className="route-summary-card">
-              <div className="section-heading route-summary-heading">Why this way?</div>
+              <div className="section-heading route-summary-heading">Why this route?</div>
               <p className="route-summary-text">{routeReason}</p>
             </div>
 
-            {selectedTags.length > 0 && (
+            {bestForTags.length > 0 && (
               <div>
-                <div className="section-heading">Highlights</div>
+                <div className="section-heading">Best for</div>
                 <div className="route-highlights">
-                  {selectedTags.map((tag) => (
+                  {bestForTags.map((tag) => (
                     <span key={tag} className="route-highlight-pill">{tag}</span>
                   ))}
                 </div>
@@ -930,7 +940,7 @@ function ResultsPanel({
 }: ResultsPanelProps) {
   const selectedOption = route.routeOptions?.find((o) => o.routeId === selectedOptionId)
     ?? route.routeOptions?.[0];
-  const selectedTags = getRouteTags(selectedOption);
+  const bestForTags = getRouteBestFor(selectedOption);
   const routeReason = buildHumanRouteReason(route, selectedOption);
 
   return (
@@ -978,17 +988,7 @@ function ResultsPanel({
                         {formatDistFromKm(opt.totalDistanceKm ?? 0)} km &bull; {formatDur(opt.estimatedDurationMinutes ?? 0)}
                       </div>
                     </div>
-                    <span className="route-option-fit">{scenicFitLabel(opt.scenicScore)}</span>
                   </div>
-                  {getRouteTags(opt).length > 0 && (
-                    <div className="route-metrics" style={{ marginTop: "var(--space-3)" }}>
-                      {getRouteTags(opt).map((tag) => (
-                        <div key={tag} className="metric-item">
-                          <span className="metric-label">{tag}</span>
-                        </div>
-                      ))}
-                    </div>
-                  )}
                 </button>
               ))}
             </div>
@@ -999,15 +999,15 @@ function ResultsPanel({
 
         {/* ── Route Summary ── */}
         <div className="route-summary-card">
-          <div className="section-heading route-summary-heading">Why this way?</div>
+          <div className="section-heading route-summary-heading">Why this route?</div>
           <p className="route-summary-text">{routeReason}</p>
         </div>
 
-        {selectedTags.length > 0 && (
+        {bestForTags.length > 0 && (
           <div>
-            <div className="section-heading">Highlights</div>
+            <div className="section-heading">Best for</div>
             <div className="route-highlights">
-              {selectedTags.map((tag) => (
+              {bestForTags.map((tag) => (
                 <span key={tag} className="route-highlight-pill">{tag}</span>
               ))}
             </div>
@@ -1054,7 +1054,6 @@ function HandoffModal({
     ? route.routeOptions[0].profile.split("_").map((w) => w[0].toUpperCase() + w.slice(1)).join(" ")
     : "Wayward Route";
   const handoffOption = route.routeOptions?.[0];
-  const handoffReason = buildHumanRouteReason(route, handoffOption);
 
   return (
     <div
@@ -1078,7 +1077,7 @@ function HandoffModal({
           {/* Route name + meta */}
           <div>
             <div className="handoff-route-name">{routeName.toUpperCase()}</div>
-            <div className="handoff-meta">
+            <div className="handoff-route-meta">
               {formatDistFromKm(route.totalDistanceKm ?? 0)} km &bull; {formatDur(route.estimatedDurationMinutes ?? 0)} &bull; {scenicFitLabel(handoffOption?.scenicScore ?? route.scenicScore)}
             </div>
           </div>
@@ -1094,8 +1093,8 @@ function HandoffModal({
               <span className="handoff-stat-value">{formatDur(route.estimatedDurationMinutes ?? 0)}</span>
             </div>
             <div className="handoff-stat">
-              <span className="handoff-stat-label">Scenic Fit</span>
-              <span className="handoff-stat-value fit-label">{scenicFitLabel(handoffOption?.scenicScore ?? route.scenicScore).replace(" scenic fit", "")}</span>
+              <span className="handoff-stat-label">Scenic Match</span>
+              <span className="handoff-stat-value fit-label">{scenicFitBand(handoffOption?.scenicScore ?? route.scenicScore)}</span>
             </div>
           </div>
 
@@ -1128,26 +1127,10 @@ function HandoffModal({
               Export GPX Route Data
             </button>
           </div>
-
-          {/* Route reason */}
-          {handoffReason && (
-            <p style={{
-              fontFamily: "var(--font-body)", fontSize: "12px",
-              color: "var(--clr-text-muted)", lineHeight: 1.6,
-              borderLeft: "3px solid var(--clr-lime)",
-              paddingLeft: "16px"
-            }}>
-              {handoffReason}
-            </p>
-          )}
         </div>
 
         {/* Footer */}
         <div className="handoff-footer">
-          <button className="btn-start-drive" type="button" onClick={() => window.open(gmapsUrl, "_blank")}>
-            <Navigation size={20} />
-            Sync Navigation
-          </button>
           <button className="btn-cancel" onClick={onClose} type="button">
             Back to route
           </button>
@@ -1515,9 +1498,9 @@ export function RoutePlanner() {
   useEffect(() => {
     const checkViewportMode = () => {
       const width = window.innerWidth;
-      if (width < 768) {
+      if (width <= PHONE_MAX_WIDTH) {
         setViewportMode('mobile');
-      } else if (width <= 1366) {
+      } else if (width <= TABLET_MAX_WIDTH) {
         setViewportMode('tablet');
       } else {
         setViewportMode('desktop');
