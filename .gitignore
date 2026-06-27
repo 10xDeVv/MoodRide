@@ -97,6 +97,9 @@ logs/
 tmp/
 temp/
 *.tmp
+.tmp-verify/
+docker-compose.lowmem.yml
+osrm-canada-latest.tar.gz.sha256
 
 # Database
 *.db
