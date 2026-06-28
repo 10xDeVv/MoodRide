@@ -46,6 +46,7 @@ yarn-error.log*
 out/
 build/
 dist/
+*.tsbuildinfo
 .env*.local
 .vercel
 .turbo
@@ -68,16 +69,17 @@ data/scoring-snapshots/*.sql
 *.shx
 *.dbf
 *.prj
+*.tar.gz
+*.tar.gz.sha256
 
 # Docker volumes
-infrastructure/docker/volumes/
+docker/volumes/
 
 # Environment variables
 .env
 .env.local
 .env.production
 .env.prod
-infrastructure/docker/.env.prod
 *.env
 !.env.example
 
@@ -92,6 +94,7 @@ Thumbs.db
 logs/
 *.log
 *.out
+*.err
 
 # Temporary files
 tmp/
@@ -115,6 +118,13 @@ coverage/
 artifacts/
 generated/
 **/generated/
+**/BOOT-INF/
+services/**/cp.txt
+*.backup
+docs/design-references/
+frontend/verification_notes.md
+frontend/moodride-web/src.zip
+portfolio/
 
 # Local legacy service archive
 legacy/

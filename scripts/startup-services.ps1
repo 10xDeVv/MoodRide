@@ -45,14 +45,14 @@ function Wait-ForHttpUp {
     return $false
 }
 
-Write-Host "MoodRide service startup"
+Write-Host "Wayward service startup"
 Write-Host "Project root: $projectRoot"
 Write-Host "Build mode: SkipBuild=$SkipBuild ForceBuild=$ForceBuild"
 
 Set-Location $projectRoot
 
 $requiredInfra = @("postgres", "redis", "kafka", "zookeeper", "osrm")
-Write-Host "Ensuring required infrastructure services are running..."
+Write-Host "Ensuring required Docker services are running..."
 docker compose up -d postgres redis kafka zookeeper osrm | Out-Null
 
 $infraWaitOk = $true
@@ -132,8 +132,7 @@ if (Wait-ForHttpUp -Url "http://localhost:8080/actuator/health" -TimeoutSeconds 
 
 $servicePoms = @(
     @{ Name = "route-worker"; Pom = "services/route-worker/pom.xml"; Port = 8081 },
-    @{ Name = "notification-service"; Pom = "services/notification-service/pom.xml"; Port = 8084 },
-    @{ Name = "scenic-scoring-service"; Pom = "services/scenic-scoring-service/pom.xml"; Port = 8085 }
+    @{ Name = "notification-service"; Pom = "services/notification-service/pom.xml"; Port = 8084 }
 )
 
 foreach ($svc in $servicePoms) {
@@ -143,10 +142,10 @@ foreach ($svc in $servicePoms) {
     }
 
     $pomPath = Join-Path $projectRoot $svc.Pom
-    if ($svc.Name -in @("route-worker", "notification-service")) {
+    if ($svc.Name -eq "route-worker" -or $svc.Name -eq "notification-service") {
         $jarName = if ($svc.Name -eq "route-worker") { "route-worker-1.0.0-SNAPSHOT.jar" } else { "notification-service-1.0.0-SNAPSHOT.jar" }
         $jarPath = Join-Path (Split-Path $pomPath -Parent) "target/$jarName"
-        $cmd = "java -Xms32m -Xmx128m -XX:+UseSerialGC -XX:MaxMetaspaceSize=96m -jar '$jarPath'"
+        $cmd = "java -jar '$jarPath'"
     } else {
         $cmd = "mvn -f '$pomPath' spring-boot:run"
     }

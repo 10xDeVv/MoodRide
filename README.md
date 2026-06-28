@@ -1,322 +1,155 @@
-# Wayward - Scenic Driving Route Generator 🚗🌄
+# Wayward
 
-**A distributed microservices platform that generates beautiful scenic driving loops based on time budget and vibe preferences.**
+Wayward generates scenic driving loops from a start point, time budget, and vibe. It is not trying to get you somewhere as fast as possible. It is trying to find the better drive nearby.
 
-> "Instead of getting you somewhere fast, Wayward shows you something beautiful."
+## Current Stack
 
-[![Java](https://img.shields.io/badge/Java-25-orange.svg)](https://openjdk.java.net/)
-[![Spring Boot](https://img.shields.io/badge/Spring%20Boot-3.3-brightgreen.svg)](https://spring.io/projects/spring-boot)
-[![Kafka](https://img.shields.io/badge/Kafka-7.6-blue.svg)](https://kafka.apache.org/)
-[![PostGIS](https://img.shields.io/badge/PostGIS-3.4-blue.svg)](https://postgis.net/)
+- Frontend: Next.js, React, Mapbox GL
+- Backend: Java, Spring Boot, Maven
+- Async routing: Kafka
+- Runtime storage: PostgreSQL/PostGIS
+- Cache: Redis
+- Routing engine: local OSRM container using `/trip`
+- Spatial scoring: H3 scenic tiles stored in PostGIS
+- Production deploy: Docker Compose on a single VM, Caddy for TLS
 
----
+## Active Services
 
-## 📋 Quick Links
+| Service | Role |
+| --- | --- |
+| `services/route-api` | Public REST API, route jobs, route details, route feedback endpoints, scenic regions, cache controls |
+| `services/route-worker` | Consumes route jobs, runs `hybrid_osrm_v2`, calls OSRM, scores routes, persists route options |
+| `services/notification-service` | Sends route completion/failure notifications over WebSocket |
+| `frontend/moodride-web` | Wayward web app |
+| `services/scenic-scoring-service` | Internal/offline scenic recompute experiments; not part of production compose |
 
-- **[Engineering Specification](docs/engineering-specification.md)** - System design, contracts, runtime scope
-- **[Deployment Pipeline](docs/DeploymentPipeline.md)** - CI/CD and release flows
-- **[Release QA Baseline](docs/ReleaseQABaseline.md)** - Post-deploy validation script
-- **[Data Quality Upgrade](docs/DataQualityUpgrade.md)** - Land cover + DEM scoring plan
-- **[Data Enrichment 3.0 Plan](docs/DataEnrichment30Plan.md)** - Overture + light-pollution enrichment plan
-- **[Service Ownership](docs/ServiceOwnership.md)** - Active vs legacy service ownership
-- **[Hybrid Routing Progress](docs/HybridRoutingProgress.md)** - Current route-generation status
-- **[Route Export & UI Polish Progress](docs/RouteExportAndUIPolishProgress.md)** - UX polish status
-- **[API Alias Deprecation Plan](docs/ApiAliasDeprecationPlan.md)** - `/routes/*` sunset plan
-- **[Implementation Plan](docs/implementation-plan.md)** - Roadmap
-- **[Project Structure](PROJECT_STRUCTURE.md)** - Microservices architecture overview
+## How Routing Works
 
----
+1. The frontend submits a route request to `POST /api/routes`.
+2. `route-api` creates a job and publishes it to Kafka.
+3. `route-worker` loads nearby precomputed H3 scenic tiles from `scenic_score_tiles`.
+4. The worker builds waypoint candidates based on the selected vibe and time budget.
+5. The worker calls the local OSRM `/trip` endpoint to get legal drivable loop geometry.
+6. Wayward samples the returned route corridor against H3 scenic tiles and scores landscape quality, vibe fit, drive quality, route shape, scenic moments, urban pressure, and start/end quality.
+7. The best options are persisted as `most_scenic`, `balanced`, and `shorter`.
+8. `notification-service` sends the frontend a completion event, and the frontend fetches route details.
 
-## 🎯 What is Wayward?
+The current route algorithm is `hybrid_osrm_v2`. The old beam-search implementation has been removed from the active codebase.
 
-Wayward is a **scenic route generation platform** that inverts traditional navigation:
+## Data Pipeline
 
-- ❌ Traditional GPS: **Minimize time** from Point A → Point B
-- ✅ Wayward: **Maximize scenic beauty** over a circular loop with a time budget
+Runtime route generation does not calculate water, greenery, elevation, darkness, buildings, parks, or urban pressure from raw datasets. Those signals are computed offline into `scenic_score_tiles`.
 
-### Example Use Case
+Current scenic release train:
 
-> "I have 90 minutes free on Saturday morning. Generate me a beautiful coastal drive that starts and ends at my house."
+- `3.1-darkness-urban-penalty-calibration`
 
-Wayward generates a loop route optimized for:
-- 🌊 **Coastal views** (water proximity)
-- ⛰️ **Elevation changes** (mountain roads)
-- 🌲 **Natural scenery** (forests, parks)
-- 🛣️ **Road curvature** (winding roads)
-- 🏞️ **Points of interest** (scenic overlooks, landmarks)
+Main data scripts:
 
----
+- `scripts/setup/run-data-enrichment-v31.ps1`
+- `scripts/setup/data-quality-enrichment-v31.sql`
+- `scripts/setup/import-osm.ps1`
+- `scripts/setup/import-natural-earth-water.ps1`
+- `scripts/setup/import-nlcd.ps1`
+- `scripts/setup/import-protected-areas.ps1`
+- `scripts/setup/import-overture-v30.ps1`
+- `scripts/setup/import-light-pollution-samples-v31.ps1`
+- `scripts/deploy/publish_scenic_release.ps1`
+- `scripts/deploy/deploy_scenic_release.sh`
+- `scripts/deploy/build_osrm_dataset.ps1`
+- `scripts/deploy/publish_data_release.ps1`
+- `scripts/deploy/deploy_data_release.sh`
 
-## 🏗️ Microservices Architecture
+Older scoring SQL files are kept only when they are useful for reproducing previous releases.
 
-```
-┌─────────────────┐     ┌──────────────────┐     ┌─────────────────┐
-│  Next.js Web    │────▶│   route-api      │────▶│   Kafka Queue   │
-│  (Frontend)     │     │   (REST API)     │     │                 │
-└─────────────────┘     └──────────────────┘     └────────┬────────┘
-                                                            │
-                   ┌───────────────────────────────────────┤
-                   │                                       │
-           ┌───────▼────────┐                    ┌────────▼────────┐
-           │  route-worker  │                    │  notification   │
-           │ (hybrid OSRM)  │                    │   (WebSocket)   │
-           └───────┬────────┘                    └─────────────────┘
-                   │
-        ┌──────────┼──────────┐
-        │          │          │
-┌───────▼──────┐  │  ┌───────▼─────────┐
-│   PostGIS    │  │  │   Redis Cache   │
-│ (Scenic DB)  │  │  │  (4-layer)      │
-└──────────────┘  │  └─────────────────┘
-                  │
-        ┌─────────▼──────────┐
-        │       OSRM         │
-        │  (Trip / Loop)     │
-        └────────────────────┘
-```
+## Local Development
 
-### Microservices
+Prerequisites:
 
-| Service | Purpose | Runtime |
-|---------|---------|---------|
-| **route-api** | REST API, job management, route detail | Always-on |
-| **route-worker** | Hybrid OSRM loop generation + scoring | Always-on |
-| **notification-service** | WebSocket completion/failure updates | Always-on |
-| **scenic-scoring-service** | Targeted scenic tile recompute experiments | Offline/internal |
-
-`ingestion-service` and `cdc-service` were moved out of the active build and archived locally under `legacy/`. Current production data upgrades are script-driven batch/offline pipelines with versioned scenic releases.
-
----
-
-## 🚀 Tech Stack
-
-**Backend:**
-- **Java 25** (Virtual Threads, FFM API, Vector API) 🔥
-- Spring Boot 3.3+
-- PostgreSQL 15/16 + PostGIS 3.3/3.4
-- Apache Kafka (Confluent 7.5/7.6)
-- Redis 7.x (4-layer caching)
-- OSRM (loop routing via `/trip`)
-- H3 (spatial indexing)
-
-**Frontend:**
-- Next.js 14+ (React)
-- Mapbox GL JS (map rendering)
-- WebSocket (real-time route delivery)
-
-**Data Sources:**
-- OpenStreetMap - road network
-- Natural Earth - water bodies
-- Canada Land Cover - land use
-- Copernicus DEM - elevation
-- Protected/conserved areas - park proximity and park boost
-- Overture Places/Buildings - POI quality and urban-density signals
-- Light pollution / nighttime lights - darkness and solitude signal
-- OpenTopoData - elevation profiles (optional)
-
-**Observability:**
-- Prometheus + Grafana (optional)
-- Structured JSON logging
-
----
-
-## 🎨 Key Innovations
-
-1. **Hybrid OSRM Loop Generation**: intent-aware waypoint rings + corridor-quality scoring (`hybrid_osrm_v2`)
-2. **H3 Scenic Intelligence**: Component scores (water/green/elevation/solitude/curve/poi/park/urban/darkness) + preferences
-3. **Multi-Option Routes**: `most_scenic` / `balanced` / `shorter` profiles persisted per job
-4. **Async Job Architecture**: Kafka workers + WebSocket completion/failure updates
-5. **Versioned Data Releases**: OSRM + scenic tiles released through GitHub Actions
-6. **Release QA Baseline**: Regression tracking after app/data deploys
-
----
-
-## 🚀 Getting Started
-
-### Prerequisites
-
-- Java 25 (or Java 21 LTS)
+- Java 21+ or Java 25
 - Maven 3.9+
-- Docker & Docker Compose
+- Docker Desktop
 - Node.js 18+
-- Git
 
-### Quick Start (5 minutes)
+Start the local Docker services:
 
-**1. Clone the repository**
-```bash
-git clone <repository-url>
-cd MoodRide
+```powershell
+docker compose up -d postgres redis kafka zookeeper osrm
 ```
 
-**2. Start core infrastructure**
-```bash
-docker compose up -d
-```
+Build backend modules:
 
-This starts:
-- PostgreSQL + PostGIS (host port `5433`)
-- Redis
-- Kafka + Zookeeper
-- OSRM (route engine for `/trip` loop routing)
-
-On first startup, `osrm-prepare` preprocesses `data/osm-samples/new-brunswick-latest.osm.pbf` into `data/osrm/*.osrm*`.
-This one-time step can take a few minutes depending on machine performance.
-
-**Optional full infra stack (OpenTopoData + Prometheus + Grafana):**
-```bash
-docker compose -f infrastructure/docker/docker-compose.yml up -d
-```
-Note: this stack exposes Postgres on `5432`, so set `SPRING_DATASOURCE_URL` accordingly when running services.
-
-**3. Build all services**
-```bash
+```powershell
 mvn clean install
 ```
 
-**4. Run services** (separate terminals)
-```bash
-# Terminal 1 - API
+Run app services in separate terminals:
+
+```powershell
 cd services/route-api
 mvn spring-boot:run
+```
 
-# Terminal 2 - Worker
+```powershell
 cd services/route-worker
 mvn spring-boot:run
-# (low-memory alternative on this machine)
-powershell -ExecutionPolicy Bypass -File scripts/start-route-worker-lowmem.ps1
+```
 
-# Terminal 3 - WebSocket notifications
+```powershell
 cd services/notification-service
 mvn spring-boot:run
+```
 
-# Terminal 4 - Frontend
+Run the frontend:
+
+```powershell
 cd frontend/moodride-web
-npm install && npm run dev
+npm install
+npm run dev
 ```
 
-**5. Access the application**
-- Frontend: http://localhost:3000
-- API: http://localhost:8080
-- OSRM: http://localhost:5002
-- Grafana: http://localhost:3001 (admin/admin, optional)
+Default local URLs:
 
----
+- Frontend: `http://localhost:3000`
+- Route API: `http://localhost:8080`
+- OSRM: `http://localhost:5002`
 
-## 📁 Project Structure
+## Production
 
-```
-MoodRide/
-├── services/              # Microservices
-│   ├── route-api/         # REST API (Port 8080)
-│   ├── route-worker/      # Hybrid OSRM worker (Port 8081)
-│   ├── scenic-scoring-service/
-│   ├── notification-service/
-│   └── ...
-├── shared/                # Shared libraries
-│   ├── geo-commons/       # H3, JTS utilities
-│   ├── event-models/      # Kafka schemas
-│   └── data-models/       # JPA entities
-├── frontend/
-│   └── moodride-web/      # Next.js app
-├── infrastructure/
-│   └── docker/            # Docker Compose
-├── data/                  # OSM files (gitignored)
-└── docs/                  # Documentation
-```
+Production uses:
 
-See [PROJECT_STRUCTURE.md](PROJECT_STRUCTURE.md) for detailed breakdown.
+- `docker-compose.prod.yml`
+- `Caddyfile`
+- `.github/workflows/deploy-prod.yml`
+- `scripts/deploy/deploy_prod.sh`
+- `scripts/deploy/rollback_prod.sh`
 
----
+App deploys are triggered from GitHub Actions. Data releases are published as GitHub release assets, then deployed by the OSRM/scenic release workflows.
 
-## ✅ Current Status (June 2026)
+## Useful Docs
 
-- Hybrid OSRM routing (`hybrid_osrm_v2`) is the default generator; beam-search fallback removed.
-- Multi-option routes are persisted and exposed in API + UI (`most_scenic`, `balanced`, `shorter`).
-- Start Drive (Google/Apple) + GPX export shipped; mobile handoff validation still pending.
-- `/routes/*` aliases are in deprecation window; `/api/*` is canonical (sunset Aug 1, 2026).
-- Release QA baseline script and artifacts are in place for each deploy.
-- Core land-cover + DEM upgrade is complete nationally; 2.9 protected-area enrichment is locally artifacted.
-- 3.0 Overture/light-pollution enrichment is implemented in schema, scripts, shared scoring, and route-quality evals. Confirm the GitHub release/deploy state with authenticated `gh` access before treating publication as verified from a fresh machine.
+- [Engineering Specification](docs/engineering-specification.md)
+- [Hybrid OSRM v2](docs/HybridOsrmV2.md)
+- [Data Pipeline](docs/DataPipeline.md)
+- [Deployment Pipeline](docs/DeploymentPipeline.md)
+- [Service Ownership](docs/ServiceOwnership.md)
+- [Route Quality Eval](docs/RouteQualityEval.md)
+- [Release QA Baseline](docs/ReleaseQABaseline.md)
+- [Vibe Profile Calibration](docs/VibeProfileCalibration.md)
 
-See [Hybrid OSRM v2](docs/HybridOsrmV2.md), [HybridRoutingProgress](docs/HybridRoutingProgress.md), [RouteExportAndUIPolishProgress](docs/RouteExportAndUIPolishProgress.md), [DataQualityUpgradeProgress](docs/DataQualityUpgradeProgress.md), and [DataEnrichment30Plan](docs/DataEnrichment30Plan.md).
+## Repo Layout
 
----
-
-## 🚢 Operations & Releases
-
-- App deploys: GitHub Actions flow in [DeploymentPipeline](docs/DeploymentPipeline.md).
-- Data releases: OSRM dataset + scenic tiles published to GitHub Releases and deployed via workflows.
-- Release QA: run [ReleaseQABaseline](docs/ReleaseQABaseline.md) after app/data deploys; artifacts land in `artifacts/release-qa`.
-
----
-
-## 🔧 Key Commands
-
-```bash
-# Build all services
-mvn clean install
-
-# Start core infrastructure
-docker compose up -d
-
-# Start full infrastructure (optional)
-cd infrastructure/docker && docker compose up -d
-
-# Run tests
-mvn test
-
-# Run specific service
-cd services/route-api && mvn spring-boot:run
-
-# Run route-worker with bounded heap (avoids local paging-file crashes)
-powershell -ExecutionPolicy Bypass -File scripts/start-route-worker-lowmem.ps1
-
-# Stop all containers
-docker compose down
-
-# View logs
-docker compose logs -f kafka
-
-# Release QA baseline (post-deploy)
-powershell -ExecutionPolicy Bypass -File scripts/deploy/run_release_qa_baseline.ps1 -BaseUrl "https://app.moodrides.com"
+```text
+.
+├── .github/workflows
+├── docs
+├── frontend/moodride-web
+├── scripts
+├── services
+├── shared
+├── docker-compose.yml
+├── docker-compose.prod.yml
+└── Caddyfile
 ```
 
----
-
-## 📊 Monitoring (Optional)
-
-- **Metrics**: http://localhost:9090 (Prometheus)
-- **Dashboards**: http://localhost:3001 (Grafana)
-- **Service Health**: http://localhost:8080/actuator/health
-
----
-
-## 🔐 Security
-
-- TLS termination via Caddy in production compose
-- Secrets loaded via environment or `.env.prod` (see [infrastructure/docker/secrets/README.md](infrastructure/docker/secrets/README.md))
-- Parameterized SQL queries (injection prevention)
-
----
-
-## 📖 Documentation
-
-- [Engineering Specification](docs/engineering-specification.md) - System design
-- [Deployment Pipeline](docs/DeploymentPipeline.md) - CI/CD and release flows
-- [Data Quality Upgrade](docs/DataQualityUpgrade.md) - Land cover + DEM scoring
-- [Release QA Baseline](docs/ReleaseQABaseline.md) - Post-deploy validation
-
----
-
-## 🙏 Acknowledgments
-
-- OpenStreetMap contributors for road network data
-- PostGIS team for geospatial database extensions
-- Uber H3 for hexagonal hierarchical spatial indexing
-- Spring Boot and Kafka communities
-
----
-
-_Built with ❤️ for scenic drives and software engineering excellence._
-
+Generated artifacts, local datasets, IDE files, build outputs, OSRM archives, and verification scratch files are ignored by Git.

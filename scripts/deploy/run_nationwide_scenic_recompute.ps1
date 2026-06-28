@@ -1,9 +1,9 @@
 param(
     [Parameter(Mandatory = $false)]
-    [string]$SqlScriptPath = "scripts/setup/data-quality-upgrade-batched.sql",
+    [string]$SqlScriptPath = "scripts/setup/data-quality-enrichment-v31.sql",
 
     [Parameter(Mandatory = $false)]
-    [int]$ChunkSize = 500,
+    [int]$ChunkSize = 50000,
 
     [Parameter(Mandatory = $false)]
     [string]$Database = "moodride",
@@ -24,7 +24,7 @@ param(
     [string]$PostgresContainerName = "moodride-postgres",
 
     [Parameter(Mandatory = $false)]
-    [string]$ExpectedScoringVersion = "2.6-raster-data-quality-upgrade-national-batched"
+    [string]$ExpectedScoringVersion = "3.1-darkness-urban-penalty-calibration"
 )
 
 Set-StrictMode -Version Latest
@@ -137,4 +137,4 @@ Write-Host "`nRecompute summary:"
 Write-Host $summary
 
 Write-Host "`nNext step (publish scenic release):"
-Write-Host "./scripts/deploy/publish_scenic_release.ps1 -ScoringVersion `"$ExpectedScoringVersion`" -ReleaseTag `"scenic-$ExpectedScoringVersion-$(Get-Date -Format 'yyyyMMdd-HHmm')`" -Repo `"10xDeVv/MoodRide`""
+Write-Host "./scripts/deploy/publish_scenic_release.ps1 -ScoringVersion `"$ExpectedScoringVersion`" -ReleaseTag `"scenic-$ExpectedScoringVersion-$(Get-Date -Format 'yyyyMMdd-HHmm')`" -Repo `"10xDeVv/Wayward`""

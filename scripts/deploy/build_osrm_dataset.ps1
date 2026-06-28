@@ -159,4 +159,4 @@ Get-ChildItem -LiteralPath $resolvedOutput -File |
 Write-Step "Done"
 Write-Host "OSRM dataset is ready under: $resolvedOutput"
 Write-Host "Next publish command:"
-Write-Host "./scripts/deploy/publish_data_release.ps1 -DatasetBasename $DatasetBasename -DataDirectory `"$resolvedOutput`" -ReleaseTag `"data-$DatasetBasename-$(Get-Date -Format 'yyyyMMdd-HHmm')`" -Repo `"10xDeVv/MoodRide`""
+Write-Host "./scripts/deploy/publish_data_release.ps1 -DatasetBasename $DatasetBasename -DataDirectory `"$resolvedOutput`" -ReleaseTag `"data-$DatasetBasename-$(Get-Date -Format 'yyyyMMdd-HHmm')`" -Repo `"10xDeVv/Wayward`""

@@ -16,17 +16,6 @@ These services are part of the active Wayward runtime:
 |---|---|---|
 | `scenic-scoring-service` | Internal | Targeted scenic tile recompute experiments. Keep until it is either aligned with the SQL release pipeline or formally retired. |
 
-## Legacy Archive
-
-These services are no longer part of the active Maven build or startup flow:
-
-| Service | Previous responsibility | Current decision |
-|---|---|---|
-| `ingestion-service` | OSM ingest, legacy scenic batch endpoints, elevation/traffic seed endpoints | Archived locally under `legacy/`; current ingestion is script-driven. |
-| `cdc-service` | Debezium-based Redis invalidation and recompute queueing | Archived locally under `legacy/`; current scenic releases are versioned batch deploys, not CDC-driven. |
-
-The `legacy/` directory is gitignored. It is a local reference archive, not a production dependency.
-
 ## Data Pipeline Ownership
 
 The current production data path is:
@@ -39,11 +28,10 @@ The current production data path is:
 
 This keeps expensive enrichment offline and keeps route generation fast, predictable, and independent from third-party API availability.
 
-## Future Decision Point
+## Future Decision Points
 
-If Wayward needs incremental live data updates later, revisit one of these options:
+If Wayward needs more automated data refreshes later, choose one clear owner:
 
-1. Rebuild CDC around Debezium and Redis invalidation with clear production ownership.
-2. Keep batch releases only and schedule periodic recomputes.
-3. Use targeted recompute jobs in `scenic-scoring-service`, but only after its scoring logic matches the latest release SQL.
+1. Keep versioned batch releases and schedule periodic recomputes.
+2. Promote `scenic-scoring-service` only after its scoring logic matches the latest SQL release pipeline.
 

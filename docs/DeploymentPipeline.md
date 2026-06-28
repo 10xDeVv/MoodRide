@@ -80,7 +80,7 @@ Run after OSRM preprocessing finishes:
   -DatasetBasename canada-latest `
   -DataDirectory "D:\DATA\osrm\canada" `
   -ReleaseTag "data-canada-latest-20260501" `
-  -Repo "10xDeVv/MoodRide"
+  -Repo "10xDeVv/Wayward"
 ```
 
 This uploads:
@@ -106,29 +106,28 @@ The workflow downloads the release asset, copies it to VM, updates `OSRM_DATASET
 
 ```powershell
 ./scripts/deploy/run_nationwide_scenic_recompute.ps1 `
-  -SqlScriptPath "scripts/setup/data-quality-enrichment-v30.sql" `
-  -ChunkSize 1000 `
-  -ExpectedScoringVersion "3.0-overture-lightpollution-enrichment"
+  -SqlScriptPath "scripts/setup/data-quality-enrichment-v31.sql" `
+  -ChunkSize 50000 `
+  -ExpectedScoringVersion "3.1-darkness-urban-penalty-calibration"
 ```
 
 This executes the selected versioned scenic scoring SQL over your local `moodride` database.
 
 Important behavior:
 
-- Use the SQL script that matches the release train you are publishing:
-  - `scripts/setup/data-quality-upgrade-batched.sql` for `2.6-raster-data-quality-upgrade-national-batched`
-  - `scripts/setup/data-quality-calibration-v28.sql` for `2.8-urban-aware-elevation-calibration`
-  - `scripts/setup/data-quality-parks-v29.sql` for `2.9-protected-areas-enrichment`
-  - `scripts/setup/data-quality-enrichment-v30.sql` for `3.0-overture-lightpollution-enrichment`
+- Use the SQL script that matches the release train you are publishing.
+- Current release train:
+  - `scripts/setup/data-quality-enrichment-v31.sql` for `3.1-darkness-urban-penalty-calibration`
+- Older versioned SQL files are kept only for reproducing previous scenic releases.
 - The run is resumable. Re-running after interruption continues from remaining tiles not already at the expected scoring version.
 
 ### 5B. Publish scenic tile release from your local machine
 
 ```powershell
 ./scripts/deploy/publish_scenic_release.ps1 `
-  -ScoringVersion "3.0-overture-lightpollution-enrichment" `
-  -ReleaseTag "scenic-3.0-overture-lightpollution-enrichment-$(Get-Date -Format 'yyyyMMdd-HHmm')" `
-  -Repo "10xDeVv/MoodRide"
+  -ScoringVersion "3.1-darkness-urban-penalty-calibration" `
+  -ReleaseTag "scenic-3.1-darkness-urban-penalty-calibration-$(Get-Date -Format 'yyyyMMdd-HHmm')" `
+  -Repo "10xDeVv/Wayward"
 ```
 
 This uploads:
@@ -140,8 +139,8 @@ This uploads:
 
 Run workflow `.github/workflows/deploy-scenic-release.yml` with:
 
-- `release_tag`: example `scenic-3.0-overture-lightpollution-enrichment-20260527-1230`
-- `scoring_version`: example `3.0-overture-lightpollution-enrichment`
+- `release_tag`: example `scenic-3.1-darkness-urban-penalty-calibration-20260627-1230`
+- `scoring_version`: example `3.1-darkness-urban-penalty-calibration`
 - `asset_name`: optional (defaults from `scoring_version`)
 
 The workflow downloads the scenic asset, uploads it to VM, applies score updates into `scenic_score_tiles`, and restarts `route-api` + `route-worker`.
@@ -177,7 +176,5 @@ Make sure `.env.prod` contains at least:
 
 ## 8. Backup locations
 
-- Runtime deployment dump used for restore:
-  - `backups/moodride_runtime_backup.dump`
-- Full pre-cleanup archive (cold/local storage):
-  - `D:\Backups\MoodRide\moodride_full_pre_cleanup_2026-04-30.dump`
+- Keep production database and dataset backups outside the repository.
+- Do not commit generated dumps, OSRM archives, scenic release tarballs, or local restore artifacts.

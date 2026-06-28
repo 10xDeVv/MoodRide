@@ -14,7 +14,7 @@
 
     <artifactId>route-worker</artifactId>
     <name>Route Worker Service</name>
-    <description>Kafka consumer for route generation using beam search algorithm</description>
+    <description>Kafka consumer for hybrid OSRM v2 route generation</description>
 
     <dependencies>
         <!-- Spring Boot -->

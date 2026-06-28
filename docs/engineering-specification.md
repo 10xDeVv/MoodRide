@@ -1,42 +1,36 @@
-# Wayward Engineering Specification (As-Built)
+# Wayward Engineering Specification
 
-Last reconciled: 2026-06-08
+Last reconciled: 2026-06-27
 
-## 1) Document Intent
-This file is the current, code-aligned engineering specification for Wayward. It replaces the previous oversized historical spec and focuses on the system that actually runs today.
+This document describes the system that is active in the repository today. It intentionally excludes removed deployment scaffolding, archived services, and old progress-plan documents.
 
-Use this document as the technical source of truth for:
-- runtime architecture
-- contracts between services
-- API and event interfaces
-- production deployment model
-- operational constraints and risks
+## Product Scope
 
-## 2) Product Scope (Current)
-Wayward generates scenic driving loops from a start point and time budget, then returns route options with real-time status updates.
+Wayward generates scenic driving loops from a start point, time budget, and vibe.
 
-In-scope now:
+In scope:
+
 - async route job submission and tracking
-- 3 route option profiles (`most_scenic`, `balanced`, `shorter`)
-- OSRM-backed loop generation via route-worker
-- websocket completion/failure notifications
-- route rating capture (1-5)
-- scenic region discovery endpoint
-- cache warmup + cache invalidation hooks
-- Docker-based deployment to single VM
+- three route options: `most_scenic`, `balanced`, `shorter`
+- OSRM-backed route generation through `hybrid_osrm_v2`
+- precomputed H3 scenic tile scoring
+- WebSocket completion/failure notifications with polling fallback
+- route detail, route option, scenic region, and cache endpoints
+- versioned OSRM and scenic tile releases
 
-Out-of-scope now:
-- multi-region deployment
-- active-active HA
-- user auth/identity management
-- full Kubernetes production rollout
-- continuous live data recomputation running on prod VM
+Out of scope for the current runtime:
 
-## 3) Runtime Architecture
+- Kubernetes deployment
+- live CDC pipeline
+- live incremental data recomputation
+- user auth and identity
+- multi-region production deployment
 
-### 3.1 Production runtime (current)
+## Runtime Architecture
+
 Production compose (`docker-compose.prod.yml`) runs:
-- `postgres` (PostGIS)
+
+- `postgres` with PostGIS
 - `zookeeper`
 - `kafka`
 - `redis`
@@ -44,203 +38,164 @@ Production compose (`docker-compose.prod.yml`) runs:
 - `route-api`
 - `route-worker`
 - `notification-service`
-- `frontend` (Next.js)
-- `caddy` (TLS termination + reverse proxy)
+- `frontend`
+- `caddy`
 
-Domain in use: `app.moodrides.com`.
+The active production domain is `app.moodrides.com`.
 
-### 3.2 Service responsibilities
-- `route-api`: public HTTP API; route job creation/status/detail/rating; scenic regions; cache admin endpoints.
-- `route-worker`: consumes route jobs, generates candidates, persists routes/waypoints, publishes completion/failure events.
-- `notification-service`: consumes completion events and pushes websocket notifications (`/topic/job/{jobId}`).
-- `postgres`: system of record for jobs/routes/tiles/segments.
-- `redis`: app cache backend.
-- `kafka`: async job queue and event transport.
-- `osrm`: round-trip routing engine from preprocessed dataset.
+## Service Responsibilities
 
-### 3.3 Optional/offline services present in repo
-The codebase includes services not currently wired into production compose:
-- `ingestion-service`
-- `scenic-scoring-service`
-- `cdc-service`
+| Service | Responsibility |
+| --- | --- |
+| `route-api` | HTTP API, route job persistence, route details, route feedback endpoints, scenic regions, cache controls |
+| `route-worker` | Kafka job consumption, `hybrid_osrm_v2` candidate generation, OSRM Trip calls, route scoring, route persistence |
+| `notification-service` | Completion/failure WebSocket notifications |
+| `frontend/moodride-web` | Wayward planning UI and route visualization |
+| `scenic-scoring-service` | Internal/offline scenic recompute experiments; not part of production compose |
 
-These are intentionally treated as batch/offline tools for now (data refresh/recompute and CDC support), and are not part of the always-on production runtime stack.
+## End-to-End Flow
 
-## 4) End-to-End Flow
-1. Frontend submits route request to `POST /api/routes`.
-2. `route-api` validates request, persists `route_jobs` row, publishes `route-jobs` Kafka message.
-3. `route-worker` consumes job, marks status `PROCESSING`, generates route candidates using `hybrid_osrm_v2` path.
-4. Worker persists route records + waypoints, marks job `COMPLETED`, emits `route-completions` event.
-5. `notification-service` consumes event and pushes websocket message on `/topic/job/{jobId}`.
-6. Frontend fetches route detail from `GET /api/routes/route/{routeId}`.
+1. Frontend submits `POST /api/routes`.
+2. `route-api` validates the request, persists `route_jobs`, and publishes a `route-jobs` Kafka message.
+3. `route-worker` consumes the job and marks it `PROCESSING`.
+4. The worker loads H3 scenic tiles, builds route candidates, and calls local OSRM `/trip`.
+5. Returned OSRM geometries are sampled against `scenic_score_tiles`.
+6. The worker scores candidates and persists route options.
+7. The job is marked `COMPLETED` or `FAILED`.
+8. `notification-service` pushes the result to `/topic/job/{jobId}`.
+9. Frontend fetches route detail from `GET /api/routes/route/{routeId}`.
 
-Failure path:
-- job retries are tracked on `route_jobs.retry_count`
-- failures can be emitted to `route.jobs.dlq`
-- websocket failure notification includes polling fallback URL
+## Routing Algorithm
 
-## 5) Routing Algorithm (Current Implementation)
-Primary algorithm path in worker is hybrid OSRM v2:
-- score nearby H3 tiles using weighted preference vector and blended vibe profile
-- build sector waypoint rings plus intent-anchor variants
-- call OSRM trip API for loop candidates
-- compute route quality along returned path, including landscape average, vibe fit, drive quality, route shape, scenic moments, urban pressure, and start/end penalty
-- deduplicate and select top options
-- persist options as route profiles
+Current algorithm version: `hybrid_osrm_v2`.
 
-Current algorithm version persisted on jobs: `hybrid_osrm_v2`.
+The worker keeps OSRM responsible for legal drivable geometry. Wayward decides which candidate waypoints to try and how to score the returned route corridor.
 
-Fallback behavior implemented:
-- synthetic radial waypoint variants when initial candidate set is weak
-- beam-search implementation (`beam_v1`) still exists in code but is not the primary route option generator path
+The v2 score considers:
 
-See [Hybrid OSRM v2](HybridOsrmV2.md) for the algorithm contract and comparison with v1 and beam search.
+- landscape quality
+- vibe fit
+- drive quality
+- route shape and budget fit
+- scenic moments and continuity
+- urban pressure
+- start/end quality
+- strategy fit for vibe-specific geometry
 
-## 6) API Surface (Current)
+See [Hybrid OSRM v2](HybridOsrmV2.md) for the detailed algorithm contract.
 
-### 6.1 Public route APIs
-- `POST /api/routes` (also aliased as `/routes` and `/routes/generate`)
+## API Surface
+
+Route APIs:
+
+- `POST /api/routes`
 - `GET /api/routes/{jobId}`
 - `GET /api/routes/jobs/{jobId}`
 - `GET /api/routes/route/{routeId}`
 - `POST /api/routes/{routeId}/rating`
 
-API policy:
-- canonical public surface is `/api/*`
-- `/routes/*` aliases are currently retained for compatibility and may be removed in a later cleanup pass
+Scenic region API:
 
-### 6.2 Scenic region API
 - `GET /api/scenic-regions?lat=&lng=&radiusKm=&limit=&vibe=`
 
-### 6.3 Internal cache APIs
+Internal cache APIs:
+
 - `POST /api/internal/cache/warm`
 - `GET /api/internal/cache/policy`
 - `POST /api/internal/cache/flush`
 
-### 6.4 Request/response contract notes
-- Route request accepts either `vibes[]` or single `vibe`, plus optional `preferenceVector`.
-- Job status returns `routeOptions` list and may return an inferred primary `routeId`.
-- Route detail returns geometry, segment scores/colors, highlights, algorithm metadata, route options, and user rating fields.
+The canonical public surface is `/api/*`. Older `/routes/*` aliases are compatibility routes only.
 
-## 7) Event Interfaces
-Current key Kafka topics and payload contracts:
-- `route-jobs`: job trigger (job UUID payload)
-- `route-completions`: completion/failure event payload (`RouteCompletionEvent`)
-- `route.jobs.dlq`: failed job payloads for triage
-- `route-rated`, `drive-completed`: user feedback events from route-api
-- `scenic-tiles-refreshed`, `cdc-tile-updates` used by cache invalidation consumers
+## Event Interfaces
 
-## 8) Data Model (Current Highlights)
-The schema is managed by Flyway migrations under `services/route-api/src/main/resources/db/migration`.
+Active Kafka topics:
 
-Core persisted entities:
+- `route-jobs`
+- `route-completions`
+- `route.jobs.dlq`
+- `route-rated`
+- `drive-completed`
+- `scenic-tiles-refreshed`
+- `cdc-tile-updates`
+
+`cdc-tile-updates` remains an event contract for cache invalidation compatibility. There is no active CDC service in the current runtime.
+
+## Data Model
+
+Flyway migrations live under:
+
+- `services/route-api/src/main/resources/db/migration`
+
+Core tables:
+
 - `route_jobs`
-  - lifecycle timestamps (`submittedAt`, `startedAt`, `completedAt`, `failedAt`)
-  - status enum (`QUEUED`, `PROCESSING`, `COMPLETED`, `FAILED`, `TIMEOUT`)
-  - retry fields (`retryCount`, `maxRetries`)
-  - algorithm metadata (`algorithmVersion`, `beamCandidates`)
-  - preference vector JSON text
 - `routes`
-  - route profile, geometry, distance/duration, scenic score
-  - v2 `score_breakdown_json` for route-quality components and penalties
-  - rating fields (user rating + rated timestamp)
 - `route_waypoints`
-  - ordered waypoint sequence and per-segment distances
 - `road_segments`
 - `scenic_score_tiles`
-  - composite + component score fields, including water/green/elevation/solitude/curve/poi, traffic, `park_score`, and 3.0 enrichment fields (`overture_poi_score`, `building_density_score`, `darkness_score`, `urban_penalty_score`)
+- `route_duration_calibrations`
 
-## 9) Caching + Invalidation
-- Route details cached (`routeResults` cache key by route ID).
-- Scenic tile/popularity metadata cached.
-- Warmup scheduler and internal warm endpoint exist in route-api.
-- Cache invalidation consumers in route-api and route-worker react to:
-  - scenic refresh events
-  - CDC tile update events
+`scenic_score_tiles` stores the precomputed scenic feature vector used by runtime routing. Important fields include:
 
-## 10) Frontend Contract
-Frontend (`Next.js 14`) uses:
-- `NEXT_PUBLIC_API_BASE_URL`
-- `NEXT_PUBLIC_WS_BASE_URL`
+- `water_score`
+- `green_score`
+- `elevation_score`
+- `solitude_score`
+- `curve_score`
+- `poi_score`
+- `park_score`
+- `overture_poi_score`
+- `building_density_score`
+- `darkness_score`
+- `urban_penalty_score`
 
-Behavioral contract:
-- submit route
-- poll status with websocket assist
-- load chosen route detail
-- switch between generated options
-- submit rating
+## Data Lifecycle
 
-## 11) Deployment + Operations
+Runtime routing reads precomputed tile scores. It does not calculate land cover, elevation, Overture buildings, parks, or light-pollution signals from raw data during a user request.
 
-### 11.1 Current production deployment model
-- single GCP VM
-- Docker Compose runtime
-- Caddy handles TLS for `app.moodrides.com`
+Current scenic release version:
 
-### 11.2 CI/CD model
-GitHub Actions workflows now present:
-- app deploy workflow (image build/push + remote deploy script)
-- data release deploy workflow (versioned OSRM artifact rollout)
-- scenic release deploy workflow (versioned scenic tile rollout into Postgres)
+- `3.1-darkness-urban-penalty-calibration`
 
-Compose now parameterizes image source/tag via:
-- `GHCR_NAMESPACE`
-- `IMAGE_TAG`
+Current data path:
 
-### 11.3 OSRM data lifecycle
-- preprocess heavy datasets off-VM (local machine)
-- publish versioned data artifact
-- deploy artifact to VM and switch `OSRM_DATASET_BASENAME`
+1. Import raw geospatial sources into PostGIS with setup scripts.
+2. Run `scripts/setup/run-data-enrichment-v31.ps1`.
+3. Recompute `scenic_score_tiles` with `scripts/setup/data-quality-enrichment-v31.sql`.
+4. Publish scenic tile release with `scripts/deploy/publish_scenic_release.ps1`.
+5. Deploy scenic release with `.github/workflows/deploy-scenic-release.yml`.
+6. Restart route services so caches refresh.
 
-Current production state:
-- `OSRM_DATASET_BASENAME=canada-latest` is deployed for nationwide routing.
+## Deployment
 
-### 11.4 Scenic data lifecycle
-- run nationwide recompute locally using versioned SQL scripts:
-  - `scripts/setup/data-quality-upgrade-batched.sql` for the 2.6 land-cover baseline
-  - `scripts/setup/data-quality-calibration-v28.sql` for 2.8 calibration
-  - `scripts/setup/data-quality-parks-v29.sql` for 2.9 protected-area enrichment
-  - `scripts/setup/data-quality-enrichment-v30.sql` for 3.0 Overture/light-pollution enrichment
-- publish versioned scenic release artifact (`publish_scenic_release.ps1`)
-- deploy scenic release via `.github/workflows/deploy-scenic-release.yml`
-- restart `route-api` + `route-worker` to refresh runtime caches
+Production app deploys use:
 
-Current verified repo state:
-- 2.8 national land-cover/DEM calibration is documented as complete for 211,510 tiles.
-- 2.9 protected-area enrichment has local release artifacts.
-- 3.0 Overture/light-pollution enrichment is implemented in schema, scripts, shared scoring, worker scoring, and route-quality evals.
-- This shell could not verify current GitHub release publication or live DB deployment for `3.0-overture-lightpollution-enrichment` because GitHub CLI was unauthenticated and Docker/Postgres were unavailable.
+- `.github/workflows/deploy-prod.yml`
+- `docker-compose.prod.yml`
+- `Caddyfile`
+- `scripts/deploy/deploy_prod.sh`
+- `scripts/deploy/rollback_prod.sh`
 
-### 11.5 Release QA baseline
-- run `scripts/deploy/run_release_qa_baseline.ps1` after release
-- baseline currently validates 3 regions (Ontario, BC, Maritimes) × 3 vibe profiles and persists JSON/Markdown artifacts under `artifacts/release-qa`
+Data deploys use:
 
-## 12) Non-Functional Targets (Current Practical)
-These are practical targets for current architecture, not theoretical long-term goals:
-- route submission API: low-latency request acceptance
-- route generation: async, seconds-scale for happy path
-- graceful degradation under transient Kafka/OSRM issues through retries + DLQ
-- no hard dependency on websocket delivery because poll fallback exists
+- `.github/workflows/deploy-data-release.yml`
+- `.github/workflows/deploy-scenic-release.yml`
+- `scripts/deploy/deploy_data_release.sh`
+- `scripts/deploy/deploy_scenic_release.sh`
 
-## 13) Known Risks / Constraints
-- Production is single-node; broker/db/app all co-located.
-- Kafka currently uses ZooKeeper mode and single-broker topology.
-- Large national OSRM datasets can stress memory/disk if not managed as versioned releases.
-- Some internal docs still describe optional components as if always-on prod components.
-- Kubernetes manifests are currently future/archival, not an active near-term deployment target.
-- Data refresh currently uses release-driven manual updates; transition to scheduled recompute jobs is planned in the near term.
+## Operational Notes
 
-## 14) Open Question
-1. What is the expected production SLO target (for example, p95 async route completion window) once nationwide data scope is live?
+- Production is a single-node Docker Compose deployment.
+- Kafka is single-broker with ZooKeeper.
+- OSRM datasets and scenic tile releases are versioned artifacts.
+- Large OSRM datasets should be built off-VM and deployed as release assets.
+- WebSocket is an assist path; polling remains the fallback.
+- Route feedback endpoints exist, but frontend personalization is not yet fully productized.
 
-## 15) Reference Documents
-- `docs/ApiAliasDeprecationPlan.md`
-- `docs/DeploymentPreparation.md`
-- `docs/Deployment.md`
-- `docs/DeploymentPipeline.md`
-- `docs/DataQualityUpgrade.md`
-- `docs/AdditionalDataQualityUpgrade.md`
-- `docs/RegionalDemWorkflow.md`
-- `docs/HybridRoutingProgress.md`
-- `docs/RouteExportAndUIPolishProgress.md`
+## Key References
 
+- [Hybrid OSRM v2](HybridOsrmV2.md)
+- [Deployment Pipeline](DeploymentPipeline.md)
+- [Service Ownership](ServiceOwnership.md)
+- [Route Quality Eval](RouteQualityEval.md)
+- [Release QA Baseline](ReleaseQABaseline.md)

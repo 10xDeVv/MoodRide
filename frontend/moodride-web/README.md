@@ -6,16 +6,16 @@ Production-oriented Next.js frontend for route generation, async job tracking, a
 
 - Location picker (geolocation + place search + manual coordinates)
 - Time budget slider and vibe multi-select (max 3)
-- Route submission via Kong (`/api/routes`)
+- Route submission through the Wayward route API (`/api/routes`)
 - Job tracking via STOMP-over-SockJS + polling fallback
-- Route rendering map (Mapbox with no-key fallback preview) + scenic highlights panel
+- Route rendering map with Mapbox and responsive route results UI
 - Responsive layout for mobile and desktop
 
 ## Environment
 
 Copy `.env.example` to `.env.local` and set values.
 
-- `NEXT_PUBLIC_API_BASE_URL`: Kong gateway base URL
+- `NEXT_PUBLIC_API_BASE_URL`: route API base URL
 - `NEXT_PUBLIC_WS_BASE_URL`: Notification websocket endpoint (SockJS)
 - `NEXT_PUBLIC_MAPBOX_ACCESS_TOKEN`: optional Mapbox token for map rendering
 

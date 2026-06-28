@@ -173,7 +173,7 @@ The current `scenic` vibe is a balanced blend across water, greenery, elevation,
 
 | Algorithm | How it builds routes | Strengths | Weaknesses | Current role |
 | --- | --- | --- | --- | --- |
-| `beam_v1` | Expands an internal road graph step-by-step with beam width, iteration, and timeout limits. | Full control over search objective and pruning. | Hard to guarantee legal/drivable quality, expensive to tune, more sensitive to graph quality, not the active route generator. | Legacy implementation remains in code, but route generation no longer uses it as fallback. |
+| `beam_v1` | Expanded an internal road graph step-by-step with beam width, iteration, and timeout limits. | Full control over search objective and pruning. | Hard to guarantee legal/drivable quality, expensive to tune, more sensitive to graph quality, and slower to productize. | Removed from the active codebase; kept here only as historical comparison. |
 | `hybrid_osrm_v1` | Picks scenic H3 tiles by sector, builds waypoint rings, asks OSRM Trip for loops, then averages scenic density along the returned corridor. | Practical, fast, uses OSRM for legal road geometry, works with precomputed scenic tiles. | Scenic score is mostly average density, anchor intent is limited, diversity happens mostly after OSRM returns routes, start/end quality and scenic continuity are weakly represented. | Replaced by v2. |
 | `hybrid_osrm_v2` | Builds calibrated sector rings plus intent-anchor and strategy variants, asks OSRM Trip for loops, then scores corridors with landscape, vibe fit, drive quality, route shape, scenic moments, urban pressure, start/end penalties, and strategy corridor fit. | Clearer contract, better per-vibe shaping, better distinction between average scenery and memorable stretches, stronger urban/start/end penalties, soft validation that OSRM actually returned the intended corridor type, learns radius/waypoint fit from successful OSRM durations, still benefits from OSRM road solving. | Still heuristic until user feedback calibration is trained; duration calibration is aggregate/bucketed rather than personalized. | Current default algorithm. |
 
@@ -202,7 +202,6 @@ For the current release, `hybrid_osrm_v2` is functionally complete as Wayward's 
 
 ## Operational Notes
 
-- `beam-width`, `max-iterations`, and `timeout-minutes` are legacy beam-search settings. They are not active in the current v2 generation path.
-- `h3-resolution`, `tile-selection-ring-*`, `tile-selection-limit`, `sector-count`, `corridor-sample-meters`, and `max-duration-overrun-ratio` still affect v2.
+- `h3-resolution`, `tile-selection-ring-*`, `tile-selection-limit`, `sector-count`, `corridor-sample-meters`, and `max-duration-overrun-ratio` affect v2.
 - OSRM timeout and base URL settings still matter because v2 depends on OSRM Trip for candidate geometry.
 - Route-worker `moodride.cache.graph-warmup.enabled` defaults to `false`. That warmup path loads the legacy internal road graph and is not needed by `hybrid_osrm_v2`, which delegates road solving to OSRM.

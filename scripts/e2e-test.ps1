@@ -1,6 +1,5 @@
-# Phase 5 E2E Test Automation Script
-# This script automates the end-to-end testing of MoodRide Phase 5
-# Prerequisites: All services running, Docker Compose up, etc.
+# Wayward E2E smoke test.
+# Prerequisites: core Docker services and app services are running.
 
 param(
     [string]$RouteApiUrl = "http://localhost:8080",
@@ -343,7 +342,7 @@ function Test-RouteWorkerReadiness([string]$baseUrl) {
     }
 }
 
-Write-Host "MoodRide Phase 5 E2E"
+Write-Host "Wayward E2E smoke test"
 Write-Host "====================="
 
 $routeApiHealthy = Test-ServiceHealth -name "Route API" -baseUrl $RouteApiUrl
