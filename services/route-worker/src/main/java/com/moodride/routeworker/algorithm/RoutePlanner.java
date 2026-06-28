@@ -66,13 +66,25 @@ public class RoutePlanner {
     private static final double V2_URBAN_PENALTY_WEIGHT = 0.10;
     private static final double V2_START_END_PENALTY_WEIGHT = 0.06;
     private static final double V2_STRATEGY_MISMATCH_PENALTY_WEIGHT = 0.08;
+    private static final double V2_BACKTRACKING_PENALTY_WEIGHT = 0.08;
+    private static final double MOST_SCENIC_BACKTRACKING_PROFILE_WEIGHT = 0.18;
+    private static final double BALANCED_BACKTRACKING_PROFILE_WEIGHT = 0.12;
+    private static final double SHORTER_BACKTRACKING_PROFILE_WEIGHT = 0.07;
     private static final double V2_CONTINUITY_THRESHOLD = 0.45;
     private static final int V2_EDGE_SAMPLE_COUNT = 4;
+    private static final int ROUTE_CRAFT_H3_RESOLUTION = DEFAULT_H3_RESOLUTION + 1;
+    private static final int ROUTE_CRAFT_SAMPLE_METERS = 350;
+    private static final int ROUTE_CRAFT_NEAR_DUPLICATE_WINDOW = 4;
+    private static final double ROUTE_CRAFT_LEG_SEPARATION_GOOD_KM = 0.85;
+    private static final double ROUTE_CRAFT_NEAR_DUPLICATE_KM = 0.12;
     private static final int STRATEGY_ANCHOR_LIMIT = 12;
     private static final int STRATEGY_PAIR_LIMIT = 18;
     private static final double STRATEGY_ANCHOR_MIN_SEPARATION_KM = 1.6;
-    private static final double STRICT_RURAL_STRATEGY_MIN_FIT = 0.30;
-    private static final double STRICT_RURAL_MAX_URBAN_PRESSURE = 0.86;
+    private static final double STRICT_MOUNTAIN_STRATEGY_MIN_FIT = 0.32;
+    private static final double STRICT_MOUNTAIN_MIN_CURVE_ELEVATION_SHARE = 0.28;
+    private static final double STRICT_LOW_PRESSURE_STRATEGY_MIN_FIT = 0.30;
+    private static final double STRICT_LOW_PRESSURE_MAX_URBAN_PRESSURE = 0.58;
+    private static final double STRICT_LOW_PRESSURE_MIN_QUIET_SHARE = 0.32;
     private static final int DURATION_CALIBRATION_H3_RESOLUTION = 5;
     private static final int MIN_DURATION_CALIBRATION_SAMPLES = 3;
     private static final double MIN_RADIUS_MULTIPLIER = 0.75;
@@ -167,7 +179,7 @@ public class RoutePlanner {
         }
         if (!hybridCandidates.isEmpty()) {
             List<RouteCandidate> differentiated = differentiateFlatScenicScores(hybridCandidates, job.getTimeBudgetMinutes());
-            List<RouteCandidate> candidatePool = strictRuralCandidatePool(differentiated, vibeProfile, geometryStrategy, requestVibes, job);
+            List<RouteCandidate> candidatePool = contractCandidatePool(differentiated, vibeProfile, geometryStrategy, requestVibes, job);
             List<RouteCandidate> selected = selectRouteOptions(candidatePool, job.getTimeBudgetMinutes());
             if (selected.size() >= ROUTE_OPTION_COUNT && minRouteSeparationKm(selected) < ROUTE_OPTION_MIN_SEPARATION_KM) {
                 List<RouteCandidate> rescueCandidates = collectHybridCandidates(
@@ -182,12 +194,12 @@ public class RoutePlanner {
                         combineCandidates(differentiated, rescueCandidates),
                         job.getTimeBudgetMinutes()
                     );
-                    List<RouteCandidate> expandedPool = strictRuralCandidatePool(expanded, vibeProfile, geometryStrategy, requestVibes, job);
+                    List<RouteCandidate> expandedPool = contractCandidatePool(expanded, vibeProfile, geometryStrategy, requestVibes, job);
                     selected = selectRouteOptions(expandedPool, job.getTimeBudgetMinutes());
                     logger.info("Hybrid routing used diversity-rescue waypoint variants for job {}", job.getId());
                 }
             }
-            if (requiresStrictRuralOptions(vibeProfile, geometryStrategy) && selected.size() < ROUTE_OPTION_COUNT) {
+            if (requiresStrictContractOptions(vibeProfile, geometryStrategy) && selected.size() < ROUTE_OPTION_COUNT) {
                 throw noStrongStrategyRoute(requestVibes, job);
             }
             return selected;
@@ -360,17 +372,17 @@ public class RoutePlanner {
         return List.copyOf(selected);
     }
 
-    private List<RouteCandidate> strictRuralCandidatePool(List<RouteCandidate> candidates,
-                                                          VibeCatalog.BlendedVibeProfile vibeProfile,
-                                                          GeometryStrategy geometryStrategy,
-                                                          List<String> requestVibes,
-                                                          RouteJob job) {
-        if (!requiresStrictRuralOptions(vibeProfile, geometryStrategy)) {
+    private List<RouteCandidate> contractCandidatePool(List<RouteCandidate> candidates,
+                                                       VibeCatalog.BlendedVibeProfile vibeProfile,
+                                                       GeometryStrategy geometryStrategy,
+                                                       List<String> requestVibes,
+                                                       RouteJob job) {
+        if (!requiresStrictContractOptions(vibeProfile, geometryStrategy)) {
             return candidates;
         }
 
         List<RouteCandidate> qualified = candidates.stream()
-            .filter(this::isStrictRuralCandidate)
+            .filter(candidate -> satisfiesStrictContract(candidate, vibeProfile, geometryStrategy))
             .toList();
         if (qualified.size() >= ROUTE_OPTION_COUNT) {
             return qualified;
@@ -379,23 +391,63 @@ public class RoutePlanner {
         throw noStrongStrategyRoute(requestVibes, job);
     }
 
-    private boolean requiresStrictRuralOptions(VibeCatalog.BlendedVibeProfile vibeProfile,
-                                               GeometryStrategy geometryStrategy) {
-        if (geometryStrategy != GeometryStrategy.QUIET_LOW_PRESSURE || vibeProfile == null) {
+    private boolean requiresStrictContractOptions(VibeCatalog.BlendedVibeProfile vibeProfile,
+                                                  GeometryStrategy geometryStrategy) {
+        if (vibeProfile == null) {
             return false;
         }
         Set<String> profileIds = vibeProfile.profiles().stream()
             .map(VibeCatalog.VibeProfile::id)
             .collect(Collectors.toSet());
-        return containsAny(profileIds, "countryside", "sunday_cruise");
+        if (geometryStrategy == GeometryStrategy.CURVY_ELEVATION) {
+            return containsAny(profileIds, "mountain", "winding_roads", "adventure");
+        }
+        if (geometryStrategy == GeometryStrategy.OPEN_SPACE_ESCAPE) {
+            return containsAny(profileIds, "open_roads");
+        }
+        if (geometryStrategy == GeometryStrategy.QUIET_LOW_PRESSURE) {
+            return containsAny(profileIds,
+                "countryside",
+                "sunday_cruise",
+                "quiet",
+                "minimal_traffic",
+                "clear_my_head"
+            );
+        }
+        return false;
     }
 
-    private boolean isStrictRuralCandidate(RouteCandidate candidate) {
+    private boolean satisfiesStrictContract(RouteCandidate candidate,
+                                            VibeCatalog.BlendedVibeProfile vibeProfile,
+                                            GeometryStrategy geometryStrategy) {
+        if (geometryStrategy == GeometryStrategy.CURVY_ELEVATION) {
+            return isStrictMountainCandidate(candidate);
+        }
+        if (geometryStrategy == GeometryStrategy.OPEN_SPACE_ESCAPE) {
+            return isStrictLowPressureCandidate(candidate);
+        }
+        if (geometryStrategy == GeometryStrategy.QUIET_LOW_PRESSURE && requiresStrictContractOptions(vibeProfile, geometryStrategy)) {
+            return isStrictLowPressureCandidate(candidate);
+        }
+        return true;
+    }
+
+    private boolean isStrictMountainCandidate(RouteCandidate candidate) {
+        Map<String, Double> breakdown = candidate.getScoreBreakdown();
+        double strategyFit = breakdownValue(breakdown, "strategy_fit_score", 0.0);
+        double curveElevationShare = breakdownValue(breakdown, "curve_elevation_corridor_share", 0.0);
+        return strategyFit >= STRICT_MOUNTAIN_STRATEGY_MIN_FIT
+            && curveElevationShare >= STRICT_MOUNTAIN_MIN_CURVE_ELEVATION_SHARE;
+    }
+
+    private boolean isStrictLowPressureCandidate(RouteCandidate candidate) {
         Map<String, Double> breakdown = candidate.getScoreBreakdown();
         double strategyFit = breakdownValue(breakdown, "strategy_fit_score", 0.0);
         double urbanPressure = breakdownValue(breakdown, "urban_penalty", 1.0);
-        return strategyFit >= STRICT_RURAL_STRATEGY_MIN_FIT
-            && urbanPressure <= STRICT_RURAL_MAX_URBAN_PRESSURE;
+        double quietShare = breakdownValue(breakdown, "quiet_corridor_share", 0.0);
+        return strategyFit >= STRICT_LOW_PRESSURE_STRATEGY_MIN_FIT
+            && urbanPressure <= STRICT_LOW_PRESSURE_MAX_URBAN_PRESSURE
+            && quietShare >= STRICT_LOW_PRESSURE_MIN_QUIET_SHARE;
     }
 
     private NoFeasibleRouteException noStrongStrategyRoute(List<String> requestVibes, RouteJob job) {
@@ -475,14 +527,16 @@ public class RoutePlanner {
     private double mostScenicProfileScore(RouteCandidate candidate, int targetMinutes) {
         return (candidate.getTotalScenicScore() * 0.74)
             + (budgetFitScore(candidate, targetMinutes) * 0.08)
-            + (budgetUtilizationScore(candidate, targetMinutes) * 0.18);
+            + (budgetUtilizationScore(candidate, targetMinutes) * 0.18)
+            - (candidateBacktrackingPenalty(candidate) * MOST_SCENIC_BACKTRACKING_PROFILE_WEIGHT);
     }
 
     private double balancedProfileScore(RouteCandidate candidate, int targetMinutes) {
         return (candidate.getTotalScenicScore() * 0.46)
             + (budgetFitScore(candidate, targetMinutes) * 0.34)
             + (budgetUtilizationScore(candidate, targetMinutes) * 0.12)
-            + (estimateCurvatureScore(candidate.getWaypoints()) * 0.08);
+            + (estimateCurvatureScore(candidate.getWaypoints()) * 0.08)
+            - (candidateBacktrackingPenalty(candidate) * BALANCED_BACKTRACKING_PROFILE_WEIGHT);
     }
 
     private ToDoubleFunction<RouteCandidate> shorterProfileScorer(List<RouteCandidate> candidates, int targetMinutes) {
@@ -494,8 +548,13 @@ public class RoutePlanner {
                 + (candidate.getTotalScenicScore() * 0.28)
                 + (budgetFitScore(candidate, targetMinutes) * 0.14)
                 + (shorterDistance * 0.08)
-                + (estimateCurvatureScore(candidate.getWaypoints()) * 0.04);
+                + (estimateCurvatureScore(candidate.getWaypoints()) * 0.04)
+                - (candidateBacktrackingPenalty(candidate) * SHORTER_BACKTRACKING_PROFILE_WEIGHT);
         };
+    }
+
+    private double candidateBacktrackingPenalty(RouteCandidate candidate) {
+        return breakdownValue(candidate.getScoreBreakdown(), "backtracking_penalty", 0.0);
     }
 
     private double shorterProfileBudgetFitScore(RouteCandidate candidate, int targetMinutes) {
@@ -1754,10 +1813,11 @@ public class RoutePlanner {
             return new RouteScoreResult(0.0, Map.of("final_score", 0.0));
         }
 
+        RouteCraftMetrics routeCraftMetrics = computeRouteCraftMetrics(path);
         CorridorTileCoverage coverage = findCorridorTileCoverage(path);
         List<ScenicScoreTile> tiles = coverage.orderedTiles();
         if (tiles.isEmpty()) {
-            return fallbackRouteScoreResult(path, preferences, targetMinutes, durationMinutes, geometryStrategy);
+            return fallbackRouteScoreResult(path, preferences, targetMinutes, durationMinutes, geometryStrategy, routeCraftMetrics);
         }
 
         List<Double> landscapeScores = tiles.stream()
@@ -1782,7 +1842,8 @@ public class RoutePlanner {
             + (scenicMomentsScore * V2_SCENIC_MOMENTS_WEIGHT)
             - (urbanPenalty * V2_URBAN_PENALTY_WEIGHT)
             - (edgePenalty * V2_START_END_PENALTY_WEIGHT)
-            - (strategyMetrics.mismatchPenalty() * V2_STRATEGY_MISMATCH_PENALTY_WEIGHT);
+            - (strategyMetrics.mismatchPenalty() * V2_STRATEGY_MISMATCH_PENALTY_WEIGHT)
+            - (routeCraftMetrics.backtrackingPenalty() * V2_BACKTRACKING_PENALTY_WEIGHT);
 
         double finalScore = clamp01(weightedScore);
         Map<String, Double> breakdown = new LinkedHashMap<>();
@@ -1796,6 +1857,7 @@ public class RoutePlanner {
         breakdown.put("start_end_penalty", edgePenalty);
         breakdown.put("strategy_fit_score", strategyMetrics.strategyFitScore());
         breakdown.put("strategy_mismatch_penalty", strategyMetrics.mismatchPenalty());
+        addRouteCraftBreakdown(breakdown, routeCraftMetrics);
         breakdown.put("water_corridor_share", strategyMetrics.waterCorridorShare());
         breakdown.put("open_space_corridor_share", strategyMetrics.openSpaceCorridorShare());
         breakdown.put("quiet_corridor_share", strategyMetrics.quietCorridorShare());
@@ -1812,20 +1874,23 @@ public class RoutePlanner {
                                                       PreferenceWeights preferences,
                                                       int targetMinutes,
                                                       int durationMinutes,
-                                                      GeometryStrategy geometryStrategy) {
+                                                      GeometryStrategy geometryStrategy,
+                                                      RouteCraftMetrics routeCraftMetrics) {
         double fallbackScore = estimateFallbackScenicDensity(path, preferences);
+        double finalScore = clamp01(fallbackScore - (routeCraftMetrics.backtrackingPenalty() * V2_BACKTRACKING_PENALTY_WEIGHT));
         Map<String, Double> breakdown = new LinkedHashMap<>();
-        breakdown.put("final_score", fallbackScore);
+        breakdown.put("final_score", finalScore);
         breakdown.put("fallback_scenic_density", fallbackScore);
-        breakdown.put("landscape_score", fallbackScore);
-        breakdown.put("vibe_fit_score", fallbackScore);
+        breakdown.put("landscape_score", finalScore);
+        breakdown.put("vibe_fit_score", finalScore);
         breakdown.put("drive_quality_score", estimateCurvatureScore(path));
         breakdown.put("route_shape_score", computeRouteShapeScore(path, targetMinutes, durationMinutes));
-        breakdown.put("scenic_moments_score", fallbackScore);
+        breakdown.put("scenic_moments_score", finalScore);
         breakdown.put("urban_penalty", 0.0);
         breakdown.put("start_end_penalty", 0.0);
         breakdown.put("strategy_fit_score", fallbackScore);
         breakdown.put("strategy_mismatch_penalty", 0.0);
+        addRouteCraftBreakdown(breakdown, routeCraftMetrics);
         breakdown.put("water_corridor_share", fallbackScore);
         breakdown.put("open_space_corridor_share", fallbackScore);
         breakdown.put("quiet_corridor_share", fallbackScore);
@@ -1835,7 +1900,7 @@ public class RoutePlanner {
         breakdown.put("target_minutes", (double) targetMinutes);
         breakdown.put("duration_minutes", (double) durationMinutes);
         breakdown.put("geometry_strategy_code", geometryStrategyCode(geometryStrategy));
-        return new RouteScoreResult(fallbackScore, breakdown);
+        return new RouteScoreResult(finalScore, breakdown);
     }
 
     private Map<String, Double> withDurationCalibrationBreakdown(Map<String, Double> source,
@@ -2028,6 +2093,180 @@ public class RoutePlanner {
         double consistencyScore = 1.0 - clamp01(standardDeviation(landscapeScores) / 0.35);
 
         return clamp01((peakScore * 0.32) + (continuityScore * 0.46) + (consistencyScore * 0.22));
+    }
+
+    private RouteCraftMetrics computeRouteCraftMetrics(List<RoadNode> path) {
+        if (path == null || path.size() < 4) {
+            return new RouteCraftMetrics(0.0, 0.0, 1.0, 0.0, 0.0);
+        }
+
+        List<RoadNode> samples = samplePath(path, ROUTE_CRAFT_SAMPLE_METERS);
+        if (samples.size() < 4) {
+            samples = path;
+        }
+
+        List<String> compressedCells = compressedRouteCraftCells(samples);
+        double repeatedCellShare = repeatedCorridorCellShare(compressedCells);
+        double reverseOverlapShare = reverseOverlapShare(compressedCells);
+        double legSeparationScore = legSeparationScore(samples);
+        double nearDuplicateRisk = selfIntersectionOrNearDuplicateRisk(samples);
+        double backtrackingPenalty = clamp01(
+            (repeatedCellShare * 0.34)
+                + (reverseOverlapShare * 0.30)
+                + ((1.0 - legSeparationScore) * 0.24)
+                + (nearDuplicateRisk * 0.12)
+        );
+
+        return new RouteCraftMetrics(
+            repeatedCellShare,
+            reverseOverlapShare,
+            legSeparationScore,
+            nearDuplicateRisk,
+            backtrackingPenalty
+        );
+    }
+
+    private List<String> compressedRouteCraftCells(List<RoadNode> samples) {
+        List<String> cells = new ArrayList<>();
+        String previous = null;
+        for (RoadNode sample : samples) {
+            String cell = H3Utils.getH3Index(sample.getLatitude(), sample.getLongitude(), ROUTE_CRAFT_H3_RESOLUTION);
+            if (!cell.equals(previous)) {
+                cells.add(cell);
+                previous = cell;
+            }
+        }
+        return cells;
+    }
+
+    private double repeatedCorridorCellShare(List<String> compressedCells) {
+        if (compressedCells == null || compressedCells.size() < 2) {
+            return 0.0;
+        }
+        Set<String> uniqueCells = new HashSet<>(compressedCells);
+        return clamp01((compressedCells.size() - uniqueCells.size()) / (double) compressedCells.size());
+    }
+
+    private double reverseOverlapShare(List<String> compressedCells) {
+        if (compressedCells == null || compressedCells.size() < 3) {
+            return 0.0;
+        }
+
+        int edgeCount = 0;
+        Set<String> uniqueUndirectedEdges = new HashSet<>();
+        for (int i = 1; i < compressedCells.size(); i++) {
+            String left = compressedCells.get(i - 1);
+            String right = compressedCells.get(i);
+            if (left.equals(right)) {
+                continue;
+            }
+            edgeCount++;
+            uniqueUndirectedEdges.add(undirectedEdgeKey(left, right));
+        }
+        if (edgeCount == 0) {
+            return 0.0;
+        }
+        return clamp01((edgeCount - uniqueUndirectedEdges.size()) / (double) edgeCount);
+    }
+
+    private String undirectedEdgeKey(String left, String right) {
+        return left.compareTo(right) <= 0 ? left + "|" + right : right + "|" + left;
+    }
+
+    private double legSeparationScore(List<RoadNode> samples) {
+        if (samples == null || samples.size() < 9) {
+            return 1.0;
+        }
+
+        int size = samples.size();
+        int firstEnd = Math.max(2, size / 3);
+        int middleEnd = Math.max(firstEnd + 2, (size * 2) / 3);
+        List<RoadNode> firstLeg = trimmedLeg(samples, 0, firstEnd, true, false);
+        List<RoadNode> middleLeg = trimmedLeg(samples, firstEnd, middleEnd, false, false);
+        List<RoadNode> finalLeg = trimmedLeg(samples, middleEnd, size, false, true);
+        if (firstLeg.isEmpty() || middleLeg.isEmpty() || finalLeg.isEmpty()) {
+            return 1.0;
+        }
+
+        double firstToMiddle = symmetricLegSeparationScore(firstLeg, middleLeg);
+        double middleToFinal = symmetricLegSeparationScore(middleLeg, finalLeg);
+        double firstToFinal = symmetricLegSeparationScore(firstLeg, finalLeg);
+        return clamp01(Math.min(firstToFinal, Math.min(firstToMiddle, middleToFinal)));
+    }
+
+    private List<RoadNode> trimmedLeg(List<RoadNode> samples, int fromInclusive, int toExclusive, boolean trimStart, boolean trimEnd) {
+        int from = Math.max(0, fromInclusive);
+        int to = Math.min(samples.size(), Math.max(from, toExclusive));
+        int length = to - from;
+        if (length <= 0) {
+            return List.of();
+        }
+        int trim = Math.max(1, length / 5);
+        if (trimStart && length > 3) {
+            from = Math.min(to, from + trim);
+        }
+        if (trimEnd && (to - from) > 3) {
+            to = Math.max(from, to - trim);
+        }
+        return from >= to ? List.of() : new ArrayList<>(samples.subList(from, to));
+    }
+
+    private double symmetricLegSeparationScore(List<RoadNode> left, List<RoadNode> right) {
+        if (left.isEmpty() || right.isEmpty()) {
+            return 1.0;
+        }
+        return (averageNearestSeparationScore(left, right) + averageNearestSeparationScore(right, left)) / 2.0;
+    }
+
+    private double averageNearestSeparationScore(List<RoadNode> fromPoints, List<RoadNode> toPoints) {
+        double sum = 0.0;
+        for (RoadNode point : fromPoints) {
+            double minDistanceKm = Double.POSITIVE_INFINITY;
+            for (RoadNode candidate : toPoints) {
+                minDistanceKm = Math.min(minDistanceKm, distanceKm(point, candidate));
+            }
+            if (!Double.isInfinite(minDistanceKm)) {
+                sum += clamp01(minDistanceKm / ROUTE_CRAFT_LEG_SEPARATION_GOOD_KM);
+            }
+        }
+        return sum / Math.max(1, fromPoints.size());
+    }
+
+    private double selfIntersectionOrNearDuplicateRisk(List<RoadNode> samples) {
+        if (samples == null || samples.size() < 8) {
+            return 0.0;
+        }
+
+        int riskyPoints = 0;
+        for (int i = 0; i < samples.size(); i++) {
+            boolean risky = false;
+            for (int j = i + ROUTE_CRAFT_NEAR_DUPLICATE_WINDOW + 1; j < samples.size(); j++) {
+                if (isExpectedLoopClosure(i, j, samples.size())) {
+                    continue;
+                }
+                if (distanceKm(samples.get(i), samples.get(j)) <= ROUTE_CRAFT_NEAR_DUPLICATE_KM) {
+                    risky = true;
+                    break;
+                }
+            }
+            if (risky) {
+                riskyPoints++;
+            }
+        }
+        return clamp01(riskyPoints / (double) samples.size());
+    }
+
+    private boolean isExpectedLoopClosure(int leftIndex, int rightIndex, int sampleCount) {
+        return leftIndex <= ROUTE_CRAFT_NEAR_DUPLICATE_WINDOW
+            && rightIndex >= sampleCount - ROUTE_CRAFT_NEAR_DUPLICATE_WINDOW - 1;
+    }
+
+    private void addRouteCraftBreakdown(Map<String, Double> breakdown, RouteCraftMetrics metrics) {
+        breakdown.put("repeated_corridor_cell_share", metrics.repeatedCorridorCellShare());
+        breakdown.put("reverse_overlap_share", metrics.reverseOverlapShare());
+        breakdown.put("leg_separation_score", metrics.legSeparationScore());
+        breakdown.put("self_intersection_or_near_duplicate_score", metrics.selfIntersectionOrNearDuplicateScore());
+        breakdown.put("backtracking_penalty", metrics.backtrackingPenalty());
     }
 
     private double computeUrbanPressureScore(List<ScenicScoreTile> tiles) {
@@ -2397,6 +2636,13 @@ public class RoutePlanner {
     }
 
     private record RouteScoreResult(double finalScore, Map<String, Double> breakdown) {
+    }
+
+    private record RouteCraftMetrics(double repeatedCorridorCellShare,
+                                     double reverseOverlapShare,
+                                     double legSeparationScore,
+                                     double selfIntersectionOrNearDuplicateScore,
+                                     double backtrackingPenalty) {
     }
 
     private record StrategyCorridorMetrics(double waterCorridorShare,

@@ -136,6 +136,48 @@ function Get-MapNumber {
     return Get-Number -Value $property.Value
 }
 
+function Get-MapBoolean {
+    param(
+        [Parameter()][object]$Map,
+        [Parameter(Mandatory = $true)][string]$Key
+    )
+
+    if ($null -eq $Map) {
+        return $null
+    }
+    $property = $Map.PSObject.Properties[$Key]
+    if ($null -eq $property) {
+        return $null
+    }
+    if ($property.Value -is [bool]) {
+        return [bool]$property.Value
+    }
+    if ($null -eq $property.Value) {
+        return $null
+    }
+    try {
+        return [System.Convert]::ToBoolean($property.Value)
+    } catch {
+        return $null
+    }
+}
+
+function Get-FailedContractFlags {
+    param([Parameter()][object]$ContractFlags)
+
+    $failed = @()
+    if ($null -eq $ContractFlags) {
+        return @()
+    }
+    foreach ($property in $ContractFlags.PSObject.Properties) {
+        $value = Get-MapBoolean -Map $ContractFlags -Key $property.Name
+        if ($false -eq $value) {
+            $failed += $property.Name
+        }
+    }
+    return @($failed)
+}
+
 function Join-Url {
     param(
         [Parameter(Mandatory = $true)][string]$Root,
@@ -299,6 +341,138 @@ function Get-PairwiseGeometryStats {
         minSeparationKm = ($pairDistances | Measure-Object -Minimum).Minimum
         maxSeparationKm = ($pairDistances | Measure-Object -Maximum).Maximum
     }
+}
+
+function Test-HasAnyVibe {
+    param(
+        [Parameter()][string[]]$Vibes,
+        [Parameter()][string[]]$Expected
+    )
+
+    foreach ($vibe in @($Vibes)) {
+        if ($Expected -contains [string]$vibe) {
+            return $true
+        }
+    }
+    return $false
+}
+
+function Get-RouteClosureKm {
+    param([Parameter()][object[]]$Coordinates)
+
+    $points = @($Coordinates)
+    if ($points.Count -lt 2) {
+        return $null
+    }
+    $first = $points[0]
+    $last = $points[$points.Count - 1]
+    return Get-HaversineKm -Lat1 $first.lat -Lng1 $first.lng -Lat2 $last.lat -Lng2 $last.lng
+}
+
+function Get-UniqueCoordinateRatio {
+    param([Parameter()][object[]]$Coordinates)
+
+    $points = @($Coordinates)
+    if ($points.Count -lt 2) {
+        return 1.0
+    }
+    $unique = @{}
+    foreach ($point in $points) {
+        $key = "{0:N5},{1:N5}" -f [double]$point.lat, [double]$point.lng
+        $unique[$key] = $true
+    }
+    return $unique.Count / [double]$points.Count
+}
+
+function Add-ContractFlag {
+    param(
+        [Parameter(Mandatory = $true)][hashtable]$Flags,
+        [Parameter(Mandatory = $true)][string]$Key,
+        [Parameter()][Nullable[bool]]$Value
+    )
+
+    if ($null -ne $Value) {
+        $Flags[$Key] = [bool]$Value
+    }
+}
+
+function Get-FallbackContractFlags {
+    param(
+        [int]$BudgetMinutes,
+        [Parameter()][string[]]$Vibes,
+        [Parameter()][object]$ScoreBreakdown,
+        [Parameter()][object[]]$Coordinates,
+        [Parameter()][Nullable[double]]$DurationMinutes,
+        [Parameter()][Nullable[double]]$ScenicScore
+    )
+
+    $flags = @{}
+    if ($null -ne $DurationMinutes -and $BudgetMinutes -gt 0) {
+        $maxAllowed = $BudgetMinutes + [Math]::Max(5.0, $BudgetMinutes * 0.15)
+        $minExpected = [Math]::Max(10.0, $BudgetMinutes * 0.55)
+        Add-ContractFlag -Flags $flags -Key "time_budget_fit" -Value ($DurationMinutes -le $maxAllowed -and $DurationMinutes -ge $minExpected)
+    }
+
+    $closureKm = Get-RouteClosureKm -Coordinates $Coordinates
+    if ($null -ne $closureKm) {
+        Add-ContractFlag -Flags $flags -Key "loop_closure" -Value ($closureKm -le 3.0)
+    }
+    Add-ContractFlag -Flags $flags -Key "low_repeated_road_risk" -Value ((Get-UniqueCoordinateRatio -Coordinates $Coordinates) -ge 0.72)
+
+    $repeatedCorridorCellShare = Get-MapNumber -Map $ScoreBreakdown -Key "repeated_corridor_cell_share"
+    if ($null -ne $repeatedCorridorCellShare) {
+        Add-ContractFlag -Flags $flags -Key "repeated_corridor_ok" -Value ($repeatedCorridorCellShare -le 0.25)
+    }
+    $legSeparationScore = Get-MapNumber -Map $ScoreBreakdown -Key "leg_separation_score"
+    if ($null -ne $legSeparationScore) {
+        Add-ContractFlag -Flags $flags -Key "leg_separation_ok" -Value ($legSeparationScore -ge 0.35)
+    }
+    $backtrackingPenalty = Get-MapNumber -Map $ScoreBreakdown -Key "backtracking_penalty"
+    if ($null -ne $backtrackingPenalty) {
+        Add-ContractFlag -Flags $flags -Key "backtracking_risk_ok" -Value ($backtrackingPenalty -le 0.35)
+    }
+
+    $urbanPenalty = Get-MapNumber -Map $ScoreBreakdown -Key "urban_penalty"
+    if ($null -ne $urbanPenalty) {
+        Add-ContractFlag -Flags $flags -Key "urban_pressure_ok" -Value ($urbanPenalty -le 0.42)
+    }
+
+    $scenicMoments = Get-MapNumber -Map $ScoreBreakdown -Key "scenic_moments_score"
+    $photoPeak = Get-MapNumber -Map $ScoreBreakdown -Key "photo_peak_score"
+    $peak = @($scenicMoments, $photoPeak | Where-Object { $null -ne $_ }) | Measure-Object -Maximum
+    if ($peak.Count -gt 0) {
+        Add-ContractFlag -Flags $flags -Key "scenic_peak_ok" -Value ($peak.Maximum -ge 0.42)
+    } elseif ($null -ne $ScenicScore) {
+        $normalizedScore = if ($ScenicScore -gt 1.5) { $ScenicScore / 100.0 } else { $ScenicScore }
+        Add-ContractFlag -Flags $flags -Key "scenic_peak_ok" -Value ($normalizedScore -ge 0.65)
+    }
+
+    if (Test-HasAnyVibe -Vibes $Vibes -Expected @("coastal", "riverside", "sunset", "golden_hour", "sunrise", "date_night", "photo_worthy", "photo_run", "photo")) {
+        $waterShare = Get-MapNumber -Map $ScoreBreakdown -Key "water_corridor_share"
+        if ($null -ne $waterShare) {
+            Add-ContractFlag -Flags $flags -Key "water_share_ok" -Value ($waterShare -ge 0.28)
+        }
+    }
+    if (Test-HasAnyVibe -Vibes $Vibes -Expected @("mountain", "winding_roads", "winding", "adventure")) {
+        $curveElevationShare = Get-MapNumber -Map $ScoreBreakdown -Key "curve_elevation_corridor_share"
+        if ($null -ne $curveElevationShare) {
+            Add-ContractFlag -Flags $flags -Key "elevation_curve_share_ok" -Value ($curveElevationShare -ge 0.28)
+        }
+    }
+    if (Test-HasAnyVibe -Vibes $Vibes -Expected @("countryside", "country", "sunday", "sunday_cruise", "quiet", "minimal_traffic", "low_traffic", "relaxing", "open_roads")) {
+        $quietShare = Get-MapNumber -Map $ScoreBreakdown -Key "quiet_corridor_share"
+        if ($null -ne $quietShare) {
+            Add-ContractFlag -Flags $flags -Key "quiet_share_ok" -Value ($quietShare -ge 0.32)
+        }
+    }
+    if (Test-HasAnyVibe -Vibes $Vibes -Expected @("photo_worthy", "photo_run", "photo", "date_night", "hidden_gems")) {
+        $photoPeak = Get-MapNumber -Map $ScoreBreakdown -Key "photo_peak_score"
+        if ($null -ne $photoPeak) {
+            Add-ContractFlag -Flags $flags -Key "photo_poi_signal_ok" -Value ($photoPeak -ge 0.30)
+        }
+    }
+
+    return [pscustomobject]$flags
 }
 
 function Get-TargetComponentsForVibes {
@@ -546,6 +720,23 @@ function Get-ScenarioFlags {
         $flags.Add("strategy_mismatch:" + (@($highStrategyPenalties | ForEach-Object { $_.profile } | Select-Object -Unique) -join "+"))
     }
 
+    $contractProfilesByFlag = @{}
+    foreach ($item in $items) {
+        foreach ($contractFlag in @($item.failedContractFlags)) {
+            if (-not $contractFlag) {
+                continue
+            }
+            if (-not $contractProfilesByFlag.ContainsKey($contractFlag)) {
+                $contractProfilesByFlag[$contractFlag] = New-Object System.Collections.Generic.List[string]
+            }
+            $contractProfilesByFlag[$contractFlag].Add([string]$item.profile)
+        }
+    }
+    foreach ($contractFlag in ($contractProfilesByFlag.Keys | Sort-Object)) {
+        $profiles = @($contractProfilesByFlag[$contractFlag] | Select-Object -Unique)
+        $flags.Add("contract_failed:${contractFlag}:" + ($profiles -join "+"))
+    }
+
     $leadingKeys = @($items | ForEach-Object { $_.leadingComponentKey } | Where-Object { $_ } | Select-Object -Unique)
     if ($leadingKeys.Count -eq 1 -and $items.Count -gt 1) {
         $flags.Add("same_leading_component:" + $leadingKeys[0])
@@ -689,6 +880,9 @@ foreach ($scenario in $selectedScenarios) {
                         }
                     }
                     $leadingComponents = @(Get-Array (Get-PropertyValue -Object $explanation -PropertyName "leadingComponents") | ForEach-Object { [string]$_ })
+                    $humanReasons = @(Get-Array (Get-PropertyValue -Object $explanation -PropertyName "humanReasons") | ForEach-Object { [string]$_ })
+                    $contractFlags = Get-PropertyValue -Object $explanation -PropertyName "contractFlags"
+                    $contractWarnings = @(Get-Array (Get-PropertyValue -Object $explanation -PropertyName "contractWarnings") | ForEach-Object { [string]$_ })
                     $topContribution = Get-TopMapEntry -Map (Get-PropertyValue -Object $explanation -PropertyName "weightedContributions")
                     $targetSignal = Get-TargetSignal -Explanation $explanation -TargetComponents $targetComponents
                     $coordinates = Get-RouteCoordinates -RouteDetail $detail
@@ -699,6 +893,16 @@ foreach ($scenario in $selectedScenarios) {
                     if ($null -eq $scoreBreakdown -and $detail) {
                         $scoreBreakdown = Get-PropertyValue -Object $detail -PropertyName "scoreBreakdown"
                     }
+                    if ($null -eq $contractFlags) {
+                        $contractFlags = Get-FallbackContractFlags `
+                            -BudgetMinutes $timeBudgetMinutes `
+                            -Vibes $vibes `
+                            -ScoreBreakdown $scoreBreakdown `
+                            -Coordinates $coordinates `
+                            -DurationMinutes $duration `
+                            -ScenicScore $score
+                    }
+                    $failedContractFlags = @(Get-FailedContractFlags -ContractFlags $contractFlags)
 
                     $optionDetails += [pscustomobject]@{
                         profile = [string]$option.profile
@@ -724,6 +928,11 @@ foreach ($scenario in $selectedScenarios) {
                         v2GeometryStrategyCode = Get-MapNumber -Map $scoreBreakdown -Key "geometry_strategy_code"
                         v2StrategyFitScore = Get-MapNumber -Map $scoreBreakdown -Key "strategy_fit_score"
                         v2StrategyMismatchPenalty = Get-MapNumber -Map $scoreBreakdown -Key "strategy_mismatch_penalty"
+                        v2RepeatedCorridorCellShare = Get-MapNumber -Map $scoreBreakdown -Key "repeated_corridor_cell_share"
+                        v2ReverseOverlapShare = Get-MapNumber -Map $scoreBreakdown -Key "reverse_overlap_share"
+                        v2LegSeparationScore = Get-MapNumber -Map $scoreBreakdown -Key "leg_separation_score"
+                        v2SelfIntersectionOrNearDuplicateScore = Get-MapNumber -Map $scoreBreakdown -Key "self_intersection_or_near_duplicate_score"
+                        v2BacktrackingPenalty = Get-MapNumber -Map $scoreBreakdown -Key "backtracking_penalty"
                         v2WaterCorridorShare = Get-MapNumber -Map $scoreBreakdown -Key "water_corridor_share"
                         v2OpenSpaceCorridorShare = Get-MapNumber -Map $scoreBreakdown -Key "open_space_corridor_share"
                         v2QuietCorridorShare = Get-MapNumber -Map $scoreBreakdown -Key "quiet_corridor_share"
@@ -737,6 +946,22 @@ foreach ($scenario in $selectedScenarios) {
                         coordinateCount = @($coordinates).Count
                         hasExplanation = ($null -ne $explanation)
                         explanationSummary = if ($explanation) { Get-PropertyValue -Object $explanation -PropertyName "summary" } else { $null }
+                        humanReasons = $humanReasons
+                        contractFlags = $contractFlags
+                        contractWarnings = $contractWarnings
+                        failedContractFlags = $failedContractFlags
+                        contractTimeBudgetFit = Get-MapBoolean -Map $contractFlags -Key "time_budget_fit"
+                        contractLoopClosure = Get-MapBoolean -Map $contractFlags -Key "loop_closure"
+                        contractRouteDiversity = Get-MapBoolean -Map $contractFlags -Key "low_repeated_road_risk"
+                        contractRepeatedCorridor = Get-MapBoolean -Map $contractFlags -Key "repeated_corridor_ok"
+                        contractLegSeparation = Get-MapBoolean -Map $contractFlags -Key "leg_separation_ok"
+                        contractBacktrackingRisk = Get-MapBoolean -Map $contractFlags -Key "backtracking_risk_ok"
+                        contractUrbanPressure = Get-MapBoolean -Map $contractFlags -Key "urban_pressure_ok"
+                        contractScenicPeak = Get-MapBoolean -Map $contractFlags -Key "scenic_peak_ok"
+                        contractWaterShare = Get-MapBoolean -Map $contractFlags -Key "water_share_ok"
+                        contractElevationCurveShare = Get-MapBoolean -Map $contractFlags -Key "elevation_curve_share_ok"
+                        contractQuietShare = Get-MapBoolean -Map $contractFlags -Key "quiet_share_ok"
+                        contractPhotoPoiSignal = Get-MapBoolean -Map $contractFlags -Key "photo_poi_signal_ok"
                         leadingComponents = $leadingComponents
                         leadingComponentKey = if ($leadingComponents.Count -gt 0) { $leadingComponents[0] } else { $null }
                         topContributionComponent = $topContribution.key
@@ -852,6 +1077,19 @@ foreach ($scenario in $selectedScenarios) {
             sampleTileCount = $null
             baselineTileCount = $null
             coordinateCount = $null
+            explanationSummary = $null
+            humanReasons = $null
+            contractWarnings = $null
+            failedContractFlags = $null
+            contractTimeBudgetFit = $null
+            contractLoopClosure = $null
+            contractRouteDiversity = $null
+            contractUrbanPressure = $null
+            contractScenicPeak = $null
+            contractWaterShare = $null
+            contractElevationCurveShare = $null
+            contractQuietShare = $null
+            contractPhotoPoiSignal = $null
             scoreSpread = $scoreSpread
             durationSpreadMinutes = $durationSpread
             distanceSpreadKm = $distanceSpread
@@ -897,6 +1135,11 @@ foreach ($scenario in $selectedScenarios) {
                 v2GeometryStrategyCode = $option.v2GeometryStrategyCode
                 v2StrategyFitScore = $option.v2StrategyFitScore
                 v2StrategyMismatchPenalty = $option.v2StrategyMismatchPenalty
+                v2RepeatedCorridorCellShare = $option.v2RepeatedCorridorCellShare
+                v2ReverseOverlapShare = $option.v2ReverseOverlapShare
+                v2LegSeparationScore = $option.v2LegSeparationScore
+                v2SelfIntersectionOrNearDuplicateScore = $option.v2SelfIntersectionOrNearDuplicateScore
+                v2BacktrackingPenalty = $option.v2BacktrackingPenalty
                 v2WaterCorridorShare = $option.v2WaterCorridorShare
                 v2OpenSpaceCorridorShare = $option.v2OpenSpaceCorridorShare
                 v2QuietCorridorShare = $option.v2QuietCorridorShare
@@ -911,6 +1154,22 @@ foreach ($scenario in $selectedScenarios) {
                 targetLift = $option.targetLift
                 targetContribution = $option.targetContribution
                 leadingComponents = ($option.leadingComponents -join "+")
+                explanationSummary = $option.explanationSummary
+                humanReasons = (@($option.humanReasons) -join " | ")
+                contractWarnings = (@($option.contractWarnings) -join " | ")
+                failedContractFlags = (@($option.failedContractFlags) -join "+")
+                contractTimeBudgetFit = $option.contractTimeBudgetFit
+                contractLoopClosure = $option.contractLoopClosure
+                contractRouteDiversity = $option.contractRouteDiversity
+                contractRepeatedCorridor = $option.contractRepeatedCorridor
+                contractLegSeparation = $option.contractLegSeparation
+                contractBacktrackingRisk = $option.contractBacktrackingRisk
+                contractUrbanPressure = $option.contractUrbanPressure
+                contractScenicPeak = $option.contractScenicPeak
+                contractWaterShare = $option.contractWaterShare
+                contractElevationCurveShare = $option.contractElevationCurveShare
+                contractQuietShare = $option.contractQuietShare
+                contractPhotoPoiSignal = $option.contractPhotoPoiSignal
                 topContributionComponent = $option.topContributionComponent
                 topContribution = $option.topContribution
                 sampleTileCount = $option.sampleTileCount
@@ -980,8 +1239,8 @@ if ($flagCounts.Count -eq 0) {
 $lines += ""
 $lines += "## Scenario Summary"
 $lines += ""
-$lines += "| Scenario | City | Budget | Vibes | Status | Routes | Algorithm | Avg Strategy | Avg Strategy Fit | Avg Strategy Penalty | Avg Req Radius | Avg Req Wpts | Score Spread | Duration Spread | Min Geometry Sep | Avg V2 Final | Avg Urban Penalty | Flags |"
-$lines += "|---|---|---:|---|---|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|"
+$lines += "| Scenario | City | Budget | Vibes | Status | Routes | Algorithm | Avg Strategy | Avg Strategy Fit | Avg Strategy Penalty | Avg Backtrack | Avg Req Radius | Avg Req Wpts | Score Spread | Duration Spread | Min Geometry Sep | Avg V2 Final | Avg Urban Penalty | Flags |"
+$lines += "|---|---|---:|---|---|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|"
 foreach ($result in $scenarioResults) {
     $spread = if ($null -ne $result.scoreSpread) { "{0:N4}" -f [double]$result.scoreSpread } else { "n/a" }
     $durationSpreadLabel = if ($null -ne $result.durationSpreadMinutes) { "{0:N1}" -f [double]$result.durationSpreadMinutes } else { "n/a" }
@@ -994,16 +1253,18 @@ foreach ($result in $scenarioResults) {
     $v2StrategyCodes = @($result.options | ForEach-Object { $_.v2GeometryStrategyCode } | Where-Object { $null -ne $_ })
     $v2StrategyFits = @($result.options | ForEach-Object { $_.v2StrategyFitScore } | Where-Object { $null -ne $_ })
     $v2StrategyPenalties = @($result.options | ForEach-Object { $_.v2StrategyMismatchPenalty } | Where-Object { $null -ne $_ })
+    $v2BacktrackingPenalties = @($result.options | ForEach-Object { $_.v2BacktrackingPenalty } | Where-Object { $null -ne $_ })
     $v2RequestedRadii = @($result.options | ForEach-Object { $_.v2RequestedAvgRadiusKm } | Where-Object { $null -ne $_ })
     $v2RequestedWaypointCounts = @($result.options | ForEach-Object { $_.v2RequestedWaypointCount } | Where-Object { $null -ne $_ })
     $avgStrategyCode = if ($v2StrategyCodes.Count -gt 0) { "{0:N1}" -f [double](($v2StrategyCodes | Measure-Object -Average).Average) } else { "n/a" }
     $avgStrategyFit = if ($v2StrategyFits.Count -gt 0) { "{0:N4}" -f [double](($v2StrategyFits | Measure-Object -Average).Average) } else { "n/a" }
     $avgStrategyPenalty = if ($v2StrategyPenalties.Count -gt 0) { "{0:N4}" -f [double](($v2StrategyPenalties | Measure-Object -Average).Average) } else { "n/a" }
+    $avgBacktrackingPenalty = if ($v2BacktrackingPenalties.Count -gt 0) { "{0:N4}" -f [double](($v2BacktrackingPenalties | Measure-Object -Average).Average) } else { "n/a" }
     $avgRequestedRadius = if ($v2RequestedRadii.Count -gt 0) { "{0:N2}" -f [double](($v2RequestedRadii | Measure-Object -Average).Average) } else { "n/a" }
     $avgRequestedWaypointCount = if ($v2RequestedWaypointCounts.Count -gt 0) { "{0:N1}" -f [double](($v2RequestedWaypointCounts | Measure-Object -Average).Average) } else { "n/a" }
     $avgV2Final = if ($v2FinalScores.Count -gt 0) { "{0:N4}" -f [double](($v2FinalScores | Measure-Object -Average).Average) } else { "n/a" }
     $avgUrbanPenalty = if ($v2UrbanPenalties.Count -gt 0) { "{0:N4}" -f [double](($v2UrbanPenalties | Measure-Object -Average).Average) } else { "n/a" }
-    $lines += "| $($result.scenarioId) | $($result.city) | $($result.timeBudgetMinutes) | $(@($result.vibes) -join '+') | $($result.status) | $($result.routeCount) | $algorithmLabel | $avgStrategyCode | $avgStrategyFit | $avgStrategyPenalty | $avgRequestedRadius | $avgRequestedWaypointCount | $spread | $durationSpreadLabel | $minSep | $avgV2Final | $avgUrbanPenalty | $flagLabel |"
+    $lines += "| $($result.scenarioId) | $($result.city) | $($result.timeBudgetMinutes) | $(@($result.vibes) -join '+') | $($result.status) | $($result.routeCount) | $algorithmLabel | $avgStrategyCode | $avgStrategyFit | $avgStrategyPenalty | $avgBacktrackingPenalty | $avgRequestedRadius | $avgRequestedWaypointCount | $spread | $durationSpreadLabel | $minSep | $avgV2Final | $avgUrbanPenalty | $flagLabel |"
 }
 $lines += ""
 $lines += "## Output Files"

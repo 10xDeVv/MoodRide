@@ -53,6 +53,7 @@ route_score =
 - urban_penalty        * 0.10
 - start_end_penalty    * 0.06
 - strategy_mismatch    * 0.08
+- backtracking_penalty * 0.08
 ```
 
 The components mean:
@@ -65,12 +66,13 @@ The components mean:
 - `urban_penalty`: urban pressure from `urban_penalty_score`, building density, and road density.
 - `start_end_penalty`: penalty when the beginning/end of the loop are low-scenic or high-urban.
 - `strategy_mismatch`: soft penalty when the returned OSRM corridor does not match the active geometry strategy.
+- `backtracking_penalty`: route-craft penalty for repeated corridor cells, out-and-back overlap, poor leg separation, and near-duplicate/self-overlapping geometry.
 
 These weights are intentionally named constants so they can be tuned against route feedback and QA baselines later.
 
 Strategy corridor fit uses graded membership, not binary yes/no tile labels. For example, a quiet or countryside corridor earns partial credit from solitude, greenery, low urban pressure, and darkness even when a tile does not clear a single hard threshold. Open, quiet, and curvy strategies also consider the strongest meaningful stretch of the corridor, so an otherwise good escape route is not treated as a total mismatch only because the start/end near the city are less scenic.
 
-Countryside and Sunday Cruise have an additional quality gate. They must produce three route options with enough quiet/rural strategy fit and acceptable average urban pressure. If the planner cannot produce those options within the requested budget, the job fails with vibe unavailable rather than returning city-heavy loops dressed up as countryside.
+Strict vibe families have an additional quality gate after OSRM returns candidate loops. Mountain, winding roads, and adventure must produce options with enough curve/elevation corridor share and strategy fit. Open roads, countryside, quiet, minimal traffic, Sunday Cruise, and clear my head must produce options with enough low-pressure/quiet corridor share and acceptable urban pressure. If the planner cannot produce three options within the requested budget, the job fails with vibe unavailable rather than returning a route that contradicts the selected vibe.
 
 When a vibe is unavailable, the worker records a normal failed route job with a user-facing reason. The route API turns that into structured guidance:
 
@@ -93,6 +95,11 @@ Each generated route also stores a JSON score breakdown in `routes.score_breakdo
 - `start_end_penalty`
 - `strategy_fit_score`
 - `strategy_mismatch_penalty`
+- `repeated_corridor_cell_share`
+- `reverse_overlap_share`
+- `leg_separation_score`
+- `self_intersection_or_near_duplicate_score`
+- `backtracking_penalty`
 - `water_corridor_share`
 - `open_space_corridor_share`
 - `quiet_corridor_share`
@@ -106,6 +113,17 @@ Each generated route also stores a JSON score breakdown in `routes.score_breakdo
 - `target_minutes`
 - `duration_minutes`
 - `geometry_strategy_code`
+
+The route API translates this score breakdown into a first-class explanation payload on each route option:
+
+- `summary`: human-readable text for the product UI.
+- `humanReasons`: supporting explanation sentences.
+- `contractFlags`: machine-readable route contract pass/fail checks.
+- `contractWarnings`: plain-language warnings for failed contracts.
+
+Current contract checks cover time budget fit, loop closure, repeated-road/backtracking risk, leg separation, urban pressure, scenic peak strength, water share for coastal/riverside-style vibes, elevation/curve share for mountain/winding/adventure vibes, quiet share for rural/relaxing vibes, and photo/POI signal for photo-worthy/date-night/discovery vibes. The route-quality eval script promotes failed contract flags into scenario flags so tuning can be based on repeatable evidence instead of visual guessing.
+
+Repeated-road v2 is intentionally a scoring/ranking signal, not an availability gate. Strict vibe gates answer whether Wayward can honestly offer a vibe in that area. Backtracking penalties answer whether a completed candidate feels good enough to prefer over another candidate. The planner subtracts a global backtracking penalty from v2 score, then applies stronger profile-specific ranking pressure to `most_scenic`, moderate pressure to `balanced`, and lighter pressure to `shorter`.
 
 Geometry strategy codes:
 
@@ -194,7 +212,7 @@ The current implementation includes v2 candidate generation, per-vibe geometry s
 
 For the current release, `hybrid_osrm_v2` is functionally complete as Wayward's default route-generation contract. Remaining work is product calibration and quality hardening, not the core v2 build:
 
-- Tune strategy-fit expectations from archived QA runs and user feedback, then decide which mismatches should become hard filters instead of soft penalties.
+- Tune strategy-fit and route-contract thresholds from archived QA runs and user feedback, then decide which mismatches should become hard filters instead of soft penalties.
 - Add route feedback calibration so thumbs-up/down and completed drives can tune component weights.
 - Tune duration-calibration sample thresholds and bucket sizes after more real route history exists.
 - Add more specific unavailable guidance per vibe family, for example mountain in flat regions versus countryside near dense downtown starts.

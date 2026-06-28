@@ -479,7 +479,13 @@ class RouteServiceTest {
         var explanation = response.routeOptions().getFirst().explanation();
         assertThat(explanation).isNotNull();
         assertThat(explanation.leadingComponents().getFirst()).isEqualTo("elevation");
-        assertThat(explanation.summary()).contains("vs area");
+        assertThat(explanation.summary()).contains("strongest scenic option nearby");
+        assertThat(explanation.humanReasons()).isNotEmpty();
+        assertThat(explanation.contractFlags())
+            .containsEntry("time_budget_fit", true)
+            .containsEntry("elevation_curve_share_ok", true)
+            .containsEntry("scenic_peak_ok", true);
+        assertThat(explanation.contractWarnings()).doesNotContain("Route lacks a strong scenic stretch.");
         assertThat(explanation.weightedContributions().get("elevation")).isGreaterThan(explanation.weightedContributions().get("water"));
         assertThat(explanation.componentLifts().get("water")).isLessThan(explanation.componentLifts().get("elevation"));
         assertThat(explanation.baselineTileCount()).isEqualTo(2);

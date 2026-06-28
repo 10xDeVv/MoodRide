@@ -568,6 +568,9 @@ function joinHumanList(items: string[]) {
 }
 
 function buildHumanRouteReason(route: RouteDetailResponse, option?: RouteOptionResponse | null) {
+  const backendSummary = option?.explanation?.summary?.trim();
+  if (backendSummary) return backendSummary;
+
   const features = getRouteFeaturePhrases(option);
   const featureText = features.length > 0 ? ` It is best for ${joinHumanList(features)}.` : "";
   const duration = option?.estimatedDurationMinutes ?? route.estimatedDurationMinutes ?? 0;

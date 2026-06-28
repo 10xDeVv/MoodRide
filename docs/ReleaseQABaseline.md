@@ -45,7 +45,7 @@ The JSON includes full route options. The Markdown summary includes route-option
 - All scenarios complete (`status=COMPLETED`)
 - No `FAILED` or `TIMEOUT` jobs
 - Route options returned for each completed scenario
-- Each route option includes an `explanation` object with component averages and leading components
+- Each route option includes an `explanation` object with component averages, leading components, a human-readable summary, and route contract diagnostics
 - Score spread is non-zero for most completed scenarios
 - Regional differences are plausible: Rockies/coastal/Atlantic should generally score higher than flat prairie and dense urban areas
 
@@ -54,4 +54,4 @@ The JSON includes full route options. The Markdown summary includes route-option
 - For PowerShell web requests, use this script or `curl.exe` to avoid browser-parsing prompts from `curl` alias behavior.
 - Keep each output artifact as a baseline record for regressions between releases.
 - The route request uses the current numeric `preferenceVector` schema (`water`, `greenery`, `elevation`, `solitude`, `curves`, `poi`).
-- This baseline script is data-release agnostic. Record the active `scenic_score_tiles.scoring_version` alongside each run; 3.0 publication/deployment should be verified with authenticated GitHub release metadata and a production DB scoring-version count.
+- This baseline script is data-release agnostic. Record the active `scenic_score_tiles.scoring_version` alongside each run; current scenic releases should be verified with authenticated GitHub release metadata and a production DB scoring-version count.

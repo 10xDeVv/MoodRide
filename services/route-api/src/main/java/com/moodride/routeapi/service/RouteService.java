@@ -103,6 +103,17 @@ public class RouteService {
     private static final double ROUTE_EXPLANATION_POI_REQUESTED_MULTIPLIER = 0.62;
     private static final double ROUTE_EXPLANATION_POI_REQUESTED_WEIGHT = 0.30;
     private static final double ROUTE_EXPLANATION_POI_SUPPORT_CAP_RATIO = 0.82;
+    private static final double CONTRACT_WATER_SHARE_MIN = 0.28;
+    private static final double CONTRACT_MOUNTAIN_CURVE_ELEVATION_MIN = 0.28;
+    private static final double CONTRACT_QUIET_SHARE_MIN = 0.32;
+    private static final double CONTRACT_URBAN_PENALTY_MAX = 0.42;
+    private static final double CONTRACT_SCENIC_PEAK_MIN = 0.42;
+    private static final double CONTRACT_PHOTO_POI_SIGNAL_MIN = 0.30;
+    private static final double CONTRACT_MAX_LOOP_CLOSURE_KM = 3.0;
+    private static final double CONTRACT_MIN_UNIQUE_COORDINATE_RATIO = 0.72;
+    private static final double CONTRACT_MAX_REPEATED_CORRIDOR_CELL_SHARE = 0.25;
+    private static final double CONTRACT_MIN_LEG_SEPARATION_SCORE = 0.35;
+    private static final double CONTRACT_MAX_BACKTRACKING_PENALTY = 0.35;
     private static final int MAX_FEEDBACK_TAGS = 4;
     private static final Set<String> SUPPORTED_FEEDBACK_TAGS = Set.of(
         "more_like_this",
@@ -786,6 +797,9 @@ public class RouteService {
                     null,
                     liftBased
                 ),
+                explanation.humanReasons(),
+                explanation.contractFlags(),
+                explanation.contractWarnings(),
                 explanation.sampleTileCount(),
                 explanation.baselineTileCount()
             );
@@ -876,6 +890,7 @@ public class RouteService {
         ).componentRatios();
         Map<String, Double> componentLifts = buildComponentLifts(averages, baselineAverages);
         Map<String, Double> weightedContributions = buildWeightedContributions(averages, componentWeights);
+        Map<String, Double> scoreBreakdown = parseScoreBreakdown(route.getScoreBreakdownJson());
         Map<String, Double> weightedLifts = buildWeightedLifts(componentLifts, componentWeights);
         boolean liftBased = weightedLifts.values().stream().anyMatch(value -> value > ROUTE_EXPLANATION_LIFT_EPSILON);
         Map<String, Double> rankingSignals = buildExplanationRankingSignals(
@@ -892,6 +907,10 @@ public class RouteService {
             .limit(3)
             .map(Map.Entry::getKey)
             .toList();
+        Map<String, Boolean> contractFlags = buildRouteContractFlags(route, routeJob, routeVibes, averages, scoreBreakdown);
+        List<String> contractWarnings = buildRouteContractWarnings(routeVibes, contractFlags);
+        List<String> humanReasons = buildHumanRouteReasons(route, routeJob, routeVibes, averages, scoreBreakdown, leadingComponents);
+        String summary = buildRouteExplanationSummary(humanReasons, leadingComponents, componentLifts, weightedContributions, vibeProfile, liftBased);
 
         return new RouteOptionExplanationResponse(
             averages,
@@ -900,7 +919,10 @@ public class RouteService {
             componentWeights,
             weightedContributions,
             leadingComponents,
-            buildRouteExplanationSummary(leadingComponents, componentLifts, weightedContributions, vibeProfile, liftBased),
+            summary,
+            humanReasons,
+            contractFlags,
+            contractWarnings,
             tiles.size(),
             baselineAccumulator == null ? 0 : baselineAccumulator.count()
         );
@@ -1085,12 +1107,16 @@ public class RouteService {
     }
 
     private String buildRouteExplanationSummary(
+        List<String> humanReasons,
         List<String> leadingComponents,
         Map<String, Double> componentLifts,
         Map<String, Double> weightedContributions,
         VibeCatalog.BlendedVibeProfile vibeProfile,
         boolean liftBased
     ) {
+        if (humanReasons != null && !humanReasons.isEmpty()) {
+            return humanReasons.getFirst();
+        }
         if (leadingComponents == null || leadingComponents.isEmpty()) {
             return "Scored from nearby scenic tiles along this route.";
         }
@@ -1117,6 +1143,309 @@ public class RouteService {
         }
         return prefix + first + " (" + formatContribution(weightedContributions.get(leadingComponents.getFirst())) + ") and "
             + second + " (" + formatContribution(weightedContributions.get(leadingComponents.get(1))) + ") carry the most weighted influence on this option.";
+    }
+
+    private String buildRouteExplanationSummary(
+        List<String> leadingComponents,
+        Map<String, Double> componentLifts,
+        Map<String, Double> weightedContributions,
+        VibeCatalog.BlendedVibeProfile vibeProfile,
+        boolean liftBased
+    ) {
+        return buildRouteExplanationSummary(List.of(), leadingComponents, componentLifts, weightedContributions, vibeProfile, liftBased);
+    }
+
+    private List<String> buildHumanRouteReasons(
+        Route route,
+        RouteJob routeJob,
+        List<String> routeVibes,
+        Map<String, Double> componentAverages,
+        Map<String, Double> scoreBreakdown,
+        List<String> leadingComponents
+    ) {
+        List<String> evidence = new ArrayList<>();
+        double waterShare = bestMetric(scoreBreakdown, componentAverages, "water_corridor_share", "water");
+        double quietShare = bestMetric(scoreBreakdown, componentAverages, "quiet_corridor_share", "solitude");
+        double curveElevationShare = bestMetric(scoreBreakdown, componentAverages, "curve_elevation_corridor_share", "elevation");
+        double openSpaceShare = bestMetric(scoreBreakdown, componentAverages, "open_space_corridor_share", "open_space");
+        double scenicMoments = Math.max(
+            getMetric(scoreBreakdown, "scenic_moments_score"),
+            getMetric(scoreBreakdown, "photo_peak_score")
+        );
+        double urbanPenalty = getMetric(scoreBreakdown, "urban_penalty");
+
+        if (waterShare >= 0.20) {
+            evidence.add("follows water for " + formatPercent(waterShare) + " of the drive");
+        }
+        if (quietShare >= 0.25) {
+            evidence.add("keeps " + formatPercent(quietShare) + " of the drive in quieter corridors");
+        }
+        if (curveElevationShare >= 0.25) {
+            evidence.add("has rolling or curvy terrain through " + formatPercent(curveElevationShare) + " of the route");
+        }
+        if (openSpaceShare >= 0.25 && !containsSimilarEvidence(evidence, "quieter corridors")) {
+            evidence.add("leans into open-space roads");
+        }
+        if (scenicMoments >= 0.42) {
+            evidence.add("includes strong scenic stretches");
+        }
+        if (urbanPenalty > 0.0 && urbanPenalty <= 0.25) {
+            evidence.add("has lower urban pressure than nearby alternatives");
+        } else if (urbanPenalty >= 0.45) {
+            evidence.add("still carries some urban pressure near the start or finish");
+        }
+
+        if (evidence.isEmpty() && leadingComponents != null) {
+            for (String component : leadingComponents) {
+                evidence.add("leans on " + componentPhrase(component));
+                if (evidence.size() >= 2) {
+                    break;
+                }
+            }
+        }
+
+        if (evidence.isEmpty()) {
+            evidence.add("uses the strongest scenic tiles available near this start");
+        }
+
+        int budget = routeJob == null ? 0 : routeJob.getTimeBudgetMinutes();
+        if (budget > 0) {
+            int delta = route.getEstimatedDurationMinutes() - budget;
+            if (Math.abs(delta) <= Math.max(5, Math.round(budget * 0.10f))) {
+                evidence.add("stays close to your " + budget + "-minute budget");
+            } else if (delta > 0) {
+                evidence.add("runs about " + delta + " minutes over your requested budget");
+            }
+        }
+
+        String opener = routeExplanationOpener(route, routeVibes);
+        String primary = opener + " because it " + joinEvidence(evidence.stream().limit(3).toList()) + ".";
+        List<String> reasons = new ArrayList<>();
+        reasons.add(primary);
+        for (String item : evidence) {
+            reasons.add(capitalizeFirst(item) + ".");
+        }
+        return List.copyOf(reasons);
+    }
+
+    private Map<String, Boolean> buildRouteContractFlags(
+        Route route,
+        RouteJob routeJob,
+        List<String> routeVibes,
+        Map<String, Double> componentAverages,
+        Map<String, Double> scoreBreakdown
+    ) {
+        Map<String, Boolean> flags = new LinkedHashMap<>();
+        double target = routeJob == null ? 0.0 : routeJob.getTimeBudgetMinutes();
+        double maxAllowed = target <= 0.0 ? Double.POSITIVE_INFINITY : target + Math.max(5.0, target * 0.15);
+        double minExpected = target <= 0.0 ? 0.0 : Math.max(10.0, target * 0.55);
+        double duration = route == null ? 0.0 : route.getEstimatedDurationMinutes();
+        flags.put("time_budget_fit", target <= 0.0 || (duration <= maxAllowed && duration >= minExpected));
+        flags.put("loop_closure", computeLoopClosureKm(route) <= CONTRACT_MAX_LOOP_CLOSURE_KM);
+        flags.put("low_repeated_road_risk", computeUniqueCoordinateRatio(route) >= CONTRACT_MIN_UNIQUE_COORDINATE_RATIO);
+        flags.put("repeated_corridor_ok", metricAtMost(scoreBreakdown, "repeated_corridor_cell_share", CONTRACT_MAX_REPEATED_CORRIDOR_CELL_SHARE));
+        flags.put("leg_separation_ok", metricAtLeast(scoreBreakdown, "leg_separation_score", CONTRACT_MIN_LEG_SEPARATION_SCORE));
+        flags.put("backtracking_risk_ok", metricAtMost(scoreBreakdown, "backtracking_penalty", CONTRACT_MAX_BACKTRACKING_PENALTY));
+        flags.put("urban_pressure_ok", getMetric(scoreBreakdown, "urban_penalty") <= CONTRACT_URBAN_PENALTY_MAX);
+        double scenicPeak = Math.max(
+            getMetric(scoreBreakdown, "scenic_moments_score"),
+            getMetric(scoreBreakdown, "photo_peak_score")
+        );
+        flags.put("scenic_peak_ok", scenicPeak >= CONTRACT_SCENIC_PEAK_MIN || (route != null && route.getScenicScore() >= 0.65));
+
+        if (hasAnyVibe(routeVibes, "coastal", "riverside", "sunset", "golden_hour", "sunrise")) {
+            flags.put("water_share_ok", bestMetric(scoreBreakdown, componentAverages, "water_corridor_share", "water") >= CONTRACT_WATER_SHARE_MIN);
+        }
+        if (hasAnyVibe(routeVibes, "mountain", "winding_roads", "winding", "adventure")) {
+            flags.put("elevation_curve_share_ok", bestMetric(scoreBreakdown, componentAverages, "curve_elevation_corridor_share", "elevation") >= CONTRACT_MOUNTAIN_CURVE_ELEVATION_MIN);
+        }
+        if (hasAnyVibe(routeVibes, "countryside", "country", "sunday", "sunday_cruise", "quiet", "minimal_traffic", "low_traffic", "relaxing")) {
+            flags.put("quiet_share_ok", bestMetric(scoreBreakdown, componentAverages, "quiet_corridor_share", "solitude") >= CONTRACT_QUIET_SHARE_MIN);
+        }
+        if (hasAnyVibe(routeVibes, "photo_worthy", "photo_run", "photo", "date_night", "hidden_gems")) {
+            double photoSignal = Math.max(getMetric(scoreBreakdown, "photo_peak_score"), componentAverages == null ? 0.0 : componentAverages.getOrDefault("poi", 0.0));
+            flags.put("photo_poi_signal_ok", photoSignal >= CONTRACT_PHOTO_POI_SIGNAL_MIN);
+        }
+
+        return Map.copyOf(flags);
+    }
+
+    private List<String> buildRouteContractWarnings(List<String> routeVibes, Map<String, Boolean> contractFlags) {
+        if (contractFlags == null || contractFlags.isEmpty()) {
+            return List.of();
+        }
+
+        List<String> warnings = new ArrayList<>();
+        addWarningIfFalse(warnings, contractFlags, "time_budget_fit", "Route duration does not fit the requested time budget.");
+        addWarningIfFalse(warnings, contractFlags, "loop_closure", "Route does not close cleanly as a loop.");
+        addWarningIfFalse(warnings, contractFlags, "low_repeated_road_risk", "Route may repeat too much road.");
+        addWarningIfFalse(warnings, contractFlags, "repeated_corridor_ok", "Route reuses too many corridor cells.");
+        addWarningIfFalse(warnings, contractFlags, "leg_separation_ok", "Route legs may not separate enough.");
+        addWarningIfFalse(warnings, contractFlags, "backtracking_risk_ok", "Route may backtrack too much.");
+        addWarningIfFalse(warnings, contractFlags, "urban_pressure_ok", "Route has more urban pressure than expected.");
+        addWarningIfFalse(warnings, contractFlags, "scenic_peak_ok", "Route lacks a strong scenic stretch.");
+        if (hasAnyVibe(routeVibes, "coastal", "riverside", "sunset", "golden_hour", "sunrise")) {
+            addWarningIfFalse(warnings, contractFlags, "water_share_ok", "Water-focused vibe has low water corridor share.");
+        }
+        if (hasAnyVibe(routeVibes, "mountain", "winding_roads", "winding", "adventure")) {
+            addWarningIfFalse(warnings, contractFlags, "elevation_curve_share_ok", "Mountain or winding vibe has weak elevation/curve share.");
+        }
+        if (hasAnyVibe(routeVibes, "countryside", "country", "sunday", "sunday_cruise", "quiet", "minimal_traffic", "low_traffic", "relaxing")) {
+            addWarningIfFalse(warnings, contractFlags, "quiet_share_ok", "Quiet/rural vibe has weak quiet corridor share.");
+        }
+        if (hasAnyVibe(routeVibes, "photo_worthy", "photo_run", "photo", "date_night", "hidden_gems")) {
+            addWarningIfFalse(warnings, contractFlags, "photo_poi_signal_ok", "Photo/discovery vibe has weak photo or POI signal.");
+        }
+        return List.copyOf(warnings);
+    }
+
+    private void addWarningIfFalse(List<String> warnings, Map<String, Boolean> flags, String key, String warning) {
+        if (Boolean.FALSE.equals(flags.get(key))) {
+            warnings.add(warning);
+        }
+    }
+
+    private boolean hasAnyVibe(List<String> routeVibes, String... expected) {
+        if (routeVibes == null || routeVibes.isEmpty()) {
+            return false;
+        }
+        Set<String> active = new HashSet<>(routeVibes);
+        for (String vibe : expected) {
+            if (active.contains(VibeCatalog.normalize(vibe))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private double bestMetric(Map<String, Double> scoreBreakdown, Map<String, Double> componentAverages, String breakdownKey, String componentKey) {
+        double breakdownValue = getMetric(scoreBreakdown, breakdownKey);
+        double componentValue = componentAverages == null ? 0.0 : componentAverages.getOrDefault(componentKey, 0.0);
+        return clamp01(Math.max(breakdownValue, componentValue));
+    }
+
+    private boolean metricAtMost(Map<String, Double> scoreBreakdown, String key, double maxValue) {
+        return !hasMetric(scoreBreakdown, key) || getMetric(scoreBreakdown, key) <= maxValue;
+    }
+
+    private boolean metricAtLeast(Map<String, Double> scoreBreakdown, String key, double minValue) {
+        return !hasMetric(scoreBreakdown, key) || getMetric(scoreBreakdown, key) >= minValue;
+    }
+
+    private boolean hasMetric(Map<String, Double> scoreBreakdown, String key) {
+        return scoreBreakdown != null && scoreBreakdown.containsKey(key) && scoreBreakdown.get(key) != null;
+    }
+
+    private double getMetric(Map<String, Double> scoreBreakdown, String key) {
+        if (scoreBreakdown == null || scoreBreakdown.isEmpty()) {
+            return 0.0;
+        }
+        return clamp01(scoreBreakdown.getOrDefault(key, 0.0));
+    }
+
+    private double computeLoopClosureKm(Route route) {
+        if (route == null || route.getGeometry() == null || route.getGeometry().isEmpty()) {
+            return 0.0;
+        }
+        Coordinate[] coordinates = route.getGeometry().getCoordinates();
+        if (coordinates == null || coordinates.length < 2) {
+            return 0.0;
+        }
+        return distanceKm(coordinates[0], coordinates[coordinates.length - 1]);
+    }
+
+    private double computeUniqueCoordinateRatio(Route route) {
+        if (route == null || route.getGeometry() == null || route.getGeometry().isEmpty()) {
+            return 1.0;
+        }
+        Coordinate[] coordinates = route.getGeometry().getCoordinates();
+        if (coordinates == null || coordinates.length < 2) {
+            return 1.0;
+        }
+        Set<String> unique = new HashSet<>();
+        for (Coordinate coordinate : coordinates) {
+            unique.add(String.format(Locale.ROOT, "%.5f,%.5f", coordinate.getX(), coordinate.getY()));
+        }
+        return (double) unique.size() / coordinates.length;
+    }
+
+    private double distanceKm(Coordinate first, Coordinate second) {
+        if (first == null || second == null) {
+            return 0.0;
+        }
+        double earthRadiusKm = 6371.0088;
+        double lat1 = Math.toRadians(first.getY());
+        double lat2 = Math.toRadians(second.getY());
+        double deltaLat = Math.toRadians(second.getY() - first.getY());
+        double deltaLng = Math.toRadians(second.getX() - first.getX());
+        double a = Math.sin(deltaLat / 2.0) * Math.sin(deltaLat / 2.0)
+            + Math.cos(lat1) * Math.cos(lat2) * Math.sin(deltaLng / 2.0) * Math.sin(deltaLng / 2.0);
+        return earthRadiusKm * 2.0 * Math.atan2(Math.sqrt(a), Math.sqrt(1.0 - a));
+    }
+
+    private String routeExplanationOpener(Route route, List<String> routeVibes) {
+        String profile = normalizeRouteProfile(route == null ? null : route.getRouteProfile());
+        if ("most_scenic".equals(profile)) {
+            return "This is the strongest scenic option nearby";
+        }
+        if ("balanced".equals(profile)) {
+            return "This route balances scenery with drive time";
+        }
+        if ("shorter".equals(profile)) {
+            return "This is the shorter scenic option";
+        }
+        if (routeVibes != null && !routeVibes.isEmpty()) {
+            return "This route fits " + humanVibeLabel(routeVibes.getFirst());
+        }
+        return "This route was selected";
+    }
+
+    private String humanVibeLabel(String vibe) {
+        if (vibe == null || vibe.isBlank()) {
+            return "selected vibe";
+        }
+        return vibe.toLowerCase(Locale.ROOT).replace('-', ' ').replace('_', ' ');
+    }
+
+    private String componentPhrase(String component) {
+        return switch (component) {
+            case "water" -> "waterfront views";
+            case "greenery" -> "green cover";
+            case "elevation" -> "rolling terrain";
+            case "solitude" -> "quieter roads";
+            case "open_space" -> "open roads";
+            case "curves" -> "curvier roads";
+            case "poi" -> "interesting stops";
+            default -> component == null ? "scenic signals" : component.replace('_', ' ');
+        };
+    }
+
+    private boolean containsSimilarEvidence(List<String> evidence, String text) {
+        return evidence.stream().anyMatch(item -> item.contains(text));
+    }
+
+    private String formatPercent(double ratio) {
+        return String.format(Locale.ROOT, "%.0f%%", clamp01(ratio) * 100.0);
+    }
+
+    private String joinEvidence(List<String> evidence) {
+        if (evidence == null || evidence.isEmpty()) {
+            return "uses the strongest scenic signals available";
+        }
+        if (evidence.size() == 1) {
+            return evidence.getFirst();
+        }
+        if (evidence.size() == 2) {
+            return evidence.get(0) + " and " + evidence.get(1);
+        }
+        return evidence.get(0) + ", " + evidence.get(1) + ", and " + evidence.get(2);
+    }
+
+    private String capitalizeFirst(String text) {
+        if (text == null || text.isBlank()) {
+            return "";
+        }
+        return text.substring(0, 1).toUpperCase(Locale.ROOT) + text.substring(1);
     }
 
     private String formatLift(Double lift) {

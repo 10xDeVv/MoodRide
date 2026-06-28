@@ -66,6 +66,9 @@ export interface RouteOptionExplanationResponse {
   weightedContributions: Record<string, number>;
   leadingComponents: string[];
   summary: string;
+  humanReasons: string[];
+  contractFlags: Record<string, boolean>;
+  contractWarnings: string[];
   sampleTileCount: number;
   baselineTileCount: number;
 }
