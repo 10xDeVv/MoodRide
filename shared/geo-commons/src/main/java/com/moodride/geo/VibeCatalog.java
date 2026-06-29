@@ -150,7 +150,7 @@ public final class VibeCatalog {
             "countryside", "Countryside", VibeCategory.CORE_SCENERY,
             weights(0.25, 0.75, 0.35, 0.90, 0.45, 0.20),
             List.of("solitude", "greenery"),
-            List.of("urban_penalty", "building_density"),
+            List.of("urban_penalty", "building_density", "road_stress"),
             true, true, 0.36, 0.29,
             "Quiet rural loop with open space and lighter urban density."
         ));
@@ -165,8 +165,8 @@ public final class VibeCatalog {
         add(profiles, profile(
             "forest", "Forest", VibeCategory.CORE_SCENERY,
             weights(0.20, 0.95, 0.35, 0.85, 0.35, 0.15),
-            List.of("greenery", "solitude"),
-            List.of("urban_penalty", "building_density"),
+            List.of("tree_canopy", "greenery", "solitude"),
+            List.of("urban_penalty", "building_density", "road_stress"),
             true, true, 0.36, 0.29,
             "Green, tucked-away loop that favors tree cover and quieter surroundings."
         ));
@@ -174,7 +174,7 @@ public final class VibeCatalog {
             "open_roads", "Open Roads", VibeCategory.CORE_SCENERY,
             weights(0.15, 0.45, 0.25, 0.90, 0.25, 0.05),
             List.of("open_space", "solitude"),
-            List.of("urban_penalty", "building_density", "poi", "road_density"),
+            List.of("urban_penalty", "building_density", "poi", "road_density", "road_stress"),
             true, true, 0.35, 0.28,
             "Open-space drive with lower-density roads and room to cruise."
         ));
@@ -183,7 +183,7 @@ public final class VibeCatalog {
             "relaxing", "Relaxing", VibeCategory.DRIVING_FEEL,
             weights(0.35, 0.65, 0.20, 0.90, 0.20, 0.15),
             List.of("solitude", "greenery"),
-            List.of("urban_penalty", "building_density", "curves"),
+            List.of("urban_penalty", "building_density", "curves", "road_stress"),
             true, false, 0.34, 0.27,
             "Calmer loop with softer scenery and fewer intense road segments."
         ));
@@ -199,7 +199,7 @@ public final class VibeCatalog {
             "smooth_cruise", "Smooth Cruise", VibeCategory.DRIVING_FEEL,
             weights(0.35, 0.55, 0.20, 0.70, 0.15, 0.15),
             List.of("solitude", "greenery"),
-            List.of("curves", "urban_penalty"),
+            List.of("curves", "urban_penalty", "road_stress"),
             false, false, 0.31, 0.25,
             "Best for a smooth cruise with light curves and open space."
         ));
@@ -207,7 +207,7 @@ public final class VibeCatalog {
             "quiet", "Quiet", VibeCategory.DRIVING_FEEL,
             weights(0.20, 0.65, 0.25, 0.98, 0.25, 0.05),
             List.of("solitude", "greenery"),
-            List.of("urban_penalty", "building_density", "poi"),
+            List.of("urban_penalty", "building_density", "poi", "road_stress"),
             true, true, 0.36, 0.29,
             "Quiet loop that favors lower-density scenery and fewer busy-feeling corridors."
         ));
@@ -223,7 +223,7 @@ public final class VibeCatalog {
             "minimal_traffic", "Minimal Traffic", VibeCategory.DRIVING_FEEL,
             weights(0.15, 0.60, 0.25, 0.98, 0.25, 0.05),
             List.of("solitude", "greenery"),
-            List.of("urban_penalty", "building_density", "poi"),
+            List.of("urban_penalty", "building_density", "poi", "road_stress"),
             true, true, 0.36, 0.29,
             "Lower-density route aimed at calmer roads and lighter urban pressure."
         ));
@@ -264,7 +264,7 @@ public final class VibeCatalog {
             "sunday_cruise", "Sunday Cruise", VibeCategory.TRIP_MOOD,
             weights(0.25, 0.70, 0.25, 0.82, 0.35, 0.15),
             List.of("solitude", "greenery"),
-            List.of("urban_penalty", "building_density"),
+            List.of("urban_penalty", "building_density", "road_stress"),
             true, false, 0.34, 0.27,
             "Easy countryside-leaning loop for a relaxed weekend drive."
         ));
@@ -295,8 +295,8 @@ public final class VibeCatalog {
         add(profiles, profile(
             "nature_escape", "Nature Escape", VibeCategory.TRIP_MOOD,
             weights(0.35, 0.95, 0.45, 0.92, 0.35, 0.10),
-            List.of("greenery", "solitude"),
-            List.of("urban_penalty", "building_density"),
+            List.of("tree_canopy", "greenery", "solitude"),
+            List.of("urban_penalty", "building_density", "road_stress"),
             true, true, 0.36, 0.29,
             "Nature-heavy loop that favors greenery, protected areas, and quieter edges."
         ));
@@ -304,7 +304,7 @@ public final class VibeCatalog {
             "scenic_reset", "Scenic Reset", VibeCategory.TRIP_MOOD,
             weights(0.50, 0.75, 0.40, 0.85, 0.30, 0.15),
             List.of("greenery", "solitude", "water"),
-            List.of("urban_penalty"),
+            List.of("urban_penalty", "road_stress"),
             true, false, 0.33, 0.26,
             "Restorative scenic loop with calming natural signals."
         ));

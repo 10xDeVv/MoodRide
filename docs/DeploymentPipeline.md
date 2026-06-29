@@ -102,13 +102,57 @@ The workflow downloads the release asset, copies it to VM, updates `OSRM_DATASET
 
 ## 5. Scenic recompute + release flow (local machine -> GitHub Release -> VM)
 
-### 5A. Run nationwide scenic recompute locally
+### 5A. Audit scenic data-quality readiness
+
+Before changing scenic scoring versions, run the read-only data-quality audit:
+
+```powershell
+./scripts/setup/audit-scenic-data-quality-v32.ps1 `
+  -Database moodride `
+  -Username postgres `
+  -OutputDir artifacts/scenic-data-quality
+```
+
+Use the audit output to decide whether a new scoring train has enough evidence for road stress, water visibility, scenic viewpoints, tree canopy, bridge/coastal-road detection, or seasonal suitability. Do not increase route weights for a signal until the audit shows the source data is present and non-flat in the target region.
+
+### 5B. Run nationwide scenic recompute locally
+
+Stable 3.1 release train:
 
 ```powershell
 ./scripts/deploy/run_nationwide_scenic_recompute.ps1 `
   -SqlScriptPath "scripts/setup/data-quality-enrichment-v31.sql" `
   -ChunkSize 50000 `
   -ExpectedScoringVersion "3.1-darkness-urban-penalty-calibration"
+```
+
+Road-stress 3.2 release train:
+
+```powershell
+./scripts/deploy/run_nationwide_scenic_recompute.ps1 `
+  -SqlScriptPath "scripts/setup/data-quality-enrichment-v32.sql" `
+  -ChunkSize 50000 `
+  -ExpectedScoringVersion "3.2-road-stress-calibration"
+```
+
+Water-visibility 3.3 release train:
+
+```powershell
+./scripts/deploy/run_nationwide_scenic_recompute.ps1 `
+  -SqlScriptPath "scripts/setup/data-quality-enrichment-v33.sql" `
+  -ChunkSize 50000 `
+  -SourceScoringVersion "3.2-road-stress-calibration" `
+  -ExpectedScoringVersion "3.3-water-visibility-calibration"
+```
+
+Tree-canopy 3.4 release train:
+
+```powershell
+./scripts/deploy/run_nationwide_scenic_recompute.ps1 `
+  -SqlScriptPath "scripts/setup/data-quality-enrichment-v34.sql" `
+  -ChunkSize 50000 `
+  -SourceScoringVersion "3.3-water-visibility-calibration" `
+  -ExpectedScoringVersion "3.4-tree-canopy-calibration"
 ```
 
 This executes the selected versioned scenic scoring SQL over your local `moodride` database.
@@ -118,15 +162,19 @@ Important behavior:
 - Use the SQL script that matches the release train you are publishing.
 - Current release train:
   - `scripts/setup/data-quality-enrichment-v31.sql` for `3.1-darkness-urban-penalty-calibration`
+- Next release train in development:
+  - `scripts/setup/data-quality-enrichment-v34.sql` for `3.4-tree-canopy-calibration`
+- `data-quality-enrichment-v33.sql` requires non-empty `natural_earth_Water_Bodies`; re-import water geometry first if the audit reports 0 rows.
+- `data-quality-enrichment-v34.sql` requires `landcover_raster` or `nlcd_land_cover_cells`; it derives a land-cover tree-canopy proxy, not true canopy height.
 - Older versioned SQL files are kept only for reproducing previous scenic releases.
 - The run is resumable. Re-running after interruption continues from remaining tiles not already at the expected scoring version.
 
-### 5B. Publish scenic tile release from your local machine
+### 5C. Publish scenic tile release from your local machine
 
 ```powershell
 ./scripts/deploy/publish_scenic_release.ps1 `
-  -ScoringVersion "3.1-darkness-urban-penalty-calibration" `
-  -ReleaseTag "scenic-3.1-darkness-urban-penalty-calibration-$(Get-Date -Format 'yyyyMMdd-HHmm')" `
+  -ScoringVersion "3.4-tree-canopy-calibration" `
+  -ReleaseTag "scenic-3.4-tree-canopy-calibration-$(Get-Date -Format 'yyyyMMdd-HHmm')" `
   -Repo "10xDeVv/Wayward"
 ```
 
@@ -135,12 +183,12 @@ This uploads:
 - `scenic-tiles-<scoring-version>.tar.gz`
 - `scenic-tiles-<scoring-version>.tar.gz.sha256`
 
-### 5C. Deploy scenic release to production
+### 5D. Deploy scenic release to production
 
 Run workflow `.github/workflows/deploy-scenic-release.yml` with:
 
-- `release_tag`: example `scenic-3.1-darkness-urban-penalty-calibration-20260627-1230`
-- `scoring_version`: example `3.1-darkness-urban-penalty-calibration`
+- `release_tag`: example `scenic-3.4-tree-canopy-calibration-20260629-1230`
+- `scoring_version`: example `3.4-tree-canopy-calibration`
 - `asset_name`: optional (defaults from `scoring_version`)
 
 The workflow downloads the scenic asset, uploads it to VM, applies score updates into `scenic_score_tiles`, and restarts `route-api` + `route-worker`.

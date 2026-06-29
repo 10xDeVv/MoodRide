@@ -139,6 +139,16 @@ if (-not $ReleaseTag) {
     $ReleaseTag = "scenic-$sanitizedVersion-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
 }
 
+$ensureRoadStressSql = @"
+ALTER TABLE scenic_score_tiles
+    ADD COLUMN IF NOT EXISTS road_stress_score DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+    ADD COLUMN IF NOT EXISTS water_visibility_score DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+    ADD COLUMN IF NOT EXISTS water_crossing_score DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+    ADD COLUMN IF NOT EXISTS coastal_road_score DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+    ADD COLUMN IF NOT EXISTS tree_canopy_score DOUBLE PRECISION NOT NULL DEFAULT 0.0;
+"@
+Invoke-PsqlScalar -Sql $ensureRoadStressSql | Out-Null
+
 $escapedVersion = Escape-SqlLiteral -Value $ScoringVersion
 $selectSql = @"
 SELECT
@@ -155,10 +165,15 @@ SELECT
     building_density_score,
     darkness_score,
     urban_penalty_score,
+    road_stress_score,
     natural_land_use,
     elevation_variance,
     last_scored,
-    scoring_version
+    scoring_version,
+    water_visibility_score,
+    water_crossing_score,
+    coastal_road_score,
+    tree_canopy_score
 FROM scenic_score_tiles
 WHERE scoring_version = '$escapedVersion'
 ORDER BY h3_index

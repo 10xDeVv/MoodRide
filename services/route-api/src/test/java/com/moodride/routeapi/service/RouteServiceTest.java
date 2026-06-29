@@ -479,7 +479,7 @@ class RouteServiceTest {
         var explanation = response.routeOptions().getFirst().explanation();
         assertThat(explanation).isNotNull();
         assertThat(explanation.leadingComponents().getFirst()).isEqualTo("elevation");
-        assertThat(explanation.summary()).contains("strongest scenic option nearby");
+        assertThat(explanation.summary()).contains("Best scenic match nearby");
         assertThat(explanation.humanReasons()).isNotEmpty();
         assertThat(explanation.contractFlags())
             .containsEntry("time_budget_fit", true)
@@ -489,6 +489,122 @@ class RouteServiceTest {
         assertThat(explanation.weightedContributions().get("elevation")).isGreaterThan(explanation.weightedContributions().get("water"));
         assertThat(explanation.componentLifts().get("water")).isLessThan(explanation.componentLifts().get("elevation"));
         assertThat(explanation.baselineTileCount()).isEqualTo(2);
+    }
+
+    @Test
+    void routeOptionExplanationSplitsCorridorAndEdgeUrbanPressure() {
+        UUID jobId = UUID.randomUUID();
+        UUID userId = UUID.randomUUID();
+
+        RouteJob job = new RouteJob(userId, 49.2827, -123.1207, 60, "coastal");
+        job.setId(jobId);
+        job.setStatus(RouteJob.JobStatus.COMPLETED);
+
+        GeometryFactory geometryFactory = new GeometryFactory();
+        LineString lineString = geometryFactory.createLineString(new Coordinate[] {
+            new Coordinate(-123.1207, 49.2827),
+            new Coordinate(-123.1500, 49.3000)
+        });
+
+        Route route = new Route();
+        route.setId(UUID.randomUUID());
+        route.setJobId(jobId);
+        route.setRouteProfile("most_scenic");
+        route.setGeometry(lineString);
+        route.setScenicScore(0.78);
+        route.setTotalDistanceKm(36.0);
+        route.setEstimatedDurationMinutes(59);
+        route.setGeneratedAt(Instant.parse("2026-04-02T14:30:05Z"));
+        route.setScoreBreakdownJson("""
+            {
+              "final_score":0.78,
+              "scenic_moments_score":0.72,
+              "water_corridor_share":0.64,
+              "urban_penalty":0.20,
+              "start_end_penalty":0.74,
+              "corridor_urban_pressure":0.20,
+              "edge_urban_pressure":0.74
+            }
+            """);
+
+        List<ScenicScoreTile> routeTiles = List.of(
+            scenicTile(H3Utils.getH3Index(49.2827, -123.1207, H3Utils.DEFAULT_RESOLUTION), 0.78, 0.42, 0.48, 0.55, 0.36, 0.20),
+            scenicTile(H3Utils.getH3Index(49.3000, -123.1500, H3Utils.DEFAULT_RESOLUTION), 0.76, 0.44, 0.46, 0.57, 0.34, 0.18)
+        );
+
+        lenient().when(jobRepository.findById(jobId)).thenReturn(Optional.of(job));
+        lenient().when(routeRepository.findByJobIdOrderByGeneratedAtAsc(jobId)).thenReturn(List.of(route));
+        lenient().when(scenicScoreTileRepository.findByH3IndexIn(anyCollection())).thenReturn(routeTiles);
+        lenient().when(scenicScoreTileRepository.findScenicTilesNearPoint(anyDouble(), anyDouble(), anyDouble(), anyInt()))
+            .thenReturn(routeTiles);
+
+        RouteJobStatusResponse response = routeService.getRouteJobStatus(jobId);
+
+        var explanation = response.routeOptions().getFirst().explanation();
+        assertThat(explanation).isNotNull();
+        assertThat(explanation.contractFlags())
+            .containsEntry("urban_pressure_ok", true)
+            .containsEntry("corridor_urban_pressure_ok", true)
+            .containsEntry("edge_urban_pressure_ok", false);
+        assertThat(explanation.contractWarnings())
+            .contains("Route starts or ends in a more urban area.")
+            .doesNotContain("Route corridor has more urban pressure than expected.");
+    }
+
+    @Test
+    void routeOptionExplanationReportsTreeCanopyContractForNatureRoutes() {
+        UUID jobId = UUID.randomUUID();
+        UUID userId = UUID.randomUUID();
+
+        RouteJob job = new RouteJob(userId, 49.2827, -123.1207, 60, "nature");
+        job.setId(jobId);
+        job.setStatus(RouteJob.JobStatus.COMPLETED);
+
+        GeometryFactory geometryFactory = new GeometryFactory();
+        LineString lineString = geometryFactory.createLineString(new Coordinate[] {
+            new Coordinate(-123.1207, 49.2827),
+            new Coordinate(-123.1500, 49.3000)
+        });
+
+        Route route = new Route();
+        route.setId(UUID.randomUUID());
+        route.setJobId(jobId);
+        route.setRouteProfile("most_scenic");
+        route.setGeometry(lineString);
+        route.setScenicScore(0.74);
+        route.setTotalDistanceKm(34.0);
+        route.setEstimatedDurationMinutes(57);
+        route.setGeneratedAt(Instant.parse("2026-04-02T14:30:05Z"));
+        route.setScoreBreakdownJson("""
+            {
+              "final_score":0.74,
+              "scenic_moments_score":0.62,
+              "tree_canopy_score":0.34,
+              "quiet_corridor_share":0.42,
+              "corridor_urban_pressure":0.22,
+              "edge_urban_pressure":0.35
+            }
+            """);
+
+        List<ScenicScoreTile> routeTiles = List.of(
+            scenicTile(H3Utils.getH3Index(49.2827, -123.1207, H3Utils.DEFAULT_RESOLUTION), 0.38, 0.56, 0.44, 0.62, 0.30, 0.12),
+            scenicTile(H3Utils.getH3Index(49.3000, -123.1500, H3Utils.DEFAULT_RESOLUTION), 0.36, 0.58, 0.46, 0.64, 0.32, 0.14)
+        );
+
+        lenient().when(jobRepository.findById(jobId)).thenReturn(Optional.of(job));
+        lenient().when(routeRepository.findByJobIdOrderByGeneratedAtAsc(jobId)).thenReturn(List.of(route));
+        lenient().when(scenicScoreTileRepository.findByH3IndexIn(anyCollection())).thenReturn(routeTiles);
+        lenient().when(scenicScoreTileRepository.findScenicTilesNearPoint(anyDouble(), anyDouble(), anyDouble(), anyInt()))
+            .thenReturn(routeTiles);
+
+        RouteJobStatusResponse response = routeService.getRouteJobStatus(jobId);
+
+        var explanation = response.routeOptions().getFirst().explanation();
+        assertThat(explanation).isNotNull();
+        assertThat(explanation.contractFlags()).containsEntry("tree_canopy_ok", true);
+        assertThat(explanation.contractWarnings()).doesNotContain("Forest/nature vibe has weak tree-canopy signal.");
+        assertThat(explanation.humanReasons())
+            .anyMatch(reason -> reason.contains("tree-covered corridors"));
     }
 
     @Test
@@ -577,6 +693,14 @@ class RouteServiceTest {
             .map(option -> option.explanation().leadingComponents().getFirst())
             .toList())
             .doesNotHaveDuplicates();
+        assertThat(response.routeOptions().stream()
+            .map(option -> option.explanation().summary())
+            .toList())
+            .containsExactly(
+                "Best scenic match nearby, with the strongest waterfront signal plus quiet support.",
+                "Balanced trades peak scenic intensity for a cleaner loop shape and less urban pressure, while keeping quiet character in the route.",
+                "Shorter keeps the best available winding road feel in a 48-minute drive, with less time commitment than the other options."
+            );
     }
 
     @Test

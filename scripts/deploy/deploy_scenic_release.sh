@@ -86,6 +86,16 @@ if [ ! -f "$csv_file" ]; then
   exit 1
 fi
 
+if ! head -n 1 "$csv_file" | grep -q 'water_visibility_score'; then
+  compatible_csv="$extract_dir/scenic_score_tiles_updates.v33-compatible.csv"
+  awk 'NR == 1 { print $0 ",water_visibility_score,water_crossing_score,coastal_road_score,tree_canopy_score"; next } { print $0 ",0.0,0.0,0.0,0.0" }' "$csv_file" > "$compatible_csv"
+  csv_file="$compatible_csv"
+elif ! head -n 1 "$csv_file" | grep -q 'tree_canopy_score'; then
+  compatible_csv="$extract_dir/scenic_score_tiles_updates.v34-compatible.csv"
+  awk 'NR == 1 { print $0 ",tree_canopy_score"; next } { print $0 ",0.0" }' "$csv_file" > "$compatible_csv"
+  csv_file="$compatible_csv"
+fi
+
 echo "Copying scenic CSV into postgres container"
 docker compose -f "$COMPOSE_FILE" --env-file "$ENV_FILE" cp "$csv_file" postgres:/tmp/scenic_score_tiles_updates.csv
 
@@ -97,7 +107,12 @@ ALTER TABLE scenic_score_tiles
     ADD COLUMN IF NOT EXISTS overture_poi_score DOUBLE PRECISION NOT NULL DEFAULT 0.0,
     ADD COLUMN IF NOT EXISTS building_density_score DOUBLE PRECISION NOT NULL DEFAULT 0.0,
     ADD COLUMN IF NOT EXISTS darkness_score DOUBLE PRECISION NOT NULL DEFAULT 0.0,
-    ADD COLUMN IF NOT EXISTS urban_penalty_score DOUBLE PRECISION NOT NULL DEFAULT 0.0;
+    ADD COLUMN IF NOT EXISTS urban_penalty_score DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+    ADD COLUMN IF NOT EXISTS road_stress_score DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+    ADD COLUMN IF NOT EXISTS water_visibility_score DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+    ADD COLUMN IF NOT EXISTS water_crossing_score DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+    ADD COLUMN IF NOT EXISTS coastal_road_score DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+    ADD COLUMN IF NOT EXISTS tree_canopy_score DOUBLE PRECISION NOT NULL DEFAULT 0.0;
 
 CREATE TEMP TABLE scenic_release_updates (
     h3_index VARCHAR(15) PRIMARY KEY,
@@ -113,10 +128,15 @@ CREATE TEMP TABLE scenic_release_updates (
     building_density_score DOUBLE PRECISION,
     darkness_score DOUBLE PRECISION,
     urban_penalty_score DOUBLE PRECISION,
+    road_stress_score DOUBLE PRECISION,
     natural_land_use DOUBLE PRECISION,
     elevation_variance DOUBLE PRECISION,
     last_scored TIMESTAMP,
-    scoring_version VARCHAR(80)
+    scoring_version VARCHAR(80),
+    water_visibility_score DOUBLE PRECISION,
+    water_crossing_score DOUBLE PRECISION,
+    coastal_road_score DOUBLE PRECISION,
+    tree_canopy_score DOUBLE PRECISION
 );
 
 COPY scenic_release_updates (
@@ -133,10 +153,15 @@ COPY scenic_release_updates (
     building_density_score,
     darkness_score,
     urban_penalty_score,
+    road_stress_score,
     natural_land_use,
     elevation_variance,
     last_scored,
-    scoring_version
+    scoring_version,
+    water_visibility_score,
+    water_crossing_score,
+    coastal_road_score,
+    tree_canopy_score
 ) FROM '/tmp/scenic_score_tiles_updates.csv' WITH (FORMAT csv, HEADER true);
 
 SELECT CASE
@@ -173,6 +198,11 @@ WITH updated AS (
         building_density_score = COALESCE(u.building_density_score, sst.building_density_score),
         darkness_score = COALESCE(u.darkness_score, sst.darkness_score),
         urban_penalty_score = COALESCE(u.urban_penalty_score, sst.urban_penalty_score),
+        road_stress_score = COALESCE(u.road_stress_score, sst.road_stress_score),
+        water_visibility_score = COALESCE(u.water_visibility_score, sst.water_visibility_score),
+        water_crossing_score = COALESCE(u.water_crossing_score, sst.water_crossing_score),
+        coastal_road_score = COALESCE(u.coastal_road_score, sst.coastal_road_score),
+        tree_canopy_score = COALESCE(u.tree_canopy_score, sst.tree_canopy_score),
         natural_land_use = u.natural_land_use,
         elevation_variance = u.elevation_variance,
         last_scored = COALESCE(u.last_scored, CURRENT_TIMESTAMP),

@@ -24,6 +24,9 @@ param(
     [string]$PostgresContainerName = "moodride-postgres",
 
     [Parameter(Mandatory = $false)]
+    [string]$SourceScoringVersion = "",
+
+    [Parameter(Mandatory = $false)]
     [string]$ExpectedScoringVersion = "3.1-darkness-urban-penalty-calibration"
 )
 
@@ -42,7 +45,19 @@ function Invoke-PostgresSqlFile {
     if ($psql) {
         if ($Password) { $env:PGPASSWORD = $Password }
         try {
-            & $psql.Source -h $DbHost -p $Port -U $Username -d $Database -v ON_ERROR_STOP=1 -v "chunk_size=$ChunkSize" -f $SqlFilePath
+            $psqlArgs = @(
+                "-h", $DbHost,
+                "-p", "$Port",
+                "-U", $Username,
+                "-d", $Database,
+                "-v", "ON_ERROR_STOP=1",
+                "-v", "chunk_size=$ChunkSize"
+            )
+            if ($SourceScoringVersion) {
+                $psqlArgs += @("-v", "source_scoring_version=$SourceScoringVersion")
+            }
+            $psqlArgs += @("-f", $SqlFilePath)
+            & $psql.Source @psqlArgs
             if ($LASTEXITCODE -ne 0) {
                 throw "psql execution failed with exit code $LASTEXITCODE"
             }
@@ -75,7 +90,11 @@ function Invoke-PostgresSqlFile {
     try {
         $dockerArgs = @("exec")
         if ($Password) { $dockerArgs += @("-e", "PGPASSWORD=$Password") }
-        $dockerArgs += @($PostgresContainerName, "psql", "-U", $Username, "-d", $Database, "-v", "ON_ERROR_STOP=1", "-v", "chunk_size=$ChunkSize", "-f", $tempSqlInContainer)
+        $dockerArgs += @($PostgresContainerName, "psql", "-U", $Username, "-d", $Database, "-v", "ON_ERROR_STOP=1", "-v", "chunk_size=$ChunkSize")
+        if ($SourceScoringVersion) {
+            $dockerArgs += @("-v", "source_scoring_version=$SourceScoringVersion")
+        }
+        $dockerArgs += @("-f", $tempSqlInContainer)
         & docker @dockerArgs
         if ($LASTEXITCODE -ne 0) {
             throw "Docker psql execution failed with exit code $LASTEXITCODE"

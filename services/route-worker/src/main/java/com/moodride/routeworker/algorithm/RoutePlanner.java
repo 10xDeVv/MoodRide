@@ -443,7 +443,11 @@ public class RoutePlanner {
     private boolean isStrictLowPressureCandidate(RouteCandidate candidate) {
         Map<String, Double> breakdown = candidate.getScoreBreakdown();
         double strategyFit = breakdownValue(breakdown, "strategy_fit_score", 0.0);
-        double urbanPressure = breakdownValue(breakdown, "urban_penalty", 1.0);
+        double urbanPressure = breakdownValue(
+            breakdown,
+            "corridor_urban_pressure",
+            breakdownValue(breakdown, "urban_penalty", 1.0)
+        );
         double quietShare = breakdownValue(breakdown, "quiet_corridor_share", 0.0);
         return strategyFit >= STRICT_LOW_PRESSURE_STRATEGY_MIN_FIT
             && urbanPressure <= STRICT_LOW_PRESSURE_MAX_URBAN_PRESSURE
@@ -1013,6 +1017,7 @@ public class RoutePlanner {
             sum += switch (antiComponent) {
                 case "urban_penalty" -> clamp01(tile.getUrbanPenaltyScore());
                 case "building_density" -> clamp01(tile.getBuildingDensityScore());
+                case "road_stress" -> clamp01(tile.getRoadStressScore());
                 case "poi" -> components.poi();
                 case "curves" -> components.curves();
                 case "road_density" -> clamp01(tile.getRoadDensity());
@@ -1027,13 +1032,14 @@ public class RoutePlanner {
         return switch (component) {
             case "water" -> components.water();
             case "greenery" -> components.greenery();
-            case "elevation" -> components.elevation();
-            case "solitude" -> components.solitude();
-            case "curves" -> components.curves();
-            case "poi" -> components.poi();
-            case "open_space" -> openSpaceScore(tile, components);
-            default -> 0.0;
-        };
+                case "elevation" -> components.elevation();
+                case "solitude" -> components.solitude();
+                case "curves" -> components.curves();
+                case "poi" -> components.poi();
+                case "tree_canopy" -> clamp01(tile.getTreeCanopyScore());
+                case "open_space" -> openSpaceScore(tile, components);
+                default -> 0.0;
+            };
     }
 
     private double componentWeight(VibeCatalog.ComponentWeights weights, String component) {
@@ -1044,6 +1050,7 @@ public class RoutePlanner {
             case "solitude" -> weights.solitude();
             case "curves" -> weights.curves();
             case "poi" -> weights.poi();
+            case "tree_canopy" -> Math.max(weights.greenery(), weights.solitude());
             case "open_space" -> Math.max(weights.solitude(), weights.curves());
             default -> 0.0;
         };
@@ -1053,12 +1060,14 @@ public class RoutePlanner {
         double lowRoadDensity = 1.0 - clamp01(tile.getRoadDensity());
         double lowBuildingDensity = 1.0 - clamp01(tile.getBuildingDensityScore());
         double lowUrbanPressure = 1.0 - clamp01(tile.getUrbanPenaltyScore());
+        double lowRoadStress = 1.0 - clamp01(tile.getRoadStressScore());
         double lowPoiDensity = 1.0 - components.poi();
         return clamp01(
-            (components.solitude() * 0.45)
-                + (lowRoadDensity * 0.25)
+            (components.solitude() * 0.40)
+                + (lowRoadDensity * 0.20)
                 + (lowBuildingDensity * 0.15)
                 + (lowUrbanPressure * 0.10)
+                + (lowRoadStress * 0.10)
                 + (lowPoiDensity * 0.05)
         );
     }
@@ -1832,6 +1841,11 @@ public class RoutePlanner {
         double routeShapeScore = computeRouteShapeScore(path, targetMinutes, durationMinutes);
         double scenicMomentsScore = computeScenicMomentsScore(landscapeScores);
         double urbanPenalty = computeUrbanPressureScore(tiles);
+        double roadStressScore = computeRoadStressScore(tiles);
+        double waterVisibilityScore = computeWaterVisibilityScore(tiles);
+        double waterCrossingScore = computeWaterCrossingScore(tiles);
+        double coastalRoadScore = computeCoastalRoadScore(tiles);
+        double treeCanopyScore = computeTreeCanopyScore(tiles);
         double edgePenalty = computeStartEndPenalty(tiles, preferences);
         StrategyCorridorMetrics strategyMetrics = computeStrategyCorridorMetrics(tiles, landscapeScores, geometryStrategy);
 
@@ -1854,7 +1868,14 @@ public class RoutePlanner {
         breakdown.put("route_shape_score", routeShapeScore);
         breakdown.put("scenic_moments_score", scenicMomentsScore);
         breakdown.put("urban_penalty", urbanPenalty);
+        breakdown.put("road_stress_score", roadStressScore);
+        breakdown.put("water_visibility_score", waterVisibilityScore);
+        breakdown.put("water_crossing_score", waterCrossingScore);
+        breakdown.put("coastal_road_score", coastalRoadScore);
+        breakdown.put("tree_canopy_score", treeCanopyScore);
         breakdown.put("start_end_penalty", edgePenalty);
+        breakdown.put("corridor_urban_pressure", urbanPenalty);
+        breakdown.put("edge_urban_pressure", edgePenalty);
         breakdown.put("strategy_fit_score", strategyMetrics.strategyFitScore());
         breakdown.put("strategy_mismatch_penalty", strategyMetrics.mismatchPenalty());
         addRouteCraftBreakdown(breakdown, routeCraftMetrics);
@@ -1887,7 +1908,14 @@ public class RoutePlanner {
         breakdown.put("route_shape_score", computeRouteShapeScore(path, targetMinutes, durationMinutes));
         breakdown.put("scenic_moments_score", finalScore);
         breakdown.put("urban_penalty", 0.0);
+        breakdown.put("road_stress_score", 0.0);
+        breakdown.put("water_visibility_score", 0.0);
+        breakdown.put("water_crossing_score", 0.0);
+        breakdown.put("coastal_road_score", 0.0);
+        breakdown.put("tree_canopy_score", 0.0);
         breakdown.put("start_end_penalty", 0.0);
+        breakdown.put("corridor_urban_pressure", 0.0);
+        breakdown.put("edge_urban_pressure", 0.0);
         breakdown.put("strategy_fit_score", fallbackScore);
         breakdown.put("strategy_mismatch_penalty", 0.0);
         addRouteCraftBreakdown(breakdown, routeCraftMetrics);
@@ -1968,13 +1996,15 @@ public class RoutePlanner {
             double curveElevationSignal = Math.max(components.curves(), components.elevation());
 
             double lowUrbanPressure = 1.0 - urbanPressure;
+            double lowRoadStress = 1.0 - clamp01(tile.getRoadStressScore());
             double quietSignal = clamp01(
-                (components.solitude() * 0.48)
+                (components.solitude() * 0.44)
                     + (components.greenery() * 0.18)
-                    + (lowUrbanPressure * 0.24)
+                    + (lowUrbanPressure * 0.20)
+                    + (lowRoadStress * 0.08)
                     + (clamp01(tile.getDarknessScore()) * 0.10)
             );
-            double openSignal = clamp01((openSpace * 0.74) + (lowUrbanPressure * 0.26));
+            double openSignal = clamp01((openSpace * 0.68) + (lowUrbanPressure * 0.20) + (lowRoadStress * 0.12));
 
             double openMembership = gradedMembership(openSignal, 0.40, 0.72);
             double quietMembership = gradedMembership(quietSignal, 0.40, 0.72);
@@ -2066,7 +2096,8 @@ public class RoutePlanner {
     private double computeDriveQualityScore(List<RoadNode> path, List<ScenicScoreTile> tiles) {
         double curvature = estimateCurvatureScore(path);
         double lowUrbanPressure = 1.0 - computeUrbanPressureScore(tiles);
-        return clamp01((curvature * 0.62) + (lowUrbanPressure * 0.38));
+        double lowRoadStress = 1.0 - computeRoadStressScore(tiles);
+        return clamp01((curvature * 0.52) + (lowUrbanPressure * 0.28) + (lowRoadStress * 0.20));
     }
 
     private double computeRouteShapeScore(List<RoadNode> path, int targetMinutes, int durationMinutes) {
@@ -2278,6 +2309,66 @@ public class RoutePlanner {
                 .mapToDouble(tile -> (clamp01(tile.getUrbanPenaltyScore()) * 0.65)
                     + (clamp01(tile.getBuildingDensityScore()) * 0.25)
                     + (clamp01(tile.getRoadDensity()) * 0.10))
+                .average()
+                .orElse(0.0)
+        );
+    }
+
+    private double computeRoadStressScore(List<ScenicScoreTile> tiles) {
+        if (tiles == null || tiles.isEmpty()) {
+            return 0.0;
+        }
+        return clamp01(
+            tiles.stream()
+                .mapToDouble(tile -> clamp01(tile.getRoadStressScore()))
+                .average()
+                .orElse(0.0)
+        );
+    }
+
+    private double computeWaterVisibilityScore(List<ScenicScoreTile> tiles) {
+        if (tiles == null || tiles.isEmpty()) {
+            return 0.0;
+        }
+        return clamp01(
+            tiles.stream()
+                .mapToDouble(tile -> clamp01(tile.getWaterVisibilityScore()))
+                .average()
+                .orElse(0.0)
+        );
+    }
+
+    private double computeWaterCrossingScore(List<ScenicScoreTile> tiles) {
+        if (tiles == null || tiles.isEmpty()) {
+            return 0.0;
+        }
+        return clamp01(
+            tiles.stream()
+                .mapToDouble(tile -> clamp01(tile.getWaterCrossingScore()))
+                .average()
+                .orElse(0.0)
+        );
+    }
+
+    private double computeCoastalRoadScore(List<ScenicScoreTile> tiles) {
+        if (tiles == null || tiles.isEmpty()) {
+            return 0.0;
+        }
+        return clamp01(
+            tiles.stream()
+                .mapToDouble(tile -> clamp01(tile.getCoastalRoadScore()))
+                .average()
+                .orElse(0.0)
+        );
+    }
+
+    private double computeTreeCanopyScore(List<ScenicScoreTile> tiles) {
+        if (tiles == null || tiles.isEmpty()) {
+            return 0.0;
+        }
+        return clamp01(
+            tiles.stream()
+                .mapToDouble(tile -> clamp01(tile.getTreeCanopyScore()))
                 .average()
                 .orElse(0.0)
         );

@@ -25,6 +25,8 @@ The goal is to tune the routing engine with evidence instead of one-off manual c
   - route shape
   - scenic moments
   - urban penalty
+  - road stress score
+  - water visibility, water crossing, and coastal-road scores
   - start/end penalty
   - corridor tile sample count
   - geometry strategy code
@@ -117,10 +119,14 @@ Current per-option contract checks include:
 - `leg_separation_ok`
 - `backtracking_risk_ok`
 - `urban_pressure_ok`
+- `corridor_urban_pressure_ok`
+- `edge_urban_pressure_ok`
+- `road_stress_ok` for quiet/rural/open-road style vibes
 - `scenic_peak_ok`
 - `water_share_ok` for water-focused vibes
 - `elevation_curve_share_ok` for mountain/winding/adventure vibes
 - `quiet_share_ok` for quiet/rural/relaxing vibes
+- `tree_canopy_ok` for forest/nature vibes
 - `photo_poi_signal_ok` for photo-worthy/date-night/hidden-gems vibes
 
 ## How To Use Results
@@ -133,7 +139,11 @@ Use the CSV first. Sort by `flags`, then inspect:
 - weak vibe signals in known mismatch scenarios
 - `contract_failed:*` rows before changing scoring constants
 - same-leading-component cases, especially if every option says water
-- high `v2UrbanPenalty` or `v2StartEndPenalty` in routes that otherwise score well
+- high `v2CorridorUrbanPressure` in routes that should feel quiet/open/rural
+- high `v2EdgeUrbanPressure` in otherwise good city-start routes; this usually means start/end contamination rather than a bad corridor
+- high `v2RoadStressScore` in quiet/open-road/countryside routes; this usually means the route is leaning on major or higher-speed road classes
+- low `v2WaterVisibilityScore` or `v2CoastalRoadScore` in coastal/riverside routes; this usually means the route is near water by tile score but not using water-adjacent roads
+- low `v2TreeCanopyScore` in forest/nature routes; this usually means the route is green/open but not meaningfully tree-covered
 - high `v2BacktrackingPenalty`, `v2RepeatedCorridorCellShare`, or `v2ReverseOverlapShare` when routes feel out-and-back
 - low `v2LegSeparationScore` when options fold over themselves or reuse the same corridor
 - unexpected `v2GeometryStrategyCode` for a scenario's vibe

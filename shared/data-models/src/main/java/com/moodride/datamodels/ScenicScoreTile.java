@@ -83,6 +83,21 @@ public class ScenicScoreTile {
     @Column(name = "urban_penalty_score", nullable = false)
     private double urbanPenaltyScore;
 
+    @Column(name = "road_stress_score", nullable = false)
+    private double roadStressScore;
+
+    @Column(name = "water_visibility_score", nullable = false)
+    private double waterVisibilityScore;
+
+    @Column(name = "water_crossing_score", nullable = false)
+    private double waterCrossingScore;
+
+    @Column(name = "coastal_road_score", nullable = false)
+    private double coastalRoadScore;
+
+    @Column(name = "tree_canopy_score", nullable = false)
+    private double treeCanopyScore;
+
     @Column(nullable = false)
     private Instant lastScored;
 
@@ -202,6 +217,21 @@ public class ScenicScoreTile {
     public double getUrbanPenaltyScore() { return urbanPenaltyScore; }
     public void setUrbanPenaltyScore(double urbanPenaltyScore) { this.urbanPenaltyScore = urbanPenaltyScore; }
 
+    public double getRoadStressScore() { return roadStressScore; }
+    public void setRoadStressScore(double roadStressScore) { this.roadStressScore = roadStressScore; }
+
+    public double getWaterVisibilityScore() { return waterVisibilityScore; }
+    public void setWaterVisibilityScore(double waterVisibilityScore) { this.waterVisibilityScore = waterVisibilityScore; }
+
+    public double getWaterCrossingScore() { return waterCrossingScore; }
+    public void setWaterCrossingScore(double waterCrossingScore) { this.waterCrossingScore = waterCrossingScore; }
+
+    public double getCoastalRoadScore() { return coastalRoadScore; }
+    public void setCoastalRoadScore(double coastalRoadScore) { this.coastalRoadScore = coastalRoadScore; }
+
+    public double getTreeCanopyScore() { return treeCanopyScore; }
+    public void setTreeCanopyScore(double treeCanopyScore) { this.treeCanopyScore = treeCanopyScore; }
+
     public double getTrafficSignalScore() { return trafficSignalScore; }
     public void setTrafficSignalScore(double trafficSignalScore) { this.trafficSignalScore = trafficSignalScore; }
 
@@ -220,7 +250,7 @@ public class ScenicScoreTile {
     public void setScoringVersion(String scoringVersion) { this.scoringVersion = scoringVersion; }
 
     private boolean hasAuthoritativeComponentScores() {
-        return scoringVersion != null && scoringVersion.startsWith("3.0");
+        return scoringVersion != null && scoringVersion.startsWith("3.");
     }
 
     private double clamp(double value) {

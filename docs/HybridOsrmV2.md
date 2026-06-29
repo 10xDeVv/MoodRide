@@ -63,8 +63,12 @@ The components mean:
 - `drive_quality_score`: curvature plus lower urban pressure.
 - `route_shape_score`: budget fit, useful budget utilization, and loop closure.
 - `scenic_moments_score`: peak scenic value, continuous good stretches, and consistency.
-- `urban_penalty`: urban pressure from `urban_penalty_score`, building density, and road density.
-- `start_end_penalty`: penalty when the beginning/end of the loop are low-scenic or high-urban.
+- `urban_penalty`: corridor urban pressure from `urban_penalty_score`, building density, and road density.
+- `start_end_penalty`: edge pressure when the beginning/end of the loop are low-scenic or high-urban.
+- `corridor_urban_pressure`: explicit alias for corridor-level urban pressure used by contract checks.
+- `edge_urban_pressure`: explicit alias for start/end urban pressure used by contract checks.
+- `road_stress_score`: corridor-level road-class stress, where lower values mean calmer/local roads and higher values mean faster or more major road context.
+- `tree_canopy_score`: corridor-level tree-cover proxy from land-cover classes, used mostly for forest/nature explanations and scoring.
 - `strategy_mismatch`: soft penalty when the returned OSRM corridor does not match the active geometry strategy.
 - `backtracking_penalty`: route-craft penalty for repeated corridor cells, out-and-back overlap, poor leg separation, and near-duplicate/self-overlapping geometry.
 
@@ -93,6 +97,13 @@ Each generated route also stores a JSON score breakdown in `routes.score_breakdo
 - `scenic_moments_score`
 - `urban_penalty`
 - `start_end_penalty`
+- `corridor_urban_pressure`
+- `edge_urban_pressure`
+- `road_stress_score`
+- `water_visibility_score`
+- `water_crossing_score`
+- `coastal_road_score`
+- `tree_canopy_score`
 - `strategy_fit_score`
 - `strategy_mismatch_penalty`
 - `repeated_corridor_cell_share`
@@ -121,7 +132,9 @@ The route API translates this score breakdown into a first-class explanation pay
 - `contractFlags`: machine-readable route contract pass/fail checks.
 - `contractWarnings`: plain-language warnings for failed contracts.
 
-Current contract checks cover time budget fit, loop closure, repeated-road/backtracking risk, leg separation, urban pressure, scenic peak strength, water share for coastal/riverside-style vibes, elevation/curve share for mountain/winding/adventure vibes, quiet share for rural/relaxing vibes, and photo/POI signal for photo-worthy/date-night/discovery vibes. The route-quality eval script promotes failed contract flags into scenario flags so tuning can be based on repeatable evidence instead of visual guessing.
+Current contract checks cover time budget fit, loop closure, repeated-road/backtracking risk, leg separation, corridor urban pressure, edge/start-end urban pressure, scenic peak strength, water share for coastal/riverside-style vibes, elevation/curve share for mountain/winding/adventure vibes, quiet share for rural/relaxing vibes, tree-canopy signal for forest/nature vibes, and photo/POI signal for photo-worthy/date-night/discovery vibes. The route-quality eval script promotes failed contract flags into scenario flags so tuning can be based on repeatable evidence instead of visual guessing.
+
+Urban pressure is intentionally split. `corridor_urban_pressure_ok` answers whether the drive itself stays too urban. `edge_urban_pressure_ok` answers whether the beginning or end is contaminated by the start location. The legacy `urban_pressure_ok` flag now mirrors corridor pressure so city-start routes are not broadly punished only because the first or last blocks are urban.
 
 Repeated-road v2 is intentionally a scoring/ranking signal, not an availability gate. Strict vibe gates answer whether Wayward can honestly offer a vibe in that area. Backtracking penalties answer whether a completed candidate feels good enough to prefer over another candidate. The planner subtracts a global backtracking penalty from v2 score, then applies stronger profile-specific ranking pressure to `most_scenic`, moderate pressure to `balanced`, and lighter pressure to `shorter`.
 
@@ -162,7 +175,7 @@ The tile scores are not inherent labels in the raw datasets. Wayward computes an
 
 Examples:
 
-- `water_score`: derived from proximity or relationship to water geometry.
+- `water_score`: derived from proximity or relationship to water geometry; v3.3 can lift this with water visibility, crossing, and coastal-road evidence.
 - `green_score`: derived from land-cover classes such as forest, shrub, grassland, cropland, and urban.
 - `elevation_score`: derived from DEM terrain variation.
 - `solitude_score`: derived from low urban proportion, low road/building density, and darkness.
@@ -172,6 +185,11 @@ Examples:
 - `building_density_score`: derived from Overture building footprints.
 - `darkness_score`: derived from light-pollution/nighttime-light data.
 - `urban_penalty_score`: derived from building density and urban pressure.
+- `road_stress_score`: derived from OSM road class, speed limit, surface, and segment length.
+- `water_visibility_score`: derived from road length close enough to water to plausibly feel water-adjacent.
+- `water_crossing_score`: derived from water intersections and optional OSM bridge/waterway/ford hints.
+- `coastal_road_score`: derived from roads that run close to water rather than merely being in a water-proximate tile.
+- `tree_canopy_score`: derived from land-cover forest and woody classes as a canopy proxy.
 
 Each H3 tile is a precomputed scenic feature vector. Runtime routing samples those vectors; it does not recompute land cover, DEM, Overture buildings, darkness, or park geometry from scratch.
 
