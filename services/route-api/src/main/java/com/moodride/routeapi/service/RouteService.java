@@ -91,7 +91,8 @@ public class RouteService {
         "solitude",
         "open_space",
         "curves",
-        "poi"
+        "poi",
+        "scenic_poi"
     );
 
     private static final double CALIBRATION_LEARNING_RATE = 0.04;
@@ -1204,6 +1205,7 @@ public class RouteService {
         double waterCrossing = getMetric(scoreBreakdown, "water_crossing_score");
         double coastalRoad = getMetric(scoreBreakdown, "coastal_road_score");
         double treeCanopy = getMetric(scoreBreakdown, "tree_canopy_score");
+        double scenicPoi = getMetric(scoreBreakdown, "scenic_poi_score");
         double quietShare = bestMetric(scoreBreakdown, componentAverages, "quiet_corridor_share", "solitude");
         double curveElevationShare = bestMetric(scoreBreakdown, componentAverages, "curve_elevation_corridor_share", "elevation");
         double openSpaceShare = bestMetric(scoreBreakdown, componentAverages, "open_space_corridor_share", "open_space");
@@ -1228,6 +1230,9 @@ public class RouteService {
         }
         if (hasMetric(scoreBreakdown, "tree_canopy_score") && treeCanopy >= 0.26) {
             evidence.add("spends meaningful time in tree-covered corridors");
+        }
+        if (hasMetric(scoreBreakdown, "scenic_poi_score") && scenicPoi >= 0.18) {
+            evidence.add("passes stronger scenic stops, landmarks, or natural features");
         }
         if (quietShare >= 0.25) {
             evidence.add("keeps " + formatPercent(quietShare) + " of the drive in quieter corridors");
@@ -1335,7 +1340,10 @@ public class RouteService {
             flags.put("tree_canopy_ok", metricAtLeast(scoreBreakdown, "tree_canopy_score", CONTRACT_TREE_CANOPY_MIN));
         }
         if (hasAnyVibe(routeVibes, "photo_worthy", "photo_run", "photo", "date_night", "hidden_gems")) {
-            double photoSignal = Math.max(getMetric(scoreBreakdown, "photo_peak_score"), componentAverages == null ? 0.0 : componentAverages.getOrDefault("poi", 0.0));
+            double photoSignal = Math.max(
+                Math.max(getMetric(scoreBreakdown, "photo_peak_score"), getMetric(scoreBreakdown, "scenic_poi_score")),
+                componentAverages == null ? 0.0 : componentAverages.getOrDefault("poi", 0.0)
+            );
             flags.put("photo_poi_signal_ok", photoSignal >= CONTRACT_PHOTO_POI_SIGNAL_MIN);
         }
 
@@ -1505,6 +1513,7 @@ public class RouteService {
             case "open_space" -> "open roads";
             case "curves" -> "curvier roads";
             case "poi" -> "interesting stops";
+            case "scenic_poi" -> "scenic stops";
             default -> component == null ? "scenic signals" : component.replace('_', ' ');
         };
     }

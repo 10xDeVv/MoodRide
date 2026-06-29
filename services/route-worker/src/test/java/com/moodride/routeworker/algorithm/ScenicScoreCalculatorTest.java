@@ -102,6 +102,20 @@ class ScenicScoreCalculatorTest {
         assertThat(scores.greenery()).isEqualTo(0.42);
     }
 
+    @Test
+    void scenicPoiCanLiftEnrichedPoiScore() {
+        ScenicScoreTile tile = new ScenicScoreTile();
+        tile.setScoringVersion("3.5-scenic-poi-calibration");
+        tile.setPoiScore(0.12);
+        tile.setPoiDensity(0.12);
+        tile.setOverturePoiScore(0.20);
+        tile.setScenicPoiScore(0.82);
+
+        ComponentScores scores = calculator.componentScores(tile);
+
+        assertThat(scores.poi()).isEqualTo(0.82);
+    }
+
     private static ScenicScoreTile enrichedTileWithRoadStress(double roadStressScore) {
         ScenicScoreTile tile = new ScenicScoreTile();
         tile.setScoringVersion("3.2-road-stress-calibration");

@@ -88,11 +88,15 @@ fi
 
 if ! head -n 1 "$csv_file" | grep -q 'water_visibility_score'; then
   compatible_csv="$extract_dir/scenic_score_tiles_updates.v33-compatible.csv"
-  awk 'NR == 1 { print $0 ",water_visibility_score,water_crossing_score,coastal_road_score,tree_canopy_score"; next } { print $0 ",0.0,0.0,0.0,0.0" }' "$csv_file" > "$compatible_csv"
+  awk 'NR == 1 { print $0 ",water_visibility_score,water_crossing_score,coastal_road_score,tree_canopy_score,scenic_poi_score"; next } { print $0 ",0.0,0.0,0.0,0.0,0.0" }' "$csv_file" > "$compatible_csv"
   csv_file="$compatible_csv"
 elif ! head -n 1 "$csv_file" | grep -q 'tree_canopy_score'; then
   compatible_csv="$extract_dir/scenic_score_tiles_updates.v34-compatible.csv"
-  awk 'NR == 1 { print $0 ",tree_canopy_score"; next } { print $0 ",0.0" }' "$csv_file" > "$compatible_csv"
+  awk 'NR == 1 { print $0 ",tree_canopy_score,scenic_poi_score"; next } { print $0 ",0.0,0.0" }' "$csv_file" > "$compatible_csv"
+  csv_file="$compatible_csv"
+elif ! head -n 1 "$csv_file" | grep -q 'scenic_poi_score'; then
+  compatible_csv="$extract_dir/scenic_score_tiles_updates.v35-compatible.csv"
+  awk 'NR == 1 { print $0 ",scenic_poi_score"; next } { print $0 ",0.0" }' "$csv_file" > "$compatible_csv"
   csv_file="$compatible_csv"
 fi
 
@@ -112,7 +116,8 @@ ALTER TABLE scenic_score_tiles
     ADD COLUMN IF NOT EXISTS water_visibility_score DOUBLE PRECISION NOT NULL DEFAULT 0.0,
     ADD COLUMN IF NOT EXISTS water_crossing_score DOUBLE PRECISION NOT NULL DEFAULT 0.0,
     ADD COLUMN IF NOT EXISTS coastal_road_score DOUBLE PRECISION NOT NULL DEFAULT 0.0,
-    ADD COLUMN IF NOT EXISTS tree_canopy_score DOUBLE PRECISION NOT NULL DEFAULT 0.0;
+    ADD COLUMN IF NOT EXISTS tree_canopy_score DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+    ADD COLUMN IF NOT EXISTS scenic_poi_score DOUBLE PRECISION NOT NULL DEFAULT 0.0;
 
 CREATE TEMP TABLE scenic_release_updates (
     h3_index VARCHAR(15) PRIMARY KEY,
@@ -136,7 +141,8 @@ CREATE TEMP TABLE scenic_release_updates (
     water_visibility_score DOUBLE PRECISION,
     water_crossing_score DOUBLE PRECISION,
     coastal_road_score DOUBLE PRECISION,
-    tree_canopy_score DOUBLE PRECISION
+    tree_canopy_score DOUBLE PRECISION,
+    scenic_poi_score DOUBLE PRECISION
 );
 
 COPY scenic_release_updates (
@@ -161,7 +167,8 @@ COPY scenic_release_updates (
     water_visibility_score,
     water_crossing_score,
     coastal_road_score,
-    tree_canopy_score
+    tree_canopy_score,
+    scenic_poi_score
 ) FROM '/tmp/scenic_score_tiles_updates.csv' WITH (FORMAT csv, HEADER true);
 
 SELECT CASE
@@ -203,6 +210,7 @@ WITH updated AS (
         water_crossing_score = COALESCE(u.water_crossing_score, sst.water_crossing_score),
         coastal_road_score = COALESCE(u.coastal_road_score, sst.coastal_road_score),
         tree_canopy_score = COALESCE(u.tree_canopy_score, sst.tree_canopy_score),
+        scenic_poi_score = COALESCE(u.scenic_poi_score, sst.scenic_poi_score),
         natural_land_use = u.natural_land_use,
         elevation_variance = u.elevation_variance,
         last_scored = COALESCE(u.last_scored, CURRENT_TIMESTAMP),

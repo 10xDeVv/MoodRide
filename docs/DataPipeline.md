@@ -8,11 +8,11 @@ Wayward route generation depends on precomputed scenic tile scores. Runtime serv
 
 Current local scenic baseline:
 
-- `3.3-water-visibility-calibration`
+- `3.4-tree-canopy-calibration`
 
 Next scenic scoring candidate:
 
-- `3.4-tree-canopy-calibration`
+- `3.5-scenic-poi-calibration`
 
 ## What Gets Precomputed
 
@@ -34,6 +34,7 @@ Each row in `scenic_score_tiles` is an H3 tile with a scenic feature vector:
 - `water_crossing_score`
 - `coastal_road_score`
 - `tree_canopy_score`
+- `scenic_poi_score`
 
 `hybrid_osrm_v2` samples these tile scores along returned OSRM route corridors.
 
@@ -56,9 +57,9 @@ Current status:
 - Darkness/light-pollution is already represented in `3.1` through `darkness_score`.
 - OSM road class and surface are represented in `3.2` through `road_stress_score`.
 - Water visibility and bridge/coastal-road detection are represented in `3.3` through `water_visibility_score`, `water_crossing_score`, and `coastal_road_score`.
-- Tree canopy is the next `3.4` implementation target through `tree_canopy_score`, a land-cover derived canopy proxy.
-- OSM viewpoints/peaks can support photo-worthy routes, but coverage needs to be audited region by region.
-- Tree canopy is currently approximated through land-cover/green scoring. A true canopy signal should be a separate source or a carefully named proxy.
+- Tree canopy is represented in `3.4` through `tree_canopy_score`, a land-cover derived canopy proxy.
+- Scenic places, landmarks, natural features, and discovery stops are the next `3.5` implementation target through `scenic_poi_score`.
+- OSM viewpoints/peaks can improve photo-worthy routes later, but current local coverage is sparse; v3.5 uses weighted Overture Places categories as the first scenic-place signal.
 - Seasonal suitability should start as warnings/metadata because OSM seasonal/access tags can be sparse and inconsistent.
 
 Recommended data-quality priority:
@@ -66,7 +67,7 @@ Recommended data-quality priority:
 1. Road stress / road class. Implemented and published as `3.2-road-stress-calibration`.
 2. Water visibility and bridge/coastal-road detection. Implemented in code/SQL as the `3.3` release candidate; run only after water geometry is present.
 3. Tree canopy proxy. Implemented in code/SQL as the `3.4` release candidate from land-cover classes.
-4. Scenic viewpoints / peaks.
+4. Scenic POIs / viewpoints. Implemented in code/SQL as the `3.5` release candidate from weighted Overture scenic-place categories.
 5. Seasonal suitability warnings.
 
 Run the read-only audit before publishing any new scenic scoring SQL:
@@ -102,6 +103,7 @@ Core scripts:
 - `scripts/setup/data-quality-enrichment-v32.sql`
 - `scripts/setup/data-quality-enrichment-v33.sql`
 - `scripts/setup/data-quality-enrichment-v34.sql`
+- `scripts/setup/data-quality-enrichment-v35.sql`
 
 Road-stress v3.2 recompute:
 
@@ -155,14 +157,33 @@ Tree-canopy v3.4 recompute:
 
 Runtime uses this as a forest/nature explanation and scoring signal. It is not a true tree-height, street-tree, or viewshed dataset.
 
+Scenic-POI v3.5 recompute:
+
+```powershell
+./scripts/deploy/run_nationwide_scenic_recompute.ps1 `
+  -SqlScriptPath "scripts/setup/data-quality-enrichment-v35.sql" `
+  -ChunkSize 50000 `
+  -SourceScoringVersion "3.4-tree-canopy-calibration" `
+  -ExpectedScoringVersion "3.5-scenic-poi-calibration"
+```
+
+`data-quality-enrichment-v35.sql` derives `scenic_poi_score` from weighted Overture Places categories. It intentionally differs from generic `poi_score`:
+
+- high: lookouts, waterfalls, lighthouses, national/state parks, nature reserves, beaches, mountains, lakes, rivers
+- medium: campgrounds, hiking trails, landmarks, monuments, bridges, museums, galleries
+- low/supporting: wineries and farms
+- ignored: generic commercial/utility places such as gas stations, offices, banks, medical services, and routine retail
+
+Runtime uses this for photo-worthy, date-night, and hidden-gems style explanations/contracts. It is not yet a dedicated OSM viewpoint or viewshed model.
+
 ## Scenic Release Flow
 
 Publish the scenic tile artifact:
 
 ```powershell
 ./scripts/deploy/publish_scenic_release.ps1 `
-  -ScoringVersion "3.4-tree-canopy-calibration" `
-  -ReleaseTag "scenic-3.4-tree-canopy-calibration-$(Get-Date -Format 'yyyyMMdd-HHmm')" `
+  -ScoringVersion "3.5-scenic-poi-calibration" `
+  -ReleaseTag "scenic-3.5-scenic-poi-calibration-$(Get-Date -Format 'yyyyMMdd-HHmm')" `
   -Repo "10xDeVv/Wayward"
 ```
 

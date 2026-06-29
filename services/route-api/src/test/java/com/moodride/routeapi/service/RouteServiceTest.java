@@ -608,6 +608,63 @@ class RouteServiceTest {
     }
 
     @Test
+    void routeOptionExplanationUsesScenicPoiForPhotoDiscoveryContract() {
+        UUID jobId = UUID.randomUUID();
+        UUID userId = UUID.randomUUID();
+
+        RouteJob job = new RouteJob(userId, 46.8139, -71.2080, 60, "photo");
+        job.setId(jobId);
+        job.setStatus(RouteJob.JobStatus.COMPLETED);
+
+        GeometryFactory geometryFactory = new GeometryFactory();
+        LineString lineString = geometryFactory.createLineString(new Coordinate[] {
+            new Coordinate(-71.2080, 46.8139),
+            new Coordinate(-71.2300, 46.8300)
+        });
+
+        Route route = new Route();
+        route.setId(UUID.randomUUID());
+        route.setJobId(jobId);
+        route.setRouteProfile("most_scenic");
+        route.setGeometry(lineString);
+        route.setScenicScore(0.70);
+        route.setTotalDistanceKm(28.0);
+        route.setEstimatedDurationMinutes(55);
+        route.setGeneratedAt(Instant.parse("2026-04-02T14:30:05Z"));
+        route.setScoreBreakdownJson("""
+            {
+              "final_score":0.70,
+              "photo_peak_score":0.18,
+              "scenic_moments_score":0.46,
+              "scenic_poi_score":0.44,
+              "corridor_urban_pressure":0.26,
+              "edge_urban_pressure":0.32
+            }
+            """);
+
+        ScenicScoreTile firstTile = scenicTile(H3Utils.getH3Index(46.8139, -71.2080, H3Utils.DEFAULT_RESOLUTION), 0.38, 0.48, 0.58, 0.44, 0.42, 0.18);
+        firstTile.setScenicPoiScore(0.44);
+        ScenicScoreTile secondTile = scenicTile(H3Utils.getH3Index(46.8300, -71.2300, H3Utils.DEFAULT_RESOLUTION), 0.40, 0.46, 0.56, 0.42, 0.40, 0.16);
+        secondTile.setScenicPoiScore(0.42);
+        List<ScenicScoreTile> routeTiles = List.of(firstTile, secondTile);
+
+        lenient().when(jobRepository.findById(jobId)).thenReturn(Optional.of(job));
+        lenient().when(routeRepository.findByJobIdOrderByGeneratedAtAsc(jobId)).thenReturn(List.of(route));
+        lenient().when(scenicScoreTileRepository.findByH3IndexIn(anyCollection())).thenReturn(routeTiles);
+        lenient().when(scenicScoreTileRepository.findScenicTilesNearPoint(anyDouble(), anyDouble(), anyDouble(), anyInt()))
+            .thenReturn(routeTiles);
+
+        RouteJobStatusResponse response = routeService.getRouteJobStatus(jobId);
+
+        var explanation = response.routeOptions().getFirst().explanation();
+        assertThat(explanation).isNotNull();
+        assertThat(explanation.contractFlags()).containsEntry("photo_poi_signal_ok", true);
+        assertThat(explanation.contractWarnings()).doesNotContain("Photo/discovery vibe has weak photo or POI signal.");
+        assertThat(explanation.humanReasons())
+            .anyMatch(reason -> reason.contains("scenic stops"));
+    }
+
+    @Test
     void routeOptionExplanationKeepsPoiAsSupportingSignalWhenNotRequested() {
         UUID jobId = UUID.randomUUID();
         UUID userId = UUID.randomUUID();

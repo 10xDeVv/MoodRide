@@ -1034,11 +1034,12 @@ public class RoutePlanner {
             case "greenery" -> components.greenery();
                 case "elevation" -> components.elevation();
                 case "solitude" -> components.solitude();
-                case "curves" -> components.curves();
-                case "poi" -> components.poi();
-                case "tree_canopy" -> clamp01(tile.getTreeCanopyScore());
-                case "open_space" -> openSpaceScore(tile, components);
-                default -> 0.0;
+            case "curves" -> components.curves();
+            case "poi" -> components.poi();
+            case "scenic_poi" -> clamp01(tile.getScenicPoiScore());
+            case "tree_canopy" -> clamp01(tile.getTreeCanopyScore());
+            case "open_space" -> openSpaceScore(tile, components);
+            default -> 0.0;
             };
     }
 
@@ -1050,6 +1051,7 @@ public class RoutePlanner {
             case "solitude" -> weights.solitude();
             case "curves" -> weights.curves();
             case "poi" -> weights.poi();
+            case "scenic_poi" -> weights.poi();
             case "tree_canopy" -> Math.max(weights.greenery(), weights.solitude());
             case "open_space" -> Math.max(weights.solitude(), weights.curves());
             default -> 0.0;
@@ -1846,6 +1848,7 @@ public class RoutePlanner {
         double waterCrossingScore = computeWaterCrossingScore(tiles);
         double coastalRoadScore = computeCoastalRoadScore(tiles);
         double treeCanopyScore = computeTreeCanopyScore(tiles);
+        double scenicPoiScore = computeScenicPoiScore(tiles);
         double edgePenalty = computeStartEndPenalty(tiles, preferences);
         StrategyCorridorMetrics strategyMetrics = computeStrategyCorridorMetrics(tiles, landscapeScores, geometryStrategy);
 
@@ -1873,6 +1876,7 @@ public class RoutePlanner {
         breakdown.put("water_crossing_score", waterCrossingScore);
         breakdown.put("coastal_road_score", coastalRoadScore);
         breakdown.put("tree_canopy_score", treeCanopyScore);
+        breakdown.put("scenic_poi_score", scenicPoiScore);
         breakdown.put("start_end_penalty", edgePenalty);
         breakdown.put("corridor_urban_pressure", urbanPenalty);
         breakdown.put("edge_urban_pressure", edgePenalty);
@@ -1913,6 +1917,7 @@ public class RoutePlanner {
         breakdown.put("water_crossing_score", 0.0);
         breakdown.put("coastal_road_score", 0.0);
         breakdown.put("tree_canopy_score", 0.0);
+        breakdown.put("scenic_poi_score", 0.0);
         breakdown.put("start_end_penalty", 0.0);
         breakdown.put("corridor_urban_pressure", 0.0);
         breakdown.put("edge_urban_pressure", 0.0);
@@ -1992,7 +1997,11 @@ public class RoutePlanner {
             ComponentScores components = componentScores(tile);
             double urbanPressure = computeUrbanPressureScore(List.of(tile));
             double openSpace = openSpaceScore(tile, components);
-            double photoSignal = Math.max(components.water(), Math.max(components.elevation(), components.poi()));
+            double scenicPoi = clamp01(tile.getScenicPoiScore());
+            double photoSignal = Math.max(
+                Math.max(components.water(), components.elevation()),
+                Math.max(components.poi(), scenicPoi)
+            );
             double curveElevationSignal = Math.max(components.curves(), components.elevation());
 
             double lowUrbanPressure = 1.0 - urbanPressure;
@@ -2369,6 +2378,18 @@ public class RoutePlanner {
         return clamp01(
             tiles.stream()
                 .mapToDouble(tile -> clamp01(tile.getTreeCanopyScore()))
+                .average()
+                .orElse(0.0)
+        );
+    }
+
+    private double computeScenicPoiScore(List<ScenicScoreTile> tiles) {
+        if (tiles == null || tiles.isEmpty()) {
+            return 0.0;
+        }
+        return clamp01(
+            tiles.stream()
+                .mapToDouble(tile -> clamp01(tile.getScenicPoiScore()))
                 .average()
                 .orElse(0.0)
         );

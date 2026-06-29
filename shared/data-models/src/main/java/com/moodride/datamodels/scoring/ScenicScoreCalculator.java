@@ -60,6 +60,7 @@ public class ScenicScoreCalculator {
         double poi = resolveComponentScore(tile.getPoiScore(), tile.getPoiDensity(), enrichedDataVersion);
         if (enrichedDataVersion) {
             poi = Math.max(poi, clamp01(tile.getOverturePoiScore()));
+            poi = Math.max(poi, clamp01(tile.getScenicPoiScore()));
         }
 
         return new ComponentScores(water, greenery, elevation, solitude, curves, poi);

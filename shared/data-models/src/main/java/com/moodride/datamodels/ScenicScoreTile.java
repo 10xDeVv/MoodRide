@@ -98,6 +98,9 @@ public class ScenicScoreTile {
     @Column(name = "tree_canopy_score", nullable = false)
     private double treeCanopyScore;
 
+    @Column(name = "scenic_poi_score", nullable = false)
+    private double scenicPoiScore;
+
     @Column(nullable = false)
     private Instant lastScored;
 
@@ -231,6 +234,9 @@ public class ScenicScoreTile {
 
     public double getTreeCanopyScore() { return treeCanopyScore; }
     public void setTreeCanopyScore(double treeCanopyScore) { this.treeCanopyScore = treeCanopyScore; }
+
+    public double getScenicPoiScore() { return scenicPoiScore; }
+    public void setScenicPoiScore(double scenicPoiScore) { this.scenicPoiScore = scenicPoiScore; }
 
     public double getTrafficSignalScore() { return trafficSignalScore; }
     public void setTrafficSignalScore(double trafficSignalScore) { this.trafficSignalScore = trafficSignalScore; }

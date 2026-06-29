@@ -496,8 +496,10 @@ function Get-FallbackContractFlags {
     }
     if (Test-HasAnyVibe -Vibes $Vibes -Expected @("photo_worthy", "photo_run", "photo", "date_night", "hidden_gems")) {
         $photoPeak = Get-MapNumber -Map $ScoreBreakdown -Key "photo_peak_score"
-        if ($null -ne $photoPeak) {
-            Add-ContractFlag -Flags $flags -Key "photo_poi_signal_ok" -Value ($photoPeak -ge 0.30)
+        $scenicPoi = Get-MapNumber -Map $ScoreBreakdown -Key "scenic_poi_score"
+        $photoSignals = @($photoPeak, $scenicPoi | Where-Object { $null -ne $_ })
+        if ($photoSignals.Count -gt 0) {
+            Add-ContractFlag -Flags $flags -Key "photo_poi_signal_ok" -Value ((($photoSignals | Measure-Object -Maximum).Maximum) -ge 0.30)
         }
     }
 
@@ -553,19 +555,19 @@ function Get-TargetComponentsForVibes {
             "date_night" {
                 $targets.Add("water")
                 $targets.Add("elevation")
-                $targets.Add("poi")
+                $targets.Add("scenic_poi")
                 break
             }
             { $_ -in @("photo_worthy", "photo_run", "photo") } {
                 $targets.Add("water")
                 $targets.Add("elevation")
-                $targets.Add("poi")
+                $targets.Add("scenic_poi")
                 break
             }
             "hidden_gems" {
+                $targets.Add("scenic_poi")
                 $targets.Add("solitude")
                 $targets.Add("curves")
-                $targets.Add("poi")
                 break
             }
             { $_ -in @("loop_variety", "scenic", "scenic_reset") } {
@@ -958,6 +960,7 @@ foreach ($scenario in $selectedScenarios) {
                         v2WaterCrossingScore = Get-MapNumber -Map $scoreBreakdown -Key "water_crossing_score"
                         v2CoastalRoadScore = Get-MapNumber -Map $scoreBreakdown -Key "coastal_road_score"
                         v2TreeCanopyScore = Get-MapNumber -Map $scoreBreakdown -Key "tree_canopy_score"
+                        v2ScenicPoiScore = Get-MapNumber -Map $scoreBreakdown -Key "scenic_poi_score"
                         v2StartEndPenalty = Get-MapNumber -Map $scoreBreakdown -Key "start_end_penalty"
                         v2CorridorUrbanPressure = Get-MapNumberAny -Map $scoreBreakdown -Keys @("corridor_urban_pressure", "urban_penalty")
                         v2EdgeUrbanPressure = Get-MapNumberAny -Map $scoreBreakdown -Keys @("edge_urban_pressure", "start_end_penalty")
@@ -1099,6 +1102,7 @@ foreach ($scenario in $selectedScenarios) {
             v2WaterCrossingScore = $null
             v2CoastalRoadScore = $null
             v2TreeCanopyScore = $null
+            v2ScenicPoiScore = $null
             v2StartEndPenalty = $null
             v2CorridorUrbanPressure = $null
             v2EdgeUrbanPressure = $null
@@ -1195,6 +1199,7 @@ foreach ($scenario in $selectedScenarios) {
                 v2WaterCrossingScore = $option.v2WaterCrossingScore
                 v2CoastalRoadScore = $option.v2CoastalRoadScore
                 v2TreeCanopyScore = $option.v2TreeCanopyScore
+                v2ScenicPoiScore = $option.v2ScenicPoiScore
                 v2StartEndPenalty = $option.v2StartEndPenalty
                 v2CorridorUrbanPressure = $option.v2CorridorUrbanPressure
                 v2EdgeUrbanPressure = $option.v2EdgeUrbanPressure
@@ -1310,8 +1315,8 @@ if ($flagCounts.Count -eq 0) {
 $lines += ""
 $lines += "## Scenario Summary"
 $lines += ""
-$lines += "| Scenario | City | Budget | Vibes | Status | Routes | Algorithm | Avg Strategy | Avg Strategy Fit | Avg Strategy Penalty | Avg Backtrack | Avg Req Radius | Avg Req Wpts | Score Spread | Duration Spread | Min Geometry Sep | Avg V2 Final | Avg Corridor Urban | Avg Edge Urban | Avg Road Stress | Avg Water Visibility | Avg Coastal Road | Avg Tree Canopy | Flags |"
-$lines += "|---|---|---:|---|---|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|"
+$lines += "| Scenario | City | Budget | Vibes | Status | Routes | Algorithm | Avg Strategy | Avg Strategy Fit | Avg Strategy Penalty | Avg Backtrack | Avg Req Radius | Avg Req Wpts | Score Spread | Duration Spread | Min Geometry Sep | Avg V2 Final | Avg Corridor Urban | Avg Edge Urban | Avg Road Stress | Avg Water Visibility | Avg Coastal Road | Avg Tree Canopy | Avg Scenic POI | Flags |"
+$lines += "|---|---|---:|---|---|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|"
 foreach ($result in $scenarioResults) {
     $spread = if ($null -ne $result.scoreSpread) { "{0:N4}" -f [double]$result.scoreSpread } else { "n/a" }
     $durationSpreadLabel = if ($null -ne $result.durationSpreadMinutes) { "{0:N1}" -f [double]$result.durationSpreadMinutes } else { "n/a" }
@@ -1326,6 +1331,7 @@ foreach ($result in $scenarioResults) {
     $v2WaterVisibilityScores = @($result.options | ForEach-Object { $_.v2WaterVisibilityScore } | Where-Object { $null -ne $_ })
     $v2CoastalRoadScores = @($result.options | ForEach-Object { $_.v2CoastalRoadScore } | Where-Object { $null -ne $_ })
     $v2TreeCanopyScores = @($result.options | ForEach-Object { $_.v2TreeCanopyScore } | Where-Object { $null -ne $_ })
+    $v2ScenicPoiScores = @($result.options | ForEach-Object { $_.v2ScenicPoiScore } | Where-Object { $null -ne $_ })
     $v2StrategyCodes = @($result.options | ForEach-Object { $_.v2GeometryStrategyCode } | Where-Object { $null -ne $_ })
     $v2StrategyFits = @($result.options | ForEach-Object { $_.v2StrategyFitScore } | Where-Object { $null -ne $_ })
     $v2StrategyPenalties = @($result.options | ForEach-Object { $_.v2StrategyMismatchPenalty } | Where-Object { $null -ne $_ })
@@ -1345,7 +1351,8 @@ foreach ($result in $scenarioResults) {
     $avgWaterVisibility = if ($v2WaterVisibilityScores.Count -gt 0) { "{0:N4}" -f [double](($v2WaterVisibilityScores | Measure-Object -Average).Average) } else { "n/a" }
     $avgCoastalRoad = if ($v2CoastalRoadScores.Count -gt 0) { "{0:N4}" -f [double](($v2CoastalRoadScores | Measure-Object -Average).Average) } else { "n/a" }
     $avgTreeCanopy = if ($v2TreeCanopyScores.Count -gt 0) { "{0:N4}" -f [double](($v2TreeCanopyScores | Measure-Object -Average).Average) } else { "n/a" }
-    $lines += "| $($result.scenarioId) | $($result.city) | $($result.timeBudgetMinutes) | $(@($result.vibes) -join '+') | $($result.status) | $($result.routeCount) | $algorithmLabel | $avgStrategyCode | $avgStrategyFit | $avgStrategyPenalty | $avgBacktrackingPenalty | $avgRequestedRadius | $avgRequestedWaypointCount | $spread | $durationSpreadLabel | $minSep | $avgV2Final | $avgCorridorUrbanPressure | $avgEdgeUrbanPressure | $avgRoadStress | $avgWaterVisibility | $avgCoastalRoad | $avgTreeCanopy | $flagLabel |"
+    $avgScenicPoi = if ($v2ScenicPoiScores.Count -gt 0) { "{0:N4}" -f [double](($v2ScenicPoiScores | Measure-Object -Average).Average) } else { "n/a" }
+    $lines += "| $($result.scenarioId) | $($result.city) | $($result.timeBudgetMinutes) | $(@($result.vibes) -join '+') | $($result.status) | $($result.routeCount) | $algorithmLabel | $avgStrategyCode | $avgStrategyFit | $avgStrategyPenalty | $avgBacktrackingPenalty | $avgRequestedRadius | $avgRequestedWaypointCount | $spread | $durationSpreadLabel | $minSep | $avgV2Final | $avgCorridorUrbanPressure | $avgEdgeUrbanPressure | $avgRoadStress | $avgWaterVisibility | $avgCoastalRoad | $avgTreeCanopy | $avgScenicPoi | $flagLabel |"
 }
 $lines += ""
 $lines += "## Output Files"

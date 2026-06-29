@@ -181,6 +181,7 @@ Examples:
 - `solitude_score`: derived from low urban proportion, low road/building density, and darkness.
 - `curve_score`: derived from winding-road character in road geometry.
 - `poi_score` and `overture_poi_score`: derived from aggregated POI/place data.
+- `scenic_poi_score`: derived from weighted scenic/discovery Overture Places categories such as lookouts, parks, natural features, landmarks, museums, galleries, wineries, and historic places.
 - `park_score`: derived from protected or conserved area geometry.
 - `building_density_score`: derived from Overture building footprints.
 - `darkness_score`: derived from light-pollution/nighttime-light data.
@@ -191,7 +192,7 @@ Examples:
 - `coastal_road_score`: derived from roads that run close to water rather than merely being in a water-proximate tile.
 - `tree_canopy_score`: derived from land-cover forest and woody classes as a canopy proxy.
 
-Each H3 tile is a precomputed scenic feature vector. Runtime routing samples those vectors; it does not recompute land cover, DEM, Overture buildings, darkness, or park geometry from scratch.
+Each H3 tile is a precomputed scenic feature vector. Runtime routing samples those vectors; it does not recompute land cover, DEM, Overture buildings, darkness, scenic-place categories, or park geometry from scratch.
 
 ## What Scenic Means
 
