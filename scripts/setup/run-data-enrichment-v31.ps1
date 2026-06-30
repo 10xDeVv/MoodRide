@@ -284,7 +284,7 @@ if ($psql) {
 
 if ($SkipValidation) {
     Write-Warning "Skipping 3.1 validation gate. Use this only for script smoke tests."
-    Write-Host "MoodRide data enrichment 3.1 completed."
+    Write-Host "Wayward data enrichment 3.1 completed."
     exit 0
 }
 
@@ -377,4 +377,4 @@ if ($PublishRelease) {
     }
 }
 
-Write-Host "MoodRide data enrichment 3.1 completed."
+Write-Host "Wayward data enrichment 3.1 completed."

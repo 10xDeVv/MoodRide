@@ -46,9 +46,9 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-let fallbackAnalyticsSessionId: string | null = null;
+let fallbackAnalyticsClientId: string | null = null;
 
-function randomAnalyticsSessionId(): string {
+function randomAnalyticsClientId(): string {
   const cryptoApi = typeof window !== "undefined" ? window.crypto : undefined;
   if (cryptoApi?.randomUUID) {
     return cryptoApi.randomUUID();
@@ -56,31 +56,43 @@ function randomAnalyticsSessionId(): string {
   return `anon-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
-function getAnalyticsSessionId(): string {
+function getAnalyticsClientId(): string {
   if (typeof window === "undefined") {
     return "server";
   }
 
   try {
-    const key = "wayward-analytics-session-id";
+    const key = "wayward-anonymous-client-id";
     const existing = window.localStorage.getItem(key);
     if (existing) {
       return existing;
     }
-    const generated = randomAnalyticsSessionId();
+    const generated = randomAnalyticsClientId();
     window.localStorage.setItem(key, generated);
     return generated;
   } catch {
-    fallbackAnalyticsSessionId ??= randomAnalyticsSessionId();
-    return fallbackAnalyticsSessionId;
+    fallbackAnalyticsClientId ??= randomAnalyticsClientId();
+    return fallbackAnalyticsClientId;
   }
+}
+
+export function coarseAnalyticsRegionKey(lat: number | null | undefined, lng: number | null | undefined): string | null {
+  if (typeof lat !== "number" || typeof lng !== "number" || !Number.isFinite(lat) || !Number.isFinite(lng)) {
+    return null;
+  }
+  const bucketSize = 0.5;
+  const bucketLat = Math.floor(lat / bucketSize) * bucketSize;
+  const bucketLng = Math.floor(lng / bucketSize) * bucketSize;
+  return `grid:${bucketLat.toFixed(1)}:${bucketLng.toFixed(1)}`;
 }
 
 export function trackAnalyticsEvent(payload: AnalyticsEventPayload): void {
   if (typeof window === "undefined") return;
 
+  const anonymousClientId = getAnalyticsClientId();
   const body = JSON.stringify({
-    anonymousSessionId: getAnalyticsSessionId(),
+    anonymousSessionId: anonymousClientId,
+    anonymousClientId,
     ...payload
   });
 

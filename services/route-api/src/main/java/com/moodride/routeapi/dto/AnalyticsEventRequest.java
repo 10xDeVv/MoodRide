@@ -12,6 +12,9 @@ public record AnalyticsEventRequest(
     @NotBlank @Size(max = 80)
     String anonymousSessionId,
 
+    @Size(max = 120)
+    String anonymousClientId,
+
     @NotBlank @Size(max = 80)
     String eventName,
 
@@ -28,6 +31,9 @@ public record AnalyticsEventRequest(
 
     @Min(1)
     Integer timeBudgetMinutes,
+
+    @Size(max = 40)
+    String regionKey,
 
     @Min(0)
     Integer routeCount,

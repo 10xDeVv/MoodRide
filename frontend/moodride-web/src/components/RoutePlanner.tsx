@@ -11,7 +11,7 @@ import {
 } from "lucide-react";
 import { RouteMap } from "./RouteMap";
 import { BottomSheet, type BottomSheetState } from "./BottomSheet";
-import { submitRoute, getJobStatus, getRoute, searchLocations, trackAnalyticsEvent } from "@/lib/api";
+import { coarseAnalyticsRegionKey, submitRoute, getJobStatus, getRoute, searchLocations, trackAnalyticsEvent } from "@/lib/api";
 import { connectJobChannel } from "@/lib/ws";
 import type {
   RouteDetailResponse,
@@ -190,7 +190,7 @@ function AppHeader({ theme, onThemeToggle }: { theme: AppTheme; onThemeToggle: (
     <header className="app-header">
       <svg className="header-glass-filter" aria-hidden="true" focusable="false" width="0" height="0">
         <defs>
-          <filter id="moodride-glass-distortion" x="0%" y="0%" width="100%" height="100%">
+          <filter id="wayward-glass-distortion" x="0%" y="0%" width="100%" height="100%">
             <feTurbulence
               type="fractalNoise"
               baseFrequency="0.0085 0.0085"
@@ -1254,7 +1254,7 @@ export function RoutePlanner() {
 
   useEffect(() => {
     try {
-      const storedTheme = window.localStorage.getItem("moodride-theme");
+      const storedTheme = window.localStorage.getItem("wayward-theme");
       if (storedTheme === "day" || storedTheme === "night") {
         setTheme(storedTheme);
       }
@@ -1268,7 +1268,7 @@ export function RoutePlanner() {
   useEffect(() => {
     if (!themePreferenceReady) return;
     try {
-      window.localStorage.setItem("moodride-theme", theme);
+      window.localStorage.setItem("wayward-theme", theme);
     } catch {
       // Ignore storage failures; the toggle should still work for this session.
     }
@@ -1312,6 +1312,7 @@ export function RoutePlanner() {
       routeMode,
       vibes,
       timeBudgetMinutes: timeBudget,
+      regionKey: coarseAnalyticsRegionKey(s.lat, s.lng),
       metadata: { source: "search" }
     });
   }, [routeMode, vibes, timeBudget]);
@@ -1325,7 +1326,8 @@ export function RoutePlanner() {
       eventName: "geolocate_clicked",
       routeMode,
       vibes,
-      timeBudgetMinutes: timeBudget
+      timeBudgetMinutes: timeBudget,
+      regionKey: coarseAnalyticsRegionKey(lat, lng)
     });
     navigator.geolocation.getCurrentPosition(
       (pos) => {
@@ -1335,7 +1337,7 @@ export function RoutePlanner() {
       },
       () => setStatusMessage("Could not detect location. Enter coordinates manually.")
     );
-  }, [routeMode, vibes, timeBudget]);
+  }, [lat, lng, routeMode, vibes, timeBudget]);
 
   const handleVibeToggle = useCallback((vibe: string) => {
     setVibes((prev) =>
@@ -1361,7 +1363,8 @@ export function RoutePlanner() {
       eventName: "route_generate_clicked",
       routeMode,
       vibes,
-      timeBudgetMinutes: timeBudget
+      timeBudgetMinutes: timeBudget,
+      regionKey: coarseAnalyticsRegionKey(lat, lng)
     });
     setPhase("submitting");
     setStatusMessage("");
@@ -1393,6 +1396,7 @@ export function RoutePlanner() {
         routeMode,
         vibes,
         timeBudgetMinutes: timeBudget,
+        regionKey: coarseAnalyticsRegionKey(lat, lng),
         status: submission.status
       });
 
@@ -1425,6 +1429,7 @@ export function RoutePlanner() {
                 routeMode,
                 vibes: detail.vibes?.length ? detail.vibes : vibes,
                 timeBudgetMinutes: timeBudget,
+                regionKey: coarseAnalyticsRegionKey(lat, lng),
                 routeCount: detail.routeOptions?.length ?? 1,
                 status: "completed",
                 durationMs: generationStartedAtRef.current ? Date.now() - generationStartedAtRef.current : null,
@@ -1471,6 +1476,7 @@ export function RoutePlanner() {
                   routeMode,
                   vibes: detail.vibes?.length ? detail.vibes : vibes,
                   timeBudgetMinutes: timeBudget,
+                  regionKey: coarseAnalyticsRegionKey(lat, lng),
                   routeCount: detail.routeOptions?.length ?? 1,
                   status: "completed",
                   durationMs: generationStartedAtRef.current ? Date.now() - generationStartedAtRef.current : null,
@@ -1493,6 +1499,7 @@ export function RoutePlanner() {
                 routeMode,
                 vibes,
                 timeBudgetMinutes: timeBudget,
+                regionKey: coarseAnalyticsRegionKey(lat, lng),
                 status: status.failureCode ?? status.status,
                 durationMs: generationStartedAtRef.current ? Date.now() - generationStartedAtRef.current : null,
                 metadata: { reason: status.reason, failureCode: status.failureCode }
@@ -1504,6 +1511,7 @@ export function RoutePlanner() {
                   routeMode,
                   vibes,
                   timeBudgetMinutes: timeBudget,
+                  regionKey: coarseAnalyticsRegionKey(lat, lng),
                   status: status.failureCode,
                   metadata: {
                     suggestedVibes: status.suggestedVibes,
@@ -1530,6 +1538,7 @@ export function RoutePlanner() {
         routeMode,
         vibes,
         timeBudgetMinutes: timeBudget,
+        regionKey: coarseAnalyticsRegionKey(lat, lng),
         status: "submit_failed",
         durationMs: generationStartedAtRef.current ? Date.now() - generationStartedAtRef.current : null,
         metadata: { message: msg.slice(0, 240) }
@@ -1560,7 +1569,8 @@ export function RoutePlanner() {
       routeProfile: selectedOption?.profile,
       routeMode,
       vibes,
-      timeBudgetMinutes: timeBudget
+      timeBudgetMinutes: timeBudget,
+      regionKey: coarseAnalyticsRegionKey(lat, lng)
     });
     if (stopWsRef.current) { stopWsRef.current(); stopWsRef.current = null; }
     if (pollTimerRef.current) { clearInterval(pollTimerRef.current); pollTimerRef.current = null; }
@@ -1571,7 +1581,7 @@ export function RoutePlanner() {
     setProgressStep(0);
     setSheetState('mid');
     setLargeResultsOpen(true);
-  }, [route, selectedOptionId, routeMode, vibes, timeBudget]);
+  }, [lat, lng, route, selectedOptionId, routeMode, vibes, timeBudget]);
 
   const handleTryVibe = useCallback((vibe: string) => {
     if (stopWsRef.current) { stopWsRef.current(); stopWsRef.current = null; }
@@ -1599,6 +1609,7 @@ export function RoutePlanner() {
         routeMode: detail.routeMode,
         vibes: detail.vibes,
         timeBudgetMinutes: detail.timeBudgetMinutes,
+        regionKey: coarseAnalyticsRegionKey(lat, lng),
         routeCount: detail.routeOptions?.length ?? 1,
         scenicScore: selectedOption?.scenicScore ?? detail.scenicScore
       });
@@ -1606,7 +1617,7 @@ export function RoutePlanner() {
       const msg = e instanceof Error ? e.message : "Failed to load route detail.";
       setStatusMessage(msg);
     }
-  }, [resolveRouteDetail]);
+  }, [lat, lng, resolveRouteDetail]);
 
   const handleViewRoutes = useCallback(() => {
     if (!route) return;
@@ -1620,9 +1631,10 @@ export function RoutePlanner() {
       routeProfile: getSelectedRouteOption(route, selectedOptionId)?.profile,
       routeMode,
       vibes: route.vibes,
-      timeBudgetMinutes: route.timeBudgetMinutes
+      timeBudgetMinutes: route.timeBudgetMinutes,
+      regionKey: coarseAnalyticsRegionKey(lat, lng)
     });
-  }, [route, selectedOptionId, routeMode]);
+  }, [lat, lng, route, selectedOptionId, routeMode]);
 
   const handleThemeToggle = useCallback(() => {
     setTheme((current) => current === "day" ? "night" : "day");
@@ -1643,12 +1655,13 @@ export function RoutePlanner() {
         routeMode,
         vibes: route.vibes,
         timeBudgetMinutes: route.timeBudgetMinutes,
+        regionKey: coarseAnalyticsRegionKey(lat, lng),
         routeCount: route.routeOptions?.length ?? 1,
         scenicScore: selectedOption?.scenicScore ?? route.scenicScore
       });
     }
     setShowHandoff(true);
-  }, [route, selectedOptionId, routeMode]);
+  }, [lat, lng, route, selectedOptionId, routeMode]);
 
   const handleNavigationOpen = useCallback((provider: "google" | "apple") => {
     if (!route) return;
@@ -1661,10 +1674,11 @@ export function RoutePlanner() {
       routeMode,
       vibes: route.vibes,
       timeBudgetMinutes: route.timeBudgetMinutes,
+      regionKey: coarseAnalyticsRegionKey(lat, lng),
       scenicScore: selectedOption?.scenicScore ?? route.scenicScore,
       metadata: { provider }
     });
-  }, [route, selectedOptionId, routeMode]);
+  }, [lat, lng, route, selectedOptionId, routeMode]);
 
   const handleGpxExport = useCallback(() => {
     if (!route) return;
@@ -1677,9 +1691,10 @@ export function RoutePlanner() {
       routeMode,
       vibes: route.vibes,
       timeBudgetMinutes: route.timeBudgetMinutes,
+      regionKey: coarseAnalyticsRegionKey(lat, lng),
       scenicScore: selectedOption?.scenicScore ?? route.scenicScore
     });
-  }, [route, selectedOptionId, routeMode]);
+  }, [lat, lng, route, selectedOptionId, routeMode]);
 
   const handleResultsMinimize = useCallback(() => {
     if (route) {
@@ -1691,7 +1706,8 @@ export function RoutePlanner() {
         routeProfile: selectedOption?.profile,
         routeMode,
         vibes: route.vibes,
-        timeBudgetMinutes: route.timeBudgetMinutes
+        timeBudgetMinutes: route.timeBudgetMinutes,
+        regionKey: coarseAnalyticsRegionKey(lat, lng)
       });
     }
     if (isMobile) {
@@ -1699,7 +1715,7 @@ export function RoutePlanner() {
     } else {
       setLargeResultsOpen(false);
     }
-  }, [route, selectedOptionId, routeMode, isMobile]);
+  }, [lat, lng, route, selectedOptionId, routeMode, isMobile]);
 
   // Detect responsive viewport mode: phone sheet, tablet hybrid panel, desktop split panels.
   useEffect(() => {

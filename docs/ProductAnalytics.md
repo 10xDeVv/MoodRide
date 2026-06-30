@@ -5,9 +5,12 @@ Wayward tracks anonymous product analytics so route quality and usage can be mea
 ## Privacy Contract
 
 - No names, emails, phone numbers, or account identifiers are stored.
-- The browser creates a random anonymous session id in local storage.
-- Events may include job id, route id, route profile, route mode, selected vibes, time budget, route count, generation duration, scenic score, and small non-identifying metadata.
+- The browser creates a random anonymous client id in local storage.
+- The API stores a server-side HMAC hash of that id, not the raw browser id.
+- Events may include job id, route id, route profile, route mode, selected vibes, time budget, coarse time-budget bucket, route count, generation duration, scenic score, and small non-identifying metadata.
 - Precise start coordinates are not sent as analytics metadata.
+- Route-start location is represented as a coarse 0.5-degree grid bucket such as `grid:43.5:-79.5`, which is useful for regional demand without storing exact start points in analytics events.
+- Long-term aggregate analytics are also written to `route_analytics_daily` by day, coarse region, route mode, vibe, and time-budget bucket.
 
 ## Events
 
@@ -32,9 +35,14 @@ Wayward tracks anonymous product analytics so route quality and usage can be mea
 - Routes generated per day/week.
 - Route generation success rate vs failure/unavailable rate.
 - Average generation duration.
+- P95 generation duration.
 - Average route options returned.
+- Percentage of completed jobs returning all three options.
+- Unique anonymous client/device count.
 - Most selected vibes.
 - Most selected route profile.
+- Top coarse route-start regions.
+- Top time-budget buckets.
 - Start-drive click-through rate.
 - Navigation handoff intent.
 - Plan-new-route rate.

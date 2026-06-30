@@ -181,6 +181,7 @@ export interface AnalyticsEventPayload {
   routeMode?: RouteMode | string | null;
   vibes?: string[];
   timeBudgetMinutes?: number | null;
+  regionKey?: string | null;
   routeCount?: number | null;
   status?: string | null;
   durationMs?: number | null;
@@ -205,11 +206,16 @@ export interface AnalyticsSummaryResponse {
   startDriveClicks: number;
   navigationOpens: number;
   planNewRouteClicks: number;
+  uniqueAnonymousClients: number;
   routeSuccessRate: number;
   averageGenerationMs: number;
+  p95GenerationMs: number;
   averageRouteOptions: number;
+  threeOptionRouteRate: number;
   averageScenicScore: number;
   topVibes: AnalyticsCountResponse[];
   selectedProfiles: AnalyticsCountResponse[];
   routeModes: AnalyticsCountResponse[];
+  topRegions: AnalyticsCountResponse[];
+  timeBudgetBuckets: AnalyticsCountResponse[];
 }

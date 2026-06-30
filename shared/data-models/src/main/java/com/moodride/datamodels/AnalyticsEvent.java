@@ -21,6 +21,9 @@ public class AnalyticsEvent {
     @Column(name = "anonymous_session_id", nullable = false, length = 80)
     private String anonymousSessionId;
 
+    @Column(name = "anonymous_client_hash", length = 128)
+    private String anonymousClientHash;
+
     @Column(name = "event_name", nullable = false, length = 80)
     private String eventName;
 
@@ -41,6 +44,12 @@ public class AnalyticsEvent {
 
     @Column(name = "time_budget_minutes")
     private Integer timeBudgetMinutes;
+
+    @Column(name = "time_budget_bucket")
+    private Integer timeBudgetBucket;
+
+    @Column(name = "region_key", length = 40)
+    private String regionKey;
 
     @Column(name = "route_count")
     private Integer routeCount;
@@ -81,6 +90,14 @@ public class AnalyticsEvent {
 
     public void setAnonymousSessionId(String anonymousSessionId) {
         this.anonymousSessionId = anonymousSessionId;
+    }
+
+    public String getAnonymousClientHash() {
+        return anonymousClientHash;
+    }
+
+    public void setAnonymousClientHash(String anonymousClientHash) {
+        this.anonymousClientHash = anonymousClientHash;
     }
 
     public String getEventName() {
@@ -137,6 +154,22 @@ public class AnalyticsEvent {
 
     public void setTimeBudgetMinutes(Integer timeBudgetMinutes) {
         this.timeBudgetMinutes = timeBudgetMinutes;
+    }
+
+    public Integer getTimeBudgetBucket() {
+        return timeBudgetBucket;
+    }
+
+    public void setTimeBudgetBucket(Integer timeBudgetBucket) {
+        this.timeBudgetBucket = timeBudgetBucket;
+    }
+
+    public String getRegionKey() {
+        return regionKey;
+    }
+
+    public void setRegionKey(String regionKey) {
+        this.regionKey = regionKey;
     }
 
     public Integer getRouteCount() {

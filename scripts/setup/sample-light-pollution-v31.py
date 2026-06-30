@@ -12,7 +12,7 @@ gdal.UseExceptions()
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Sample a nighttime-light raster at MoodRide H3 tile points."
+        description="Sample a nighttime-light raster at Wayward H3 tile points."
     )
     parser.add_argument("raster_path")
     parser.add_argument("points_csv")

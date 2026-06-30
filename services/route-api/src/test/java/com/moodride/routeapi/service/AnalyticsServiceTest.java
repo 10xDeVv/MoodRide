@@ -21,6 +21,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
@@ -36,7 +37,7 @@ class AnalyticsServiceTest {
 
     @BeforeEach
     void setUp() {
-        analyticsService = new AnalyticsService(eventRepository, jdbcTemplate, new ObjectMapper());
+        analyticsService = new AnalyticsService(eventRepository, jdbcTemplate, new ObjectMapper(), "test-analytics-secret");
     }
 
     @Test
@@ -52,6 +53,7 @@ class AnalyticsServiceTest {
 
         analyticsService.recordEvent(new AnalyticsEventRequest(
             "anon-session-1",
+            "anon-client-1",
             "Route_Option_Selected",
             jobId,
             routeId,
@@ -59,6 +61,7 @@ class AnalyticsServiceTest {
             "Drive",
             List.of("coastal", "scenic"),
             60,
+            "grid:43.5:-79.5",
             3,
             "COMPLETED",
             12_500L,
@@ -69,7 +72,10 @@ class AnalyticsServiceTest {
         ArgumentCaptor<AnalyticsEvent> saved = ArgumentCaptor.forClass(AnalyticsEvent.class);
         verify(eventRepository).save(saved.capture());
         AnalyticsEvent event = saved.getValue();
-        assertThat(event.getAnonymousSessionId()).isEqualTo("anon-session-1");
+        assertThat(event.getAnonymousSessionId()).isNotEqualTo("anon-session-1");
+        assertThat(event.getAnonymousSessionId()).isNotEqualTo("anon-client-1");
+        assertThat(event.getAnonymousSessionId()).hasSize(64);
+        assertThat(event.getAnonymousClientHash()).isEqualTo(event.getAnonymousSessionId());
         assertThat(event.getEventName()).isEqualTo("route_option_selected");
         assertThat(event.getJobId()).isEqualTo(jobId);
         assertThat(event.getRouteId()).isEqualTo(routeId);
@@ -77,17 +83,21 @@ class AnalyticsServiceTest {
         assertThat(event.getRouteMode()).isEqualTo("drive");
         assertThat(event.getVibesJson()).contains("coastal", "scenic");
         assertThat(event.getTimeBudgetMinutes()).isEqualTo(60);
+        assertThat(event.getTimeBudgetBucket()).isEqualTo(60);
+        assertThat(event.getRegionKey()).isEqualTo("grid:43.5:-79.5");
         assertThat(event.getRouteCount()).isEqualTo(3);
         assertThat(event.getStatus()).isEqualTo("completed");
         assertThat(event.getDurationMs()).isEqualTo(12_500L);
         assertThat(event.getScenicScore()).isEqualTo(0.72);
         assertThat(event.getMetadataJson()).contains("mobile");
+        verify(jdbcTemplate, times(2)).update(any(String.class), any(Object[].class));
     }
 
     @Test
     void recordEventRejectsUnsupportedEventNames() {
         AnalyticsEventRequest request = new AnalyticsEventRequest(
             "anon-session-1",
+            "anon-client-1",
             "unknown_event",
             null,
             null,
@@ -95,6 +105,7 @@ class AnalyticsServiceTest {
             "drive",
             List.of("scenic"),
             60,
+            "grid:43.5:-79.5",
             null,
             null,
             null,

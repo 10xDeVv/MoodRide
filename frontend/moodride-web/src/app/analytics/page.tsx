@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Activity, ArrowLeft, Compass, Gauge, MapPinned, Navigation, RefreshCw, Route, Timer, TrendingUp } from "lucide-react";
+import { Activity, ArrowLeft, BarChart3, Compass, Gauge, Map, MapPinned, Navigation, RefreshCw, Route, Timer, TrendingUp, Users } from "lucide-react";
 import { getAnalyticsSummary } from "@/lib/api";
 import type { AnalyticsCountResponse, AnalyticsSummaryResponse } from "@/lib/types";
 
@@ -27,6 +27,17 @@ function formatDuration(ms: number) {
 
 function labelize(value: string) {
   return value.replace(/_/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function formatRankedName(value: string) {
+  if (value.startsWith("grid:")) {
+    const [, lat, lng] = value.split(":");
+    return `Region ${lat}, ${lng}`;
+  }
+  if (/^\d+$/.test(value)) {
+    return `${value} min`;
+  }
+  return labelize(value);
 }
 
 function formatRange(from: string, to: string) {
@@ -66,11 +77,13 @@ function MetricCard({
 function RankedList({
   title,
   items,
-  emptyLabel
+  emptyLabel,
+  formatName = formatRankedName
 }: {
   title: string;
   items: AnalyticsCountResponse[];
   emptyLabel: string;
+  formatName?: (value: string) => string;
 }) {
   const max = Math.max(...items.map((item) => item.count), 1);
 
@@ -84,7 +97,7 @@ function RankedList({
           {items.map((item) => (
             <div className="analytics-ranked-row" key={item.name}>
               <div className="analytics-ranked-row-top">
-                <span>{labelize(item.name)}</span>
+                <span>{formatName(item.name)}</span>
                 <strong>{item.count}</strong>
               </div>
               <div className="analytics-bar-track" aria-hidden="true">
@@ -101,7 +114,7 @@ function RankedList({
 function AnalyticsSkeleton() {
   return (
     <div className="analytics-grid">
-      {Array.from({ length: 8 }).map((_, index) => (
+      {Array.from({ length: 12 }).map((_, index) => (
         <div className="analytics-card analytics-skeleton" key={index} />
       ))}
     </div>
@@ -202,6 +215,12 @@ export default function AnalyticsPage() {
                 detail={`${formatNumber(summary.generateClicks)} generate clicks`}
               />
               <MetricCard
+                icon={Users}
+                label="Anonymous Clients"
+                value={formatNumber(summary.uniqueAnonymousClients)}
+                detail="Hashed browser/device ids"
+              />
+              <MetricCard
                 icon={TrendingUp}
                 label="Success Rate"
                 value={formatPercent(summary.routeSuccessRate)}
@@ -214,10 +233,22 @@ export default function AnalyticsPage() {
                 detail="Route job completion time"
               />
               <MetricCard
+                icon={BarChart3}
+                label="P95 Generation"
+                value={formatDuration(summary.p95GenerationMs)}
+                detail="Slowest normal route jobs"
+              />
+              <MetricCard
                 icon={Compass}
                 label="Avg Options"
                 value={formatNumber(summary.averageRouteOptions, 1)}
                 detail="Routes returned per success"
+              />
+              <MetricCard
+                icon={Map}
+                label="3-Option Rate"
+                value={formatPercent(summary.threeOptionRouteRate)}
+                detail="Completed jobs with full choice set"
               />
               <MetricCard
                 icon={Gauge}
@@ -249,6 +280,8 @@ export default function AnalyticsPage() {
               <RankedList title="Top Vibes" items={summary.topVibes} emptyLabel="No vibe events yet." />
               <RankedList title="Selected Profiles" items={summary.selectedProfiles} emptyLabel="No route selections yet." />
               <RankedList title="Route Modes" items={summary.routeModes} emptyLabel="No route mode data yet." />
+              <RankedList title="Top Regions" items={summary.topRegions} emptyLabel="No coarse region buckets yet." />
+              <RankedList title="Time Budgets" items={summary.timeBudgetBuckets} emptyLabel="No time budget buckets yet." />
             </div>
           </>
         )}

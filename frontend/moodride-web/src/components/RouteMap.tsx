@@ -246,7 +246,7 @@ function ensureRouteLayers(map: any) {
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function ensureRouteInteractions(map: any, onSelectRef: MutableRefObject<((routeId: string) => void) | undefined>) {
-  if (map.__moodrideRouteInteractionsBound) return;
+  if (map.__waywardRouteInteractionsBound) return;
 
   const handleRouteClick = (event: { features?: Array<{ properties?: { routeId?: string } }> }) => {
     const routeId = event.features?.[0]?.properties?.routeId;
@@ -257,7 +257,7 @@ function ensureRouteInteractions(map: any, onSelectRef: MutableRefObject<((route
   map.on("click", "routes-selected-stroke", handleRouteClick);
   map.on("mouseenter", "routes-alternate-stroke", () => { map.getCanvas().style.cursor = "pointer"; });
   map.on("mouseleave", "routes-alternate-stroke", () => { map.getCanvas().style.cursor = ""; });
-  map.__moodrideRouteInteractionsBound = true;
+  map.__waywardRouteInteractionsBound = true;
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
