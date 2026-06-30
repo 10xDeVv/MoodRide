@@ -137,6 +137,8 @@ class RoutePlannerTest {
                 "edge_urban_pressure",
                 "tree_canopy_score",
                 "scenic_poi_score",
+                "viewpoint_score",
+                "bridge_coastal_score",
                 "strategy_fit_score",
                 "strategy_mismatch_penalty",
                 "water_corridor_share",

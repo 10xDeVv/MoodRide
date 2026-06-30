@@ -133,7 +133,7 @@ public final class VibeCatalog {
         add(profiles, profile(
             "coastal", "Coastal", VibeCategory.CORE_SCENERY,
             weights(0.95, 0.55, 0.25, 0.45, 0.35, 0.25),
-            List.of("water"),
+            List.of("water", "bridge_coastal"),
             List.of(),
             false, true, 0.34, 0.27,
             "Water-led route with shoreline views and scenic pull-offs."
@@ -157,7 +157,7 @@ public final class VibeCatalog {
         add(profiles, profile(
             "riverside", "Riverside", VibeCategory.CORE_SCENERY,
             weights(0.90, 0.70, 0.25, 0.55, 0.35, 0.20),
-            List.of("water", "greenery"),
+            List.of("water", "bridge_coastal", "greenery"),
             List.of(),
             false, true, 0.34, 0.27,
             "Water-following route with green edges and calmer scenery."
@@ -214,7 +214,7 @@ public final class VibeCatalog {
         add(profiles, profile(
             "hidden_gems", "Hidden Gems", VibeCategory.DRIVING_FEEL,
             weights(0.40, 0.70, 0.45, 0.80, 0.55, 0.45),
-            List.of("scenic_poi", "solitude", "curves"),
+            List.of("viewpoint", "scenic_poi", "solitude", "curves"),
             List.of("urban_penalty"),
             true, false, 0.32, 0.26,
             "Less obvious route with scenic stops and more secluded segments."
@@ -255,7 +255,7 @@ public final class VibeCatalog {
         add(profiles, profile(
             "date_night", "Date Night", VibeCategory.TRIP_MOOD,
             weights(0.80, 0.45, 0.50, 0.55, 0.25, 0.55),
-            List.of("water", "elevation", "scenic_poi"),
+            List.of("water", "viewpoint", "elevation", "scenic_poi"),
             List.of(),
             false, false, 0.31, 0.25,
             "View-led route with memorable stops and evening-friendly scenery."
@@ -279,7 +279,7 @@ public final class VibeCatalog {
         add(profiles, profile(
             "photo_run", "Photo Run", VibeCategory.TRIP_MOOD,
             weights(0.80, 0.60, 0.75, 0.45, 0.55, 0.55),
-            List.of("water", "elevation", "scenic_poi"),
+            List.of("water", "viewpoint", "elevation", "scenic_poi"),
             List.of(),
             false, false, 0.31, 0.25,
             "Photo-friendly loop with viewpoints, water, terrain, or scenic stops."
@@ -287,7 +287,7 @@ public final class VibeCatalog {
         add(profiles, profile(
             "photo_worthy", "Photo-Worthy", VibeCategory.TRIP_MOOD,
             weights(0.80, 0.60, 0.75, 0.45, 0.55, 0.55),
-            List.of("water", "elevation", "scenic_poi"),
+            List.of("water", "viewpoint", "elevation", "scenic_poi"),
             List.of(),
             false, false, 0.31, 0.25,
             "Photo-friendly loop with viewpoints, water, terrain, or scenic stops."
@@ -311,7 +311,7 @@ public final class VibeCatalog {
         add(profiles, profile(
             "golden_hour", "Golden Hour", VibeCategory.TRIP_MOOD,
             weights(0.85, 0.45, 0.65, 0.45, 0.25, 0.35),
-            List.of("water", "elevation"),
+            List.of("water", "bridge_coastal", "viewpoint", "elevation"),
             List.of(),
             false, false, 0.31, 0.25,
             "Open-view route tuned for water, ridgelines, and golden-hour scenery."
@@ -319,7 +319,7 @@ public final class VibeCatalog {
         add(profiles, profile(
             "sunset", "Sunset", VibeCategory.TRIP_MOOD,
             weights(0.85, 0.45, 0.65, 0.45, 0.25, 0.35),
-            List.of("water", "elevation"),
+            List.of("water", "bridge_coastal", "viewpoint", "elevation"),
             List.of(),
             false, false, 0.31, 0.25,
             "Open-view route tuned for water, ridgelines, and sunset scenery."
@@ -327,7 +327,7 @@ public final class VibeCatalog {
         add(profiles, profile(
             "sunrise", "Sunrise", VibeCategory.TRIP_MOOD,
             weights(0.75, 0.55, 0.60, 0.55, 0.25, 0.25),
-            List.of("water", "elevation"),
+            List.of("water", "bridge_coastal", "viewpoint", "elevation"),
             List.of(),
             false, false, 0.31, 0.25,
             "Open-view route tuned for early light, water, and elevation."

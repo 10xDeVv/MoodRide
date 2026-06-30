@@ -146,7 +146,9 @@ ALTER TABLE scenic_score_tiles
     ADD COLUMN IF NOT EXISTS water_crossing_score DOUBLE PRECISION NOT NULL DEFAULT 0.0,
     ADD COLUMN IF NOT EXISTS coastal_road_score DOUBLE PRECISION NOT NULL DEFAULT 0.0,
     ADD COLUMN IF NOT EXISTS tree_canopy_score DOUBLE PRECISION NOT NULL DEFAULT 0.0,
-    ADD COLUMN IF NOT EXISTS scenic_poi_score DOUBLE PRECISION NOT NULL DEFAULT 0.0;
+    ADD COLUMN IF NOT EXISTS scenic_poi_score DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+    ADD COLUMN IF NOT EXISTS viewpoint_score DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+    ADD COLUMN IF NOT EXISTS bridge_coastal_score DOUBLE PRECISION NOT NULL DEFAULT 0.0;
 "@
 Invoke-PsqlScalar -Sql $ensureRoadStressSql | Out-Null
 
@@ -175,7 +177,9 @@ SELECT
     water_crossing_score,
     coastal_road_score,
     tree_canopy_score,
-    scenic_poi_score
+    scenic_poi_score,
+    viewpoint_score,
+    bridge_coastal_score
 FROM scenic_score_tiles
 WHERE scoring_version = '$escapedVersion'
 ORDER BY h3_index

@@ -182,6 +182,8 @@ Examples:
 - `curve_score`: derived from winding-road character in road geometry.
 - `poi_score` and `overture_poi_score`: derived from aggregated POI/place data.
 - `scenic_poi_score`: derived from weighted scenic/discovery Overture Places categories such as lookouts, parks, natural features, landmarks, museums, galleries, wineries, and historic places.
+- `viewpoint_score`: focused photo/viewpoint signal derived from higher-intent Overture categories such as lookouts, waterfalls, lighthouses, mountains, beaches, bridges, monuments, and landmarks.
+- `bridge_coastal_score`: bridge, pier, marina, lighthouse, beach, waterfall, and water-road moment signal derived from v3.3 water-road metrics plus a small Overture hint subset.
 - `park_score`: derived from protected or conserved area geometry.
 - `building_density_score`: derived from Overture building footprints.
 - `darkness_score`: derived from light-pollution/nighttime-light data.

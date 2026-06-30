@@ -65,17 +65,20 @@ public class RouteService {
 
     private static final Set<RouteMode> ENABLED_ROUTE_MODES = Set.of(RouteMode.DRIVE);
 
-    private static final Map<String, String> PREFERENCE_KEY_ALIASES = Map.of(
-        "water", "water",
-        "greenery", "greenery",
-        "green", "greenery",
-        "elevation", "elevation",
-        "solitude", "solitude",
-        "open_space", "open_space",
-        "openspace", "open_space",
-        "curves", "curves",
-        "curve", "curves",
-        "poi", "poi"
+    private static final Map<String, String> PREFERENCE_KEY_ALIASES = Map.ofEntries(
+        Map.entry("water", "water"),
+        Map.entry("greenery", "greenery"),
+        Map.entry("green", "greenery"),
+        Map.entry("elevation", "elevation"),
+        Map.entry("solitude", "solitude"),
+        Map.entry("open_space", "open_space"),
+        Map.entry("openspace", "open_space"),
+        Map.entry("curves", "curves"),
+        Map.entry("curve", "curves"),
+        Map.entry("poi", "poi"),
+        Map.entry("scenic_poi", "scenic_poi"),
+        Map.entry("viewpoint", "viewpoint"),
+        Map.entry("bridge_coastal", "bridge_coastal")
     );
 
     private static final List<String> ROUTE_OPTION_PROFILES = List.of(
@@ -92,7 +95,9 @@ public class RouteService {
         "open_space",
         "curves",
         "poi",
-        "scenic_poi"
+        "scenic_poi",
+        "viewpoint",
+        "bridge_coastal"
     );
 
     private static final double CALIBRATION_LEARNING_RATE = 0.04;
@@ -1206,6 +1211,8 @@ public class RouteService {
         double coastalRoad = getMetric(scoreBreakdown, "coastal_road_score");
         double treeCanopy = getMetric(scoreBreakdown, "tree_canopy_score");
         double scenicPoi = getMetric(scoreBreakdown, "scenic_poi_score");
+        double viewpoint = getMetric(scoreBreakdown, "viewpoint_score");
+        double bridgeCoastal = getMetric(scoreBreakdown, "bridge_coastal_score");
         double quietShare = bestMetric(scoreBreakdown, componentAverages, "quiet_corridor_share", "solitude");
         double curveElevationShare = bestMetric(scoreBreakdown, componentAverages, "curve_elevation_corridor_share", "elevation");
         double openSpaceShare = bestMetric(scoreBreakdown, componentAverages, "open_space_corridor_share", "open_space");
@@ -1225,6 +1232,9 @@ public class RouteService {
         if (hasMetric(scoreBreakdown, "coastal_road_score") && coastalRoad >= 0.25) {
             evidence.add("stays on more water-adjacent road corridors");
         }
+        if (hasMetric(scoreBreakdown, "bridge_coastal_score") && bridgeCoastal >= 0.18) {
+            evidence.add("adds bridge, pier, or coastal-road moments");
+        }
         if (hasMetric(scoreBreakdown, "water_crossing_score") && waterCrossing >= 0.20) {
             evidence.add("includes bridge or water-crossing moments");
         }
@@ -1233,6 +1243,9 @@ public class RouteService {
         }
         if (hasMetric(scoreBreakdown, "scenic_poi_score") && scenicPoi >= 0.18) {
             evidence.add("passes stronger scenic stops, landmarks, or natural features");
+        }
+        if (hasMetric(scoreBreakdown, "viewpoint_score") && viewpoint >= 0.18) {
+            evidence.add("has stronger viewpoint or photo-landmark signal");
         }
         if (quietShare >= 0.25) {
             evidence.add("keeps " + formatPercent(quietShare) + " of the drive in quieter corridors");
@@ -1327,7 +1340,11 @@ public class RouteService {
         flags.put("scenic_peak_ok", scenicPeak >= CONTRACT_SCENIC_PEAK_MIN || (route != null && route.getScenicScore() >= 0.65));
 
         if (hasAnyVibe(routeVibes, "coastal", "riverside", "sunset", "golden_hour", "sunrise")) {
-            flags.put("water_share_ok", bestMetric(scoreBreakdown, componentAverages, "water_corridor_share", "water") >= CONTRACT_WATER_SHARE_MIN);
+            double waterSignal = Math.max(
+                bestMetric(scoreBreakdown, componentAverages, "water_corridor_share", "water"),
+                getMetric(scoreBreakdown, "bridge_coastal_score")
+            );
+            flags.put("water_share_ok", waterSignal >= CONTRACT_WATER_SHARE_MIN);
         }
         if (hasAnyVibe(routeVibes, "mountain", "winding_roads", "winding", "adventure")) {
             flags.put("elevation_curve_share_ok", bestMetric(scoreBreakdown, componentAverages, "curve_elevation_corridor_share", "elevation") >= CONTRACT_MOUNTAIN_CURVE_ELEVATION_MIN);
@@ -1341,7 +1358,10 @@ public class RouteService {
         }
         if (hasAnyVibe(routeVibes, "photo_worthy", "photo_run", "photo", "date_night", "hidden_gems")) {
             double photoSignal = Math.max(
-                Math.max(getMetric(scoreBreakdown, "photo_peak_score"), getMetric(scoreBreakdown, "scenic_poi_score")),
+                Math.max(
+                    Math.max(getMetric(scoreBreakdown, "photo_peak_score"), getMetric(scoreBreakdown, "scenic_poi_score")),
+                    getMetric(scoreBreakdown, "viewpoint_score")
+                ),
                 componentAverages == null ? 0.0 : componentAverages.getOrDefault("poi", 0.0)
             );
             flags.put("photo_poi_signal_ok", photoSignal >= CONTRACT_PHOTO_POI_SIGNAL_MIN);
@@ -1514,6 +1534,8 @@ public class RouteService {
             case "curves" -> "curvier roads";
             case "poi" -> "interesting stops";
             case "scenic_poi" -> "scenic stops";
+            case "viewpoint" -> "viewpoints";
+            case "bridge_coastal" -> "bridge and coastal-road moments";
             default -> component == null ? "scenic signals" : component.replace('_', ' ');
         };
     }

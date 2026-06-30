@@ -61,6 +61,7 @@ public class ScenicScoreCalculator {
         if (enrichedDataVersion) {
             poi = Math.max(poi, clamp01(tile.getOverturePoiScore()));
             poi = Math.max(poi, clamp01(tile.getScenicPoiScore()));
+            poi = Math.max(poi, clamp01(tile.getViewpointScore()));
         }
 
         return new ComponentScores(water, greenery, elevation, solitude, curves, poi);
@@ -97,12 +98,13 @@ public class ScenicScoreCalculator {
         double visibleWater = clamp01(tile.getWaterVisibilityScore());
         double crossingWater = clamp01(tile.getWaterCrossingScore());
         double coastalRoad = clamp01(tile.getCoastalRoadScore());
+        double bridgeCoastal = clamp01(tile.getBridgeCoastalScore());
         double visibilityBlend = clamp01(
             (visibleWater * 0.62)
                 + (coastalRoad * 0.26)
                 + (crossingWater * 0.12)
         );
-        return Math.max(baseWater, visibilityBlend);
+        return Math.max(baseWater, Math.max(visibilityBlend, bridgeCoastal));
     }
 
     private double resolveGreeneryScore(ScenicScoreTile tile, boolean componentScoresAreAuthoritative) {

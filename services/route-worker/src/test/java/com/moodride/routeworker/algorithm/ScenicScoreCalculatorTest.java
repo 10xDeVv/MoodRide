@@ -116,6 +116,36 @@ class ScenicScoreCalculatorTest {
         assertThat(scores.poi()).isEqualTo(0.82);
     }
 
+    @Test
+    void viewpointCanLiftEnrichedPoiScore() {
+        ScenicScoreTile tile = new ScenicScoreTile();
+        tile.setScoringVersion("3.6-viewpoint-calibration");
+        tile.setPoiScore(0.12);
+        tile.setPoiDensity(0.12);
+        tile.setScenicPoiScore(0.40);
+        tile.setViewpointScore(0.88);
+
+        ComponentScores scores = calculator.componentScores(tile);
+
+        assertThat(scores.poi()).isEqualTo(0.88);
+    }
+
+    @Test
+    void bridgeCoastalCanLiftEnrichedWaterScore() {
+        ScenicScoreTile tile = new ScenicScoreTile();
+        tile.setScoringVersion("3.7-bridge-coastal-calibration");
+        tile.setWaterScore(0.10);
+        tile.setWaterProximity(0.10);
+        tile.setWaterVisibilityScore(0.10);
+        tile.setCoastalRoadScore(0.10);
+        tile.setWaterCrossingScore(0.10);
+        tile.setBridgeCoastalScore(0.76);
+
+        ComponentScores scores = calculator.componentScores(tile);
+
+        assertThat(scores.water()).isEqualTo(0.76);
+    }
+
     private static ScenicScoreTile enrichedTileWithRoadStress(double roadStressScore) {
         ScenicScoreTile tile = new ScenicScoreTile();
         tile.setScoringVersion("3.2-road-stress-calibration");

@@ -165,18 +165,40 @@ Scenic-POI 3.5 release train:
   -ExpectedScoringVersion "3.5-scenic-poi-calibration"
 ```
 
+Viewpoint 3.6 release train:
+
+```powershell
+./scripts/deploy/run_nationwide_scenic_recompute.ps1 `
+  -SqlScriptPath "scripts/setup/data-quality-enrichment-v36.sql" `
+  -ChunkSize 50000 `
+  -SourceScoringVersion "3.5-scenic-poi-calibration" `
+  -ExpectedScoringVersion "3.6-viewpoint-calibration"
+```
+
+Bridge/coastal 3.7 release train:
+
+```powershell
+./scripts/deploy/run_nationwide_scenic_recompute.ps1 `
+  -SqlScriptPath "scripts/setup/data-quality-enrichment-v37.sql" `
+  -ChunkSize 50000 `
+  -SourceScoringVersion "3.6-viewpoint-calibration" `
+  -ExpectedScoringVersion "3.7-bridge-coastal-calibration"
+```
+
 This executes the selected versioned scenic scoring SQL over your local `moodride` database.
 
 Important behavior:
 
 - Use the SQL script that matches the release train you are publishing.
 - Current release train:
-  - `scripts/setup/data-quality-enrichment-v31.sql` for `3.1-darkness-urban-penalty-calibration`
+  - `scripts/setup/data-quality-enrichment-v37.sql` for `3.7-bridge-coastal-calibration`
 - Next release train in development:
-  - `scripts/setup/data-quality-enrichment-v35.sql` for `3.5-scenic-poi-calibration`
+  - seasonal suitability / access warning metadata
 - `data-quality-enrichment-v33.sql` requires non-empty `natural_earth_Water_Bodies`; re-import water geometry first if the audit reports 0 rows.
 - `data-quality-enrichment-v34.sql` requires `landcover_raster` or `nlcd_land_cover_cells`; it derives a land-cover tree-canopy proxy, not true canopy height.
 - `data-quality-enrichment-v35.sql` requires `overture_places`; it derives scenic/discovery place signal from weighted Overture categories, not from generic POI density.
+- `data-quality-enrichment-v36.sql` requires `overture_places`; it derives a focused viewpoint/photo-landmark signal.
+- `data-quality-enrichment-v37.sql` requires v3.3 water-road metrics and `overture_places`; it derives bridge/coastal-road-moment signal without re-running the full water spatial scan.
 - Older versioned SQL files are kept only for reproducing previous scenic releases.
 - The run is resumable. Re-running after interruption continues from remaining tiles not already at the expected scoring version.
 
@@ -184,8 +206,8 @@ Important behavior:
 
 ```powershell
 ./scripts/deploy/publish_scenic_release.ps1 `
-  -ScoringVersion "3.5-scenic-poi-calibration" `
-  -ReleaseTag "scenic-3.5-scenic-poi-calibration-$(Get-Date -Format 'yyyyMMdd-HHmm')" `
+  -ScoringVersion "3.7-bridge-coastal-calibration" `
+  -ReleaseTag "scenic-3.7-bridge-coastal-calibration-$(Get-Date -Format 'yyyyMMdd-HHmm')" `
   -Repo "10xDeVv/Wayward"
 ```
 
@@ -198,8 +220,8 @@ This uploads:
 
 Run workflow `.github/workflows/deploy-scenic-release.yml` with:
 
-- `release_tag`: example `scenic-3.5-scenic-poi-calibration-20260629-1230`
-- `scoring_version`: example `3.5-scenic-poi-calibration`
+- `release_tag`: example `scenic-3.7-bridge-coastal-calibration-20260630-1230`
+- `scoring_version`: example `3.7-bridge-coastal-calibration`
 - `asset_name`: optional (defaults from `scoring_version`)
 
 The workflow downloads the scenic asset, uploads it to VM, applies score updates into `scenic_score_tiles`, and restarts `route-api` + `route-worker`.

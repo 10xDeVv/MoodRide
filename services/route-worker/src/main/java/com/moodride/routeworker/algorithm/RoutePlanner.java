@@ -1037,6 +1037,8 @@ public class RoutePlanner {
             case "curves" -> components.curves();
             case "poi" -> components.poi();
             case "scenic_poi" -> clamp01(tile.getScenicPoiScore());
+            case "viewpoint" -> clamp01(tile.getViewpointScore());
+            case "bridge_coastal" -> clamp01(tile.getBridgeCoastalScore());
             case "tree_canopy" -> clamp01(tile.getTreeCanopyScore());
             case "open_space" -> openSpaceScore(tile, components);
             default -> 0.0;
@@ -1052,6 +1054,8 @@ public class RoutePlanner {
             case "curves" -> weights.curves();
             case "poi" -> weights.poi();
             case "scenic_poi" -> weights.poi();
+            case "viewpoint" -> Math.max(weights.poi(), weights.elevation());
+            case "bridge_coastal" -> Math.max(weights.water(), weights.poi());
             case "tree_canopy" -> Math.max(weights.greenery(), weights.solitude());
             case "open_space" -> Math.max(weights.solitude(), weights.curves());
             default -> 0.0;
@@ -1362,12 +1366,16 @@ public class RoutePlanner {
         double vibeFit = vibeFitScore(tile, vibeProfile);
         double lowUrban = 1.0 - computeUrbanPressureScore(List.of(tile));
         double lowRoadDensity = 1.0 - clamp01(tile.getRoadDensity());
-        double photoPeak = Math.max(components.water(), Math.max(components.elevation(), components.poi()));
+        double photoPeak = Math.max(
+            Math.max(components.water(), components.elevation()),
+            Math.max(components.poi(), clamp01(tile.getViewpointScore()))
+        );
         return clamp01(switch (geometryStrategy) {
             case WATER_FOLLOWING -> (components.water() * 0.58)
                 + (components.greenery() * 0.12)
-                + (vibeFit * 0.20)
-                + (lowUrban * 0.10);
+                + (clamp01(tile.getBridgeCoastalScore()) * 0.08)
+                + (vibeFit * 0.14)
+                + (lowUrban * 0.08);
             case OPEN_SPACE_ESCAPE -> (openSpaceScore(tile, components) * 0.55)
                 + (components.solitude() * 0.20)
                 + (lowUrban * 0.15)
@@ -1376,10 +1384,11 @@ public class RoutePlanner {
                 + (components.greenery() * 0.20)
                 + (lowUrban * 0.22)
                 + (clamp01(tile.getDarknessScore()) * 0.10);
-            case PHOTO_PEAKS -> (photoPeak * 0.48)
-                + (components.poi() * 0.18)
-                + (vibeFit * 0.22)
-                + (candidate.scenicScore() * 0.12);
+            case PHOTO_PEAKS -> (photoPeak * 0.44)
+                + (components.poi() * 0.16)
+                + (clamp01(tile.getViewpointScore()) * 0.18)
+                + (vibeFit * 0.14)
+                + (candidate.scenicScore() * 0.08);
             case CURVY_ELEVATION -> (components.curves() * 0.45)
                 + (components.elevation() * 0.30)
                 + (vibeFit * 0.15)
@@ -1849,6 +1858,8 @@ public class RoutePlanner {
         double coastalRoadScore = computeCoastalRoadScore(tiles);
         double treeCanopyScore = computeTreeCanopyScore(tiles);
         double scenicPoiScore = computeScenicPoiScore(tiles);
+        double viewpointScore = computeViewpointScore(tiles);
+        double bridgeCoastalScore = computeBridgeCoastalScore(tiles);
         double edgePenalty = computeStartEndPenalty(tiles, preferences);
         StrategyCorridorMetrics strategyMetrics = computeStrategyCorridorMetrics(tiles, landscapeScores, geometryStrategy);
 
@@ -1877,6 +1888,8 @@ public class RoutePlanner {
         breakdown.put("coastal_road_score", coastalRoadScore);
         breakdown.put("tree_canopy_score", treeCanopyScore);
         breakdown.put("scenic_poi_score", scenicPoiScore);
+        breakdown.put("viewpoint_score", viewpointScore);
+        breakdown.put("bridge_coastal_score", bridgeCoastalScore);
         breakdown.put("start_end_penalty", edgePenalty);
         breakdown.put("corridor_urban_pressure", urbanPenalty);
         breakdown.put("edge_urban_pressure", edgePenalty);
@@ -1918,6 +1931,8 @@ public class RoutePlanner {
         breakdown.put("coastal_road_score", 0.0);
         breakdown.put("tree_canopy_score", 0.0);
         breakdown.put("scenic_poi_score", 0.0);
+        breakdown.put("viewpoint_score", 0.0);
+        breakdown.put("bridge_coastal_score", 0.0);
         breakdown.put("start_end_penalty", 0.0);
         breakdown.put("corridor_urban_pressure", 0.0);
         breakdown.put("edge_urban_pressure", 0.0);
@@ -1998,9 +2013,11 @@ public class RoutePlanner {
             double urbanPressure = computeUrbanPressureScore(List.of(tile));
             double openSpace = openSpaceScore(tile, components);
             double scenicPoi = clamp01(tile.getScenicPoiScore());
+            double viewpoint = clamp01(tile.getViewpointScore());
+            double bridgeCoastal = clamp01(tile.getBridgeCoastalScore());
             double photoSignal = Math.max(
                 Math.max(components.water(), components.elevation()),
-                Math.max(components.poi(), scenicPoi)
+                Math.max(Math.max(components.poi(), scenicPoi), viewpoint)
             );
             double curveElevationSignal = Math.max(components.curves(), components.elevation());
 
@@ -2019,7 +2036,7 @@ public class RoutePlanner {
             double quietMembership = gradedMembership(quietSignal, 0.40, 0.72);
             double curveElevationMembership = gradedMembership(curveElevationSignal, 0.38, 0.70);
 
-            waterShare += gradedMembership(components.water(), 0.38, 0.70);
+            waterShare += gradedMembership(Math.max(components.water(), bridgeCoastal), 0.38, 0.70);
             openShare += openMembership;
             quietShare += quietMembership;
             curveElevationShare += curveElevationMembership;
@@ -2390,6 +2407,30 @@ public class RoutePlanner {
         return clamp01(
             tiles.stream()
                 .mapToDouble(tile -> clamp01(tile.getScenicPoiScore()))
+                .average()
+                .orElse(0.0)
+        );
+    }
+
+    private double computeViewpointScore(List<ScenicScoreTile> tiles) {
+        if (tiles == null || tiles.isEmpty()) {
+            return 0.0;
+        }
+        return clamp01(
+            tiles.stream()
+                .mapToDouble(tile -> clamp01(tile.getViewpointScore()))
+                .average()
+                .orElse(0.0)
+        );
+    }
+
+    private double computeBridgeCoastalScore(List<ScenicScoreTile> tiles) {
+        if (tiles == null || tiles.isEmpty()) {
+            return 0.0;
+        }
+        return clamp01(
+            tiles.stream()
+                .mapToDouble(tile -> clamp01(tile.getBridgeCoastalScore()))
                 .average()
                 .orElse(0.0)
         );

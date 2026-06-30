@@ -101,6 +101,12 @@ public class ScenicScoreTile {
     @Column(name = "scenic_poi_score", nullable = false)
     private double scenicPoiScore;
 
+    @Column(name = "viewpoint_score", nullable = false)
+    private double viewpointScore;
+
+    @Column(name = "bridge_coastal_score", nullable = false)
+    private double bridgeCoastalScore;
+
     @Column(nullable = false)
     private Instant lastScored;
 
@@ -237,6 +243,12 @@ public class ScenicScoreTile {
 
     public double getScenicPoiScore() { return scenicPoiScore; }
     public void setScenicPoiScore(double scenicPoiScore) { this.scenicPoiScore = scenicPoiScore; }
+
+    public double getViewpointScore() { return viewpointScore; }
+    public void setViewpointScore(double viewpointScore) { this.viewpointScore = viewpointScore; }
+
+    public double getBridgeCoastalScore() { return bridgeCoastalScore; }
+    public void setBridgeCoastalScore(double bridgeCoastalScore) { this.bridgeCoastalScore = bridgeCoastalScore; }
 
     public double getTrafficSignalScore() { return trafficSignalScore; }
     public void setTrafficSignalScore(double trafficSignalScore) { this.trafficSignalScore = trafficSignalScore; }

@@ -1,6 +1,6 @@
 # Wayward Data Pipeline
 
-Last reconciled: 2026-06-29
+Last reconciled: 2026-06-30
 
 Wayward route generation depends on precomputed scenic tile scores. Runtime services read those scores from PostGIS; they do not recompute raw geospatial signals during a user request.
 
@@ -8,11 +8,11 @@ Wayward route generation depends on precomputed scenic tile scores. Runtime serv
 
 Current local scenic baseline:
 
-- `3.4-tree-canopy-calibration`
+- `3.7-bridge-coastal-calibration`
 
 Next scenic scoring candidate:
 
-- `3.5-scenic-poi-calibration`
+- seasonal suitability / access warnings
 
 ## What Gets Precomputed
 
@@ -35,6 +35,8 @@ Each row in `scenic_score_tiles` is an H3 tile with a scenic feature vector:
 - `coastal_road_score`
 - `tree_canopy_score`
 - `scenic_poi_score`
+- `viewpoint_score`
+- `bridge_coastal_score`
 
 `hybrid_osrm_v2` samples these tile scores along returned OSRM route corridors.
 
@@ -58,8 +60,9 @@ Current status:
 - OSM road class and surface are represented in `3.2` through `road_stress_score`.
 - Water visibility and bridge/coastal-road detection are represented in `3.3` through `water_visibility_score`, `water_crossing_score`, and `coastal_road_score`.
 - Tree canopy is represented in `3.4` through `tree_canopy_score`, a land-cover derived canopy proxy.
-- Scenic places, landmarks, natural features, and discovery stops are the next `3.5` implementation target through `scenic_poi_score`.
-- OSM viewpoints/peaks can improve photo-worthy routes later, but current local coverage is sparse; v3.5 uses weighted Overture Places categories as the first scenic-place signal.
+- Scenic places, landmarks, natural features, and discovery stops are represented in `3.5` through `scenic_poi_score`.
+- Viewpoints and photo-landmark signals are represented in `3.6` through `viewpoint_score`, using weighted Overture categories because raw OSM viewpoint tables are not present locally.
+- Bridge/coastal-road moments are represented in `3.7` through `bridge_coastal_score`, combining existing water-road metrics with Overture bridge, pier, marina, lighthouse, beach, and waterfall hints.
 - Seasonal suitability should start as warnings/metadata because OSM seasonal/access tags can be sparse and inconsistent.
 
 Recommended data-quality priority:
@@ -67,8 +70,10 @@ Recommended data-quality priority:
 1. Road stress / road class. Implemented and published as `3.2-road-stress-calibration`.
 2. Water visibility and bridge/coastal-road detection. Implemented in code/SQL as the `3.3` release candidate; run only after water geometry is present.
 3. Tree canopy proxy. Implemented in code/SQL as the `3.4` release candidate from land-cover classes.
-4. Scenic POIs / viewpoints. Implemented in code/SQL as the `3.5` release candidate from weighted Overture scenic-place categories.
-5. Seasonal suitability warnings.
+4. Scenic POIs / discovery stops. Implemented in code/SQL as the `3.5` release candidate from weighted Overture scenic-place categories.
+5. Viewpoints / photo landmarks. Implemented in code/SQL as the `3.6` release candidate.
+6. Bridge/coastal-road moments. Implemented in code/SQL as the `3.7` release candidate.
+7. Seasonal suitability warnings.
 
 Run the read-only audit before publishing any new scenic scoring SQL:
 
@@ -104,6 +109,8 @@ Core scripts:
 - `scripts/setup/data-quality-enrichment-v33.sql`
 - `scripts/setup/data-quality-enrichment-v34.sql`
 - `scripts/setup/data-quality-enrichment-v35.sql`
+- `scripts/setup/data-quality-enrichment-v36.sql`
+- `scripts/setup/data-quality-enrichment-v37.sql`
 
 Road-stress v3.2 recompute:
 
@@ -176,14 +183,38 @@ Scenic-POI v3.5 recompute:
 
 Runtime uses this for photo-worthy, date-night, and hidden-gems style explanations/contracts. It is not yet a dedicated OSM viewpoint or viewshed model.
 
+Viewpoint v3.6 recompute:
+
+```powershell
+./scripts/deploy/run_nationwide_scenic_recompute.ps1 `
+  -SqlScriptPath "scripts/setup/data-quality-enrichment-v36.sql" `
+  -ChunkSize 50000 `
+  -SourceScoringVersion "3.5-scenic-poi-calibration" `
+  -ExpectedScoringVersion "3.6-viewpoint-calibration"
+```
+
+`data-quality-enrichment-v36.sql` derives `viewpoint_score` from higher-intent photo/view categories such as lookouts, waterfalls, lighthouses, mountains, beaches, piers, bridges, monuments, and landmarks. Runtime uses it for photo-worthy, date-night, hidden-gems, and sunset/golden-hour explanations and contract checks.
+
+Bridge/coastal v3.7 recompute:
+
+```powershell
+./scripts/deploy/run_nationwide_scenic_recompute.ps1 `
+  -SqlScriptPath "scripts/setup/data-quality-enrichment-v37.sql" `
+  -ChunkSize 50000 `
+  -SourceScoringVersion "3.6-viewpoint-calibration" `
+  -ExpectedScoringVersion "3.7-bridge-coastal-calibration"
+```
+
+`data-quality-enrichment-v37.sql` derives `bridge_coastal_score` from the existing v3.3 water-road scores plus a small Overture bridge/coastal-place subset. It is intentionally fast because it avoids re-running the full road-water spatial scan.
+
 ## Scenic Release Flow
 
 Publish the scenic tile artifact:
 
 ```powershell
 ./scripts/deploy/publish_scenic_release.ps1 `
-  -ScoringVersion "3.5-scenic-poi-calibration" `
-  -ReleaseTag "scenic-3.5-scenic-poi-calibration-$(Get-Date -Format 'yyyyMMdd-HHmm')" `
+  -ScoringVersion "3.7-bridge-coastal-calibration" `
+  -ReleaseTag "scenic-3.7-bridge-coastal-calibration-$(Get-Date -Format 'yyyyMMdd-HHmm')" `
   -Repo "10xDeVv/Wayward"
 ```
 
