@@ -196,6 +196,10 @@ Examples:
 
 Each H3 tile is a precomputed scenic feature vector. Runtime routing samples those vectors; it does not recompute land cover, DEM, Overture buildings, darkness, scenic-place categories, or park geometry from scratch.
 
+Runtime scenic tile reads in the route-worker go through `ScenicTileLookupService`, not direct repository calls. The service performs batch lookup, keeps a bounded local in-memory cache, reads/writes the existing Redis `scenicTiles` cache, and falls back to Postgres for misses. Corridor sampling and nearby tile selection share this lookup path so repeated H3 reads during one route generation do not keep re-querying Postgres.
+
+Waypoint anchors are road-aware where road data is available. Candidate H3 tiles still provide the scenic intent, but `RoadSegmentAnchorService` asks PostGIS for nearby road segments and picks a low-stress, useful road-shape anchor point near the tile. If no road segment can be found, the planner falls back to the H3 tile centroid. This keeps OSRM waypoints closer to real drivable roads without making road-anchor data a hard dependency.
+
 ## What Scenic Means
 
 Wayward should treat `scenic` as a balanced default, not a universal truth. A user may mean:
@@ -243,4 +247,6 @@ For the current release, `hybrid_osrm_v2` is functionally complete as Wayward's 
 
 - `h3-resolution`, `tile-selection-ring-*`, `tile-selection-limit`, `sector-count`, `corridor-sample-meters`, and `max-duration-overrun-ratio` affect v2.
 - OSRM timeout and base URL settings still matter because v2 depends on OSRM Trip for candidate geometry.
+- Route-worker scenic tile lookup is read-through cached locally and in Redis; cache invalidation events clear both layers.
+- Route-worker waypoint anchors prefer nearby road segments and fall back to H3 centroids when road geometry is unavailable.
 - Route-worker `moodride.cache.graph-warmup.enabled` defaults to `false`. That warmup path loads the legacy internal road graph and is not needed by `hybrid_osrm_v2`, which delegates road solving to OSRM.

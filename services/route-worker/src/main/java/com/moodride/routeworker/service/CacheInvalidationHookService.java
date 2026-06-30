@@ -13,15 +13,21 @@ public class CacheInvalidationHookService {
 
     private final CacheManager cacheManager;
     private final GraphService graphService;
+    private final ScenicTileLookupService scenicTileLookupService;
+    private final RoadSegmentAnchorService roadSegmentAnchorService;
     private final WorkerCacheMetricsService metricsService;
 
     public CacheInvalidationHookService(
             CacheManager cacheManager,
             GraphService graphService,
+            ScenicTileLookupService scenicTileLookupService,
+            RoadSegmentAnchorService roadSegmentAnchorService,
             WorkerCacheMetricsService metricsService
     ) {
         this.cacheManager = cacheManager;
         this.graphService = graphService;
+        this.scenicTileLookupService = scenicTileLookupService;
+        this.roadSegmentAnchorService = roadSegmentAnchorService;
         this.metricsService = metricsService;
     }
 
@@ -36,9 +42,12 @@ public class CacheInvalidationHookService {
                 }
                 if (segments != null) {
                     segments.evict(CacheKeySchema.segmentMeta(h3));
+                    segments.evict(CacheKeySchema.roadAnchor(h3));
                 }
                 count++;
             }
+            scenicTileLookupService.evict(h3Indexes);
+            roadSegmentAnchorService.evict(h3Indexes);
         }
         graphService.invalidateCache();
         metricsService.invalidate(CacheNames.SCENIC_TILES, count);

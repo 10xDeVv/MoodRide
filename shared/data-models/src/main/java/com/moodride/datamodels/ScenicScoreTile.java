@@ -2,6 +2,7 @@ package com.moodride.datamodels;
 
 import jakarta.persistence.*;
 import org.locationtech.jts.geom.Polygon;
+import java.io.Serializable;
 import java.time.Instant;
 
 /**
@@ -14,7 +15,8 @@ import java.time.Instant;
     @Index(name = "idx_scenic_score", columnList = "scenicScore"),
     @Index(name = "idx_scenic_geom", columnList = "geometry")
 })
-public class ScenicScoreTile {
+public class ScenicScoreTile implements Serializable {
+    private static final long serialVersionUID = 1L;
     private static final double PARK_SCORE_MULTIPLIER = 0.30;
 
     @Id

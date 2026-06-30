@@ -15,8 +15,9 @@ import com.moodride.routeworker.config.ApplicationConfiguration;
 import com.moodride.routeworker.graph.RoadNode;
 import com.moodride.routeworker.repository.RouteDurationCalibrationRepository;
 import com.moodride.routeworker.repository.RouteWeightCalibrationRepository;
-import com.moodride.routeworker.repository.ScenicScoreTileRepository;
 import com.moodride.routeworker.service.OsrmTripClient;
+import com.moodride.routeworker.service.RoadSegmentAnchorService;
+import com.moodride.routeworker.service.ScenicTileLookupService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -104,7 +105,8 @@ public class RoutePlanner {
         "poi", "poi"
     );
 
-    private final ScenicScoreTileRepository scenicScoreTileRepository;
+    private final ScenicTileLookupService scenicTileLookupService;
+    private final RoadSegmentAnchorService roadSegmentAnchorService;
     private final RouteWeightCalibrationRepository routeWeightCalibrationRepository;
     private final RouteDurationCalibrationRepository routeDurationCalibrationRepository;
     private final OsrmTripClient osrmTripClient;
@@ -112,14 +114,16 @@ public class RoutePlanner {
     private final ObjectMapper objectMapper;
     private final ScenicScoreCalculator scenicScoreCalculator;
 
-    public RoutePlanner(ScenicScoreTileRepository scenicScoreTileRepository,
+    public RoutePlanner(ScenicTileLookupService scenicTileLookupService,
+                        RoadSegmentAnchorService roadSegmentAnchorService,
                         RouteWeightCalibrationRepository routeWeightCalibrationRepository,
                         RouteDurationCalibrationRepository routeDurationCalibrationRepository,
                         OsrmTripClient osrmTripClient,
                         ApplicationConfiguration config,
                         ObjectMapper objectMapper,
                         ScenicScoreCalculator scenicScoreCalculator) {
-        this.scenicScoreTileRepository = scenicScoreTileRepository;
+        this.scenicTileLookupService = scenicTileLookupService;
+        this.roadSegmentAnchorService = roadSegmentAnchorService;
         this.routeWeightCalibrationRepository = routeWeightCalibrationRepository;
         this.routeDurationCalibrationRepository = routeDurationCalibrationRepository;
         this.osrmTripClient = osrmTripClient;
@@ -918,10 +922,11 @@ public class RoutePlanner {
                     tile.getGeometry().getCentroid().getY(),
                     tile.getGeometry().getCentroid().getX()
                 );
-                double distanceKm = distanceKm(start, tileCenter);
+                RoadNode anchor = roadSegmentAnchorService.anchorFor(tile, tileCenter);
+                double distanceKm = distanceKm(start, anchor);
                 double score = scoreTile(tile, preferences);
                 double selectionScore = tileSelectionScore(tile, vibeProfile, score, distanceKm, targetRadiusKm);
-                return new TileCandidate(tile, tileCenter, score, selectionScore, distanceKm);
+                return new TileCandidate(tile, anchor, score, selectionScore, distanceKm);
             })
             .sorted(Comparator.comparingDouble(TileCandidate::selectionScore).reversed())
             .limit(Math.max(20, config.getTileSelectionLimit()))
@@ -1117,7 +1122,7 @@ public class RoutePlanner {
         if (nearbyCells.isEmpty()) {
             return List.of();
         }
-        return scenicScoreTileRepository.findByH3IndexIn(nearbyCells);
+        return scenicTileLookupService.findByH3Indexes(nearbyCells);
     }
 
     private int determineRingSize(int timeBudgetMinutes) {
@@ -2546,7 +2551,7 @@ public class RoutePlanner {
         if (h3Indexes.isEmpty()) {
             return new CorridorTileCoverage(List.of());
         }
-        List<ScenicScoreTile> fetchedTiles = scenicScoreTileRepository.findByH3IndexIn(h3Indexes);
+        List<ScenicScoreTile> fetchedTiles = scenicTileLookupService.findByH3Indexes(h3Indexes);
         if (fetchedTiles.isEmpty()) {
             return new CorridorTileCoverage(List.of());
         }

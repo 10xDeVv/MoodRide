@@ -1,5 +1,6 @@
 package com.moodride.datamodels;
 
+import java.io.Serializable;
 import java.time.Instant;
 
 import org.locationtech.jts.geom.LineString;
@@ -22,7 +23,8 @@ import jakarta.persistence.Transient;
     @Index(name = "idx_road_geom", columnList = "geometry"),
     @Index(name = "idx_road_h3_tile", columnList = "h3TileIndex")
 })
-public class RoadSegment {
+public class RoadSegment implements Serializable {
+    private static final long serialVersionUID = 1L;
 
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)

@@ -20,6 +20,10 @@ public final class CacheKeySchema {
         return "segment:meta:" + h3Index;
     }
 
+    public static String roadAnchor(String h3Index) {
+        return "segment:anchor:" + h3Index;
+    }
+
     public static String regionalPopularity(String regionKey) {
         return "popular:routes:" + regionKey.toLowerCase(Locale.ROOT);
     }

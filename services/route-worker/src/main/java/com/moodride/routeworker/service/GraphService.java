@@ -7,7 +7,6 @@ import com.moodride.datamodels.scoring.ScenicScoreCalculator;
 import com.moodride.geo.VibeCatalog;
 import com.moodride.routeworker.graph.RoadNetworkGraph;
 import com.moodride.routeworker.repository.RoadSegmentRepository;
-import com.moodride.routeworker.repository.ScenicScoreTileRepository;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -22,16 +21,16 @@ public class GraphService {
     private static final int MAX_CACHED_GRAPHS = 16;
     
     private final RoadSegmentRepository roadSegmentRepository;
-    private final ScenicScoreTileRepository scenicScoreTileRepository;
+    private final ScenicTileLookupService scenicTileLookupService;
     private final ScenicScoreCalculator scenicScoreCalculator;
     private final PreferenceWeights defaultPreferences;
     private final Map<String, RoadNetworkGraph> cachedGraphs = new LinkedHashMap<>(16, 0.75f, true);
     
     public GraphService(RoadSegmentRepository roadSegmentRepository,
-                        ScenicScoreTileRepository scenicScoreTileRepository,
+                        ScenicTileLookupService scenicTileLookupService,
                         ScenicScoreCalculator scenicScoreCalculator) {
         this.roadSegmentRepository = roadSegmentRepository;
-        this.scenicScoreTileRepository = scenicScoreTileRepository;
+        this.scenicTileLookupService = scenicTileLookupService;
         this.scenicScoreCalculator = scenicScoreCalculator;
         VibeCatalog.ComponentWeights defaults = VibeCatalog.weightsFor(VibeCatalog.defaultVibe());
         this.defaultPreferences = new PreferenceWeights(
@@ -61,7 +60,7 @@ public class GraphService {
                 .filter(index -> index != null && !index.isBlank())
                 .collect(Collectors.toSet());
 
-        Map<String, Double> scenicScoresByTile = scenicScoreTileRepository.findByH3IndexIn(h3Indexes)
+        Map<String, Double> scenicScoresByTile = scenicTileLookupService.findByH3Indexes(h3Indexes)
                 .stream()
                 .collect(Collectors.toMap(
                         ScenicScoreTile::getH3Index,

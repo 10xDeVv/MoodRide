@@ -12,7 +12,8 @@ import com.moodride.routeworker.config.ApplicationConfiguration;
 import com.moodride.routeworker.graph.RoadNode;
 import com.moodride.routeworker.repository.RouteWeightCalibrationRepository;
 import com.moodride.routeworker.repository.RouteDurationCalibrationRepository;
-import com.moodride.routeworker.repository.ScenicScoreTileRepository;
+import com.moodride.routeworker.service.RoadSegmentAnchorService;
+import com.moodride.routeworker.service.ScenicTileLookupService;
 import com.moodride.routeworker.service.OsrmTripClient;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -46,7 +47,10 @@ import static org.mockito.Mockito.when;
 class RoutePlannerTest {
 
     @Mock
-    private ScenicScoreTileRepository scenicScoreTileRepository;
+    private ScenicTileLookupService scenicTileLookupService;
+
+    @Mock
+    private RoadSegmentAnchorService roadSegmentAnchorService;
 
     @Mock
     private OsrmTripClient osrmTripClient;
@@ -70,7 +74,8 @@ class RoutePlannerTest {
         config.setCorridorSampleMeters(500);
         config.setMaxDurationOverrunRatio(1.0);
         routePlanner = new RoutePlanner(
-            scenicScoreTileRepository,
+            scenicTileLookupService,
+            roadSegmentAnchorService,
             routeWeightCalibrationRepository,
             routeDurationCalibrationRepository,
             osrmTripClient,
@@ -80,11 +85,15 @@ class RoutePlannerTest {
         );
         lenient().when(routeWeightCalibrationRepository.findByVibeIn(anyCollection())).thenReturn(List.of());
         lenient().when(routeDurationCalibrationRepository.findById(org.mockito.ArgumentMatchers.anyString())).thenReturn(Optional.empty());
+        lenient().when(roadSegmentAnchorService.anchorFor(
+            org.mockito.ArgumentMatchers.any(ScenicScoreTile.class),
+            org.mockito.ArgumentMatchers.any(RoadNode.class)
+        )).thenAnswer(invocation -> invocation.getArgument(1));
     }
 
     @Test
     void generateRouteRejectsMissingScenicDataForRequestedVibe() {
-        when(scenicScoreTileRepository.findByH3IndexIn(anyCollection())).thenReturn(List.of());
+        when(scenicTileLookupService.findByH3Indexes(anyCollection())).thenReturn(List.of());
 
         assertThatThrownBy(() -> routePlanner.generateRoute(sampleJob(45)))
             .isInstanceOf(NoFeasibleRouteException.class)
@@ -93,7 +102,7 @@ class RoutePlannerTest {
 
     @Test
     void generateRouteRejectsOverBudgetHybridCandidatesWhenNoInBudgetOptionExists() {
-        when(scenicScoreTileRepository.findByH3IndexIn(anyCollection())).thenReturn(highScenicTilesAroundStart());
+        when(scenicTileLookupService.findByH3Indexes(anyCollection())).thenReturn(highScenicTilesAroundStart());
         when(osrmTripClient.requestRoundTrip(anyList(), eq(RouteMode.DRIVE))).thenReturn(Optional.of(defaultTrip(22)));
 
         assertThatThrownBy(() -> routePlanner.generateRoute(sampleJob(15)))
@@ -103,7 +112,7 @@ class RoutePlannerTest {
 
     @Test
     void generateRouteThrowsWhenNoHybridCandidateCanBeProduced() {
-        when(scenicScoreTileRepository.findByH3IndexIn(anyCollection())).thenReturn(highScenicTilesAroundStart());
+        when(scenicTileLookupService.findByH3Indexes(anyCollection())).thenReturn(highScenicTilesAroundStart());
         when(osrmTripClient.requestRoundTrip(anyList(), eq(RouteMode.DRIVE))).thenReturn(Optional.empty());
 
         assertThatThrownBy(() -> routePlanner.generateRoute(sampleJob(45)))
@@ -113,7 +122,7 @@ class RoutePlannerTest {
 
     @Test
     void generateRouteOptionsReturnsThreeDistinctProfilesWhenCandidatesExist() {
-        when(scenicScoreTileRepository.findByH3IndexIn(anyCollection())).thenReturn(highScenicTilesAroundStart());
+        when(scenicTileLookupService.findByH3Indexes(anyCollection())).thenReturn(highScenicTilesAroundStart());
         when(osrmTripClient.requestRoundTrip(anyList(), eq(RouteMode.DRIVE))).thenAnswer(invocation -> {
             @SuppressWarnings("unchecked")
             List<RoadNode> variant = invocation.getArgument(0);
@@ -162,7 +171,7 @@ class RoutePlannerTest {
 
     @Test
     void openRoadsUsesOpenSpaceGeometryStrategy() {
-        when(scenicScoreTileRepository.findByH3IndexIn(anyCollection())).thenReturn(highScenicTilesAroundStart());
+        when(scenicTileLookupService.findByH3Indexes(anyCollection())).thenReturn(highScenicTilesAroundStart());
         when(osrmTripClient.requestRoundTrip(anyList(), eq(RouteMode.DRIVE))).thenAnswer(invocation -> {
             @SuppressWarnings("unchecked")
             List<RoadNode> variant = invocation.getArgument(0);
@@ -180,7 +189,7 @@ class RoutePlannerTest {
 
     @Test
     void countrysideUsesGradedQuietStrategyFitForModerateCorridors() {
-        when(scenicScoreTileRepository.findByH3IndexIn(anyCollection())).thenReturn(moderateQuietTilesAroundStart());
+        when(scenicTileLookupService.findByH3Indexes(anyCollection())).thenReturn(moderateQuietTilesAroundStart());
         when(osrmTripClient.requestRoundTrip(anyList(), eq(RouteMode.DRIVE))).thenAnswer(invocation -> {
             @SuppressWarnings("unchecked")
             List<RoadNode> variant = invocation.getArgument(0);
@@ -198,7 +207,7 @@ class RoutePlannerTest {
 
     @Test
     void countrysideRejectsUrbanCorridorsInsteadOfPretendingTheyFit() {
-        when(scenicScoreTileRepository.findByH3IndexIn(anyCollection())).thenReturn(urbanQuietTilesAroundStart());
+        when(scenicTileLookupService.findByH3Indexes(anyCollection())).thenReturn(urbanQuietTilesAroundStart());
         when(osrmTripClient.requestRoundTrip(anyList(), eq(RouteMode.DRIVE))).thenAnswer(invocation -> {
             @SuppressWarnings("unchecked")
             List<RoadNode> variant = invocation.getArgument(0);
@@ -213,7 +222,7 @@ class RoutePlannerTest {
     @Test
     void torontoMountainMismatchRejectsWeakCurveElevationCorridors() {
         AtomicInteger repositoryCalls = new AtomicInteger();
-        when(scenicScoreTileRepository.findByH3IndexIn(anyCollection())).thenAnswer(invocation -> {
+        when(scenicTileLookupService.findByH3Indexes(anyCollection())).thenAnswer(invocation -> {
             if (repositoryCalls.getAndIncrement() == 0) {
                 return highMountainTilesAroundStart();
             }
@@ -233,7 +242,7 @@ class RoutePlannerTest {
     @Test
     void openRoadsRejectsUrbanPressureEvenWhenNearbyIntentTilesExist() {
         AtomicInteger repositoryCalls = new AtomicInteger();
-        when(scenicScoreTileRepository.findByH3IndexIn(anyCollection())).thenAnswer(invocation -> {
+        when(scenicTileLookupService.findByH3Indexes(anyCollection())).thenAnswer(invocation -> {
             if (repositoryCalls.getAndIncrement() == 0) {
                 return highOpenRoadTilesAroundStart();
             }
@@ -252,7 +261,7 @@ class RoutePlannerTest {
 
     @Test
     void backtrackingMetricsPenalizeOutAndBackMoreThanRealLoop() throws Exception {
-        when(scenicScoreTileRepository.findByH3IndexIn(anyCollection())).thenReturn(highScenicTilesAroundStart());
+        when(scenicTileLookupService.findByH3Indexes(anyCollection())).thenReturn(highScenicTilesAroundStart());
 
         Map<String, Double> outAndBack = scoreBreakdownForPath(outAndBackPath());
         Map<String, Double> loop = scoreBreakdownForPath(realLoopPath());
@@ -264,7 +273,7 @@ class RoutePlannerTest {
 
     @Test
     void shorterProfilePrefersUsefulShortRouteInsteadOfTinyRescueLoop() {
-        when(scenicScoreTileRepository.findByH3IndexIn(anyCollection())).thenReturn(highScenicTilesAroundStart());
+        when(scenicTileLookupService.findByH3Indexes(anyCollection())).thenReturn(highScenicTilesAroundStart());
         int[] durations = {60, 56, 20, 47, 45, 50, 22, 48, 52, 24, 44, 40, 38, 35};
         AtomicInteger callIndex = new AtomicInteger();
         when(osrmTripClient.requestRoundTrip(anyList(), eq(RouteMode.DRIVE))).thenAnswer(invocation -> {
@@ -285,7 +294,7 @@ class RoutePlannerTest {
 
     @Test
     void mostScenicProfileAvoidsTinyLoopsWhenLongerUsefulOptionsExist() {
-        when(scenicScoreTileRepository.findByH3IndexIn(anyCollection())).thenReturn(highScenicTilesAroundStart());
+        when(scenicTileLookupService.findByH3Indexes(anyCollection())).thenReturn(highScenicTilesAroundStart());
         int[] durations = {32, 61, 46, 35, 58, 52, 34, 63, 44, 40, 55, 48, 36, 50};
         AtomicInteger callIndex = new AtomicInteger();
         when(osrmTripClient.requestRoundTrip(anyList(), eq(RouteMode.DRIVE))).thenAnswer(invocation -> {
@@ -306,7 +315,7 @@ class RoutePlannerTest {
 
     @Test
     void generateRouteRejectsWeakVibeAvailabilityWhenNearbyTilesDoNotFit() {
-        when(scenicScoreTileRepository.findByH3IndexIn(anyCollection())).thenReturn(lowWaterTilesAroundStart());
+        when(scenicTileLookupService.findByH3Indexes(anyCollection())).thenReturn(lowWaterTilesAroundStart());
 
         assertThatThrownBy(() -> routePlanner.generateRoute(sampleJob(45)))
             .isInstanceOf(NoFeasibleRouteException.class)
@@ -315,7 +324,7 @@ class RoutePlannerTest {
 
     @Test
     void generateRouteFallsBackToDefaultH3ResolutionForScenicScoring() {
-        when(scenicScoreTileRepository.findByH3IndexIn(anyCollection())).thenAnswer(invocation -> {
+        when(scenicTileLookupService.findByH3Indexes(anyCollection())).thenAnswer(invocation -> {
             @SuppressWarnings("unchecked")
             Collection<String> indexes = invocation.getArgument(0);
             if (!includesDefaultH3Resolution(indexes)) {
@@ -329,7 +338,7 @@ class RoutePlannerTest {
         RouteCandidate candidate = routePlanner.generateRoute(sampleJob(45));
 
         assertThat(candidate.getTotalScenicScore()).isGreaterThan(0.30);
-        verify(scenicScoreTileRepository, atLeastOnce()).findByH3IndexIn(anyCollection());
+        verify(scenicTileLookupService, atLeastOnce()).findByH3Indexes(anyCollection());
     }
 
     private RouteJob sampleJob(int timeBudgetMinutes) {
