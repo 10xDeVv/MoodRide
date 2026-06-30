@@ -11,7 +11,7 @@ import {
 } from "lucide-react";
 import { RouteMap } from "./RouteMap";
 import { BottomSheet, type BottomSheetState } from "./BottomSheet";
-import { submitRoute, getJobStatus, getRoute, searchLocations } from "@/lib/api";
+import { submitRoute, getJobStatus, getRoute, searchLocations, trackAnalyticsEvent } from "@/lib/api";
 import { connectJobChannel } from "@/lib/ws";
 import type {
   RouteDetailResponse,
@@ -1044,11 +1044,15 @@ function ResultsPanel({
 function HandoffModal({
   route,
   routeMode,
-  onClose
+  onClose,
+  onNavigationOpen,
+  onGpxExport
 }: {
   route: RouteDetailResponse;
   routeMode: RouteMode;
   onClose: () => void;
+  onNavigationOpen: (provider: "google" | "apple") => void;
+  onGpxExport: () => void;
 }) {
   const coords = route.geometry?.geometry?.coordinates ?? [];
   const gmapsUrl = buildGoogleMapsUrl(coords, routeMode);
@@ -1108,6 +1112,7 @@ function HandoffModal({
               target="_blank"
               rel="noopener noreferrer"
               className="nav-option-btn"
+              onClick={() => onNavigationOpen("google")}
             >
               <Navigation size={20} />
               Open in Google Maps
@@ -1117,13 +1122,17 @@ function HandoffModal({
               target="_blank"
               rel="noopener noreferrer"
               className="nav-option-btn"
+              onClick={() => onNavigationOpen("apple")}
             >
               <MapIcon size={20} />
               Open in Apple Maps
             </a>
             <button
               className="nav-option-btn"
-              onClick={() => exportGpx(route, routeName)}
+              onClick={() => {
+                onGpxExport();
+                exportGpx(route, routeName);
+              }}
               type="button"
             >
               <Download size={20} />
@@ -1241,6 +1250,7 @@ export function RoutePlanner() {
   const routeDetailsRef = useRef<Record<string, RouteDetailResponse>>({});
   const seqRef = useRef(0);
   const previousPhaseRef = useRef<Phase>("idle");
+  const generationStartedAtRef = useRef<number | null>(null);
 
   useEffect(() => {
     try {
@@ -1297,13 +1307,26 @@ export function RoutePlanner() {
     setLocationQuery(s.displayName);
     setLocationSuggestions([]);
     setShowDropdown(false);
-  }, []);
+    trackAnalyticsEvent({
+      eventName: "location_selected",
+      routeMode,
+      vibes,
+      timeBudgetMinutes: timeBudget,
+      metadata: { source: "search" }
+    });
+  }, [routeMode, vibes, timeBudget]);
 
   const handleGeolocate = useCallback(() => {
     if (!navigator.geolocation) {
       setStatusMessage("Geolocation not supported.");
       return;
     }
+    trackAnalyticsEvent({
+      eventName: "geolocate_clicked",
+      routeMode,
+      vibes,
+      timeBudgetMinutes: timeBudget
+    });
     navigator.geolocation.getCurrentPosition(
       (pos) => {
         setLat(Number(pos.coords.latitude.toFixed(5)));
@@ -1312,7 +1335,7 @@ export function RoutePlanner() {
       },
       () => setStatusMessage("Could not detect location. Enter coordinates manually.")
     );
-  }, []);
+  }, [routeMode, vibes, timeBudget]);
 
   const handleVibeToggle = useCallback((vibe: string) => {
     setVibes((prev) =>
@@ -1333,6 +1356,13 @@ export function RoutePlanner() {
 
   const handleGenerate = useCallback(async () => {
     if (routeMode !== "drive" || vibes.length === 0) return;
+    generationStartedAtRef.current = Date.now();
+    trackAnalyticsEvent({
+      eventName: "route_generate_clicked",
+      routeMode,
+      vibes,
+      timeBudgetMinutes: timeBudget
+    });
     setPhase("submitting");
     setStatusMessage("");
     setFailureGuidance(null);
@@ -1357,6 +1387,15 @@ export function RoutePlanner() {
         timeBudgetMinutes: timeBudget
       });
 
+      trackAnalyticsEvent({
+        eventName: "route_generate_submitted",
+        jobId: submission.jobId,
+        routeMode,
+        vibes,
+        timeBudgetMinutes: timeBudget,
+        status: submission.status
+      });
+
       setPhase("tracking");
 
       let resolved = false;
@@ -1377,6 +1416,20 @@ export function RoutePlanner() {
               setRoute(detail);
               setSelectedOptionId(event.routeId);
               setPhase("completed");
+              const selectedOption = getSelectedRouteOption(detail, event.routeId);
+              trackAnalyticsEvent({
+                eventName: "route_generation_completed",
+                jobId: submission.jobId,
+                routeId: event.routeId,
+                routeProfile: selectedOption?.profile,
+                routeMode,
+                vibes: detail.vibes?.length ? detail.vibes : vibes,
+                timeBudgetMinutes: timeBudget,
+                routeCount: detail.routeOptions?.length ?? 1,
+                status: "completed",
+                durationMs: generationStartedAtRef.current ? Date.now() - generationStartedAtRef.current : null,
+                scenicScore: selectedOption?.scenicScore ?? detail.scenicScore
+              });
             } catch (e) {
               const msg = e instanceof Error ? e.message : "Failed to load route detail.";
               setStatusMessage(msg);
@@ -1409,6 +1462,20 @@ export function RoutePlanner() {
                 setRoute(detail);
                 setSelectedOptionId(routeId);
                 setPhase("completed");
+                const selectedOption = getSelectedRouteOption(detail, routeId);
+                trackAnalyticsEvent({
+                  eventName: "route_generation_completed",
+                  jobId: submission.jobId,
+                  routeId,
+                  routeProfile: selectedOption?.profile,
+                  routeMode,
+                  vibes: detail.vibes?.length ? detail.vibes : vibes,
+                  timeBudgetMinutes: timeBudget,
+                  routeCount: detail.routeOptions?.length ?? 1,
+                  status: "completed",
+                  durationMs: generationStartedAtRef.current ? Date.now() - generationStartedAtRef.current : null,
+                  scenicScore: selectedOption?.scenicScore ?? detail.scenicScore
+                });
               }
             }
           } else if (normalizedStatus === "failed") {
@@ -1420,6 +1487,30 @@ export function RoutePlanner() {
               setFailureGuidance(guidanceFromStatus(status));
               setStatusMessage(status.userMessage ?? status.reason ?? "Route generation failed.");
               setPhase("failed");
+              trackAnalyticsEvent({
+                eventName: "route_generation_failed",
+                jobId: submission.jobId,
+                routeMode,
+                vibes,
+                timeBudgetMinutes: timeBudget,
+                status: status.failureCode ?? status.status,
+                durationMs: generationStartedAtRef.current ? Date.now() - generationStartedAtRef.current : null,
+                metadata: { reason: status.reason, failureCode: status.failureCode }
+              });
+              if (status.failureCode === "vibe_unavailable") {
+                trackAnalyticsEvent({
+                  eventName: "vibe_unavailable",
+                  jobId: submission.jobId,
+                  routeMode,
+                  vibes,
+                  timeBudgetMinutes: timeBudget,
+                  status: status.failureCode,
+                  metadata: {
+                    suggestedVibes: status.suggestedVibes,
+                    suggestedActions: status.suggestedActions
+                  }
+                });
+              }
             }
           } else {
             setStatusMessage("Processing…");
@@ -1434,6 +1525,15 @@ export function RoutePlanner() {
       setStatusMessage(msg);
       setFailureGuidance(null);
       setPhase("failed");
+      trackAnalyticsEvent({
+        eventName: "route_generation_failed",
+        routeMode,
+        vibes,
+        timeBudgetMinutes: timeBudget,
+        status: "submit_failed",
+        durationMs: generationStartedAtRef.current ? Date.now() - generationStartedAtRef.current : null,
+        metadata: { message: msg.slice(0, 240) }
+      });
     }
   }, [lat, lng, routeMode, vibes, timeBudget, resolveRouteDetail]);
 
@@ -1452,6 +1552,16 @@ export function RoutePlanner() {
   }, []);
 
   const handlePlanNewRoute = useCallback(() => {
+    const selectedOption = route ? getSelectedRouteOption(route, selectedOptionId) : null;
+    trackAnalyticsEvent({
+      eventName: "plan_new_route_clicked",
+      jobId: route?.jobId,
+      routeId: selectedOptionId || route?.routeId,
+      routeProfile: selectedOption?.profile,
+      routeMode,
+      vibes,
+      timeBudgetMinutes: timeBudget
+    });
     if (stopWsRef.current) { stopWsRef.current(); stopWsRef.current = null; }
     if (pollTimerRef.current) { clearInterval(pollTimerRef.current); pollTimerRef.current = null; }
     setPhase("idle");
@@ -1461,7 +1571,7 @@ export function RoutePlanner() {
     setProgressStep(0);
     setSheetState('mid');
     setLargeResultsOpen(true);
-  }, []);
+  }, [route, selectedOptionId, routeMode, vibes, timeBudget]);
 
   const handleTryVibe = useCallback((vibe: string) => {
     if (stopWsRef.current) { stopWsRef.current(); stopWsRef.current = null; }
@@ -1480,6 +1590,18 @@ export function RoutePlanner() {
     try {
       const detail = await resolveRouteDetail(id);
       setRoute(detail);
+      const selectedOption = getSelectedRouteOption(detail, id);
+      trackAnalyticsEvent({
+        eventName: "route_option_selected",
+        jobId: detail.jobId,
+        routeId: id,
+        routeProfile: selectedOption?.profile,
+        routeMode: detail.routeMode,
+        vibes: detail.vibes,
+        timeBudgetMinutes: detail.timeBudgetMinutes,
+        routeCount: detail.routeOptions?.length ?? 1,
+        scenicScore: selectedOption?.scenicScore ?? detail.scenicScore
+      });
     } catch (e) {
       const msg = e instanceof Error ? e.message : "Failed to load route detail.";
       setStatusMessage(msg);
@@ -1491,11 +1613,93 @@ export function RoutePlanner() {
     setPhase("completed");
     setLargeResultsOpen(true);
     setSheetState('mid');
-  }, [route]);
+    trackAnalyticsEvent({
+      eventName: "route_results_viewed",
+      jobId: route.jobId,
+      routeId: selectedOptionId || route.routeId,
+      routeProfile: getSelectedRouteOption(route, selectedOptionId)?.profile,
+      routeMode,
+      vibes: route.vibes,
+      timeBudgetMinutes: route.timeBudgetMinutes
+    });
+  }, [route, selectedOptionId, routeMode]);
 
   const handleThemeToggle = useCallback(() => {
     setTheme((current) => current === "day" ? "night" : "day");
-  }, []);
+    trackAnalyticsEvent({
+      eventName: "theme_toggled",
+      metadata: { from: theme, to: theme === "day" ? "night" : "day" }
+    });
+  }, [theme]);
+
+  const handleStartDrive = useCallback(() => {
+    if (route) {
+      const selectedOption = getSelectedRouteOption(route, selectedOptionId);
+      trackAnalyticsEvent({
+        eventName: "start_drive_clicked",
+        jobId: route.jobId,
+        routeId: selectedOptionId || route.routeId,
+        routeProfile: selectedOption?.profile,
+        routeMode,
+        vibes: route.vibes,
+        timeBudgetMinutes: route.timeBudgetMinutes,
+        routeCount: route.routeOptions?.length ?? 1,
+        scenicScore: selectedOption?.scenicScore ?? route.scenicScore
+      });
+    }
+    setShowHandoff(true);
+  }, [route, selectedOptionId, routeMode]);
+
+  const handleNavigationOpen = useCallback((provider: "google" | "apple") => {
+    if (!route) return;
+    const selectedOption = getSelectedRouteOption(route, selectedOptionId);
+    trackAnalyticsEvent({
+      eventName: "navigation_opened",
+      jobId: route.jobId,
+      routeId: selectedOptionId || route.routeId,
+      routeProfile: selectedOption?.profile,
+      routeMode,
+      vibes: route.vibes,
+      timeBudgetMinutes: route.timeBudgetMinutes,
+      scenicScore: selectedOption?.scenicScore ?? route.scenicScore,
+      metadata: { provider }
+    });
+  }, [route, selectedOptionId, routeMode]);
+
+  const handleGpxExport = useCallback(() => {
+    if (!route) return;
+    const selectedOption = getSelectedRouteOption(route, selectedOptionId);
+    trackAnalyticsEvent({
+      eventName: "gpx_exported",
+      jobId: route.jobId,
+      routeId: selectedOptionId || route.routeId,
+      routeProfile: selectedOption?.profile,
+      routeMode,
+      vibes: route.vibes,
+      timeBudgetMinutes: route.timeBudgetMinutes,
+      scenicScore: selectedOption?.scenicScore ?? route.scenicScore
+    });
+  }, [route, selectedOptionId, routeMode]);
+
+  const handleResultsMinimize = useCallback(() => {
+    if (route) {
+      const selectedOption = getSelectedRouteOption(route, selectedOptionId);
+      trackAnalyticsEvent({
+        eventName: "route_results_minimized",
+        jobId: route.jobId,
+        routeId: selectedOptionId || route.routeId,
+        routeProfile: selectedOption?.profile,
+        routeMode,
+        vibes: route.vibes,
+        timeBudgetMinutes: route.timeBudgetMinutes
+      });
+    }
+    if (isMobile) {
+      setSheetState('peek');
+    } else {
+      setLargeResultsOpen(false);
+    }
+  }, [route, selectedOptionId, routeMode, isMobile]);
 
   // Detect responsive viewport mode: phone sheet, tablet hybrid panel, desktop split panels.
   useEffect(() => {
@@ -1593,9 +1797,9 @@ export function RoutePlanner() {
             route={route}
             selectedOptionId={selectedOptionId}
             onOptionSelect={handleOptionSelect}
-            onStartDrive={() => setShowHandoff(true)}
+            onStartDrive={handleStartDrive}
             onPlanNewRoute={handlePlanNewRoute}
-            onMinimize={() => setLargeResultsOpen(false)}
+            onMinimize={handleResultsMinimize}
           />
         )}
 
@@ -1652,9 +1856,9 @@ export function RoutePlanner() {
                   route={route}
                   selectedOptionId={selectedOptionId}
                   onOptionSelect={handleOptionSelect}
-                  onStartDrive={() => setShowHandoff(true)}
+                  onStartDrive={handleStartDrive}
                   onPlanNewRoute={handlePlanNewRoute}
-                  onMinimize={() => setLargeResultsOpen(false)}
+                  onMinimize={handleResultsMinimize}
                 />
               )}
 
@@ -1714,7 +1918,7 @@ export function RoutePlanner() {
           route={route}
           selectedOptionId={selectedOptionId}
           mode={phase === "idle" ? "planningNewRoute" : "resultsMinimized"}
-          onStartDrive={() => setShowHandoff(true)}
+          onStartDrive={handleStartDrive}
           onViewRoutes={handleViewRoutes}
           onPlanNewRoute={handlePlanNewRoute}
         />
@@ -1732,7 +1936,7 @@ export function RoutePlanner() {
             route={route}
             selectedOptionId={selectedOptionId}
             sheetState={sheetState}
-            onStartDrive={() => setShowHandoff(true)}
+            onStartDrive={handleStartDrive}
             onViewRoutes={handleViewRoutes}
             onPlanNewRoute={handlePlanNewRoute}
           />
@@ -1748,10 +1952,10 @@ export function RoutePlanner() {
             onOptionSelect={(id) => {
               void handleOptionSelect(id);
             }}
-            onStartDrive={() => setShowHandoff(true)}
+            onStartDrive={handleStartDrive}
             onPlanNewRoute={handlePlanNewRoute}
             onExpand={() => setSheetState((current) => current === "peek" ? "mid" : "full")}
-            onMinimize={() => setSheetState('peek')}
+            onMinimize={handleResultsMinimize}
           />
         </BottomSheet>
         </>
@@ -1766,6 +1970,8 @@ export function RoutePlanner() {
           route={route}
           routeMode={routeMode}
           onClose={() => setShowHandoff(false)}
+          onNavigationOpen={handleNavigationOpen}
+          onGpxExport={handleGpxExport}
         />
       )}
 

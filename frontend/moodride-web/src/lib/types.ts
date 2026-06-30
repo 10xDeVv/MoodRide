@@ -172,3 +172,18 @@ export interface LocationSuggestion {
   lat: number;
   lng: number;
 }
+
+export interface AnalyticsEventPayload {
+  eventName: string;
+  jobId?: string | null;
+  routeId?: string | null;
+  routeProfile?: string | null;
+  routeMode?: RouteMode | string | null;
+  vibes?: string[];
+  timeBudgetMinutes?: number | null;
+  routeCount?: number | null;
+  status?: string | null;
+  durationMs?: number | null;
+  scenicScore?: number | null;
+  metadata?: Record<string, unknown>;
+}

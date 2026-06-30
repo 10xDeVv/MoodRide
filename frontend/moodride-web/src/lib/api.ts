@@ -1,4 +1,5 @@
 import {
+  AnalyticsEventPayload,
   LocationSuggestion,
   RouteDetailResponse,
   RouteJobStatusResponse,
@@ -42,6 +43,54 @@ async function handleJson<T>(response: Response): Promise<T> {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+let fallbackAnalyticsSessionId: string | null = null;
+
+function randomAnalyticsSessionId(): string {
+  const cryptoApi = typeof window !== "undefined" ? window.crypto : undefined;
+  if (cryptoApi?.randomUUID) {
+    return cryptoApi.randomUUID();
+  }
+  return `anon-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function getAnalyticsSessionId(): string {
+  if (typeof window === "undefined") {
+    return "server";
+  }
+
+  try {
+    const key = "wayward-analytics-session-id";
+    const existing = window.localStorage.getItem(key);
+    if (existing) {
+      return existing;
+    }
+    const generated = randomAnalyticsSessionId();
+    window.localStorage.setItem(key, generated);
+    return generated;
+  } catch {
+    fallbackAnalyticsSessionId ??= randomAnalyticsSessionId();
+    return fallbackAnalyticsSessionId;
+  }
+}
+
+export function trackAnalyticsEvent(payload: AnalyticsEventPayload): void {
+  if (typeof window === "undefined") return;
+
+  const body = JSON.stringify({
+    anonymousSessionId: getAnalyticsSessionId(),
+    ...payload
+  });
+
+  void fetch(apiUrl("/api/analytics/events"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body,
+    keepalive: true
+  }).catch(() => {
+    // Analytics should never block route planning or navigation.
+  });
 }
 
 export async function submitRoute(payload: RouteRequest): Promise<RouteSubmissionResponse> {
