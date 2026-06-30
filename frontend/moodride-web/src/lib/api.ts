@@ -1,5 +1,6 @@
 import {
   AnalyticsEventPayload,
+  AnalyticsSummaryResponse,
   LocationSuggestion,
   RouteDetailResponse,
   RouteJobStatusResponse,
@@ -91,6 +92,12 @@ export function trackAnalyticsEvent(payload: AnalyticsEventPayload): void {
   }).catch(() => {
     // Analytics should never block route planning or navigation.
   });
+}
+
+export async function getAnalyticsSummary(days = 30): Promise<AnalyticsSummaryResponse> {
+  const params = new URLSearchParams({ days: String(Math.max(1, Math.min(days, 90))) });
+  const response = await fetch(apiUrl(`/api/analytics/summary?${params.toString()}`), { cache: "no-store" });
+  return handleJson<AnalyticsSummaryResponse>(response);
 }
 
 export async function submitRoute(payload: RouteRequest): Promise<RouteSubmissionResponse> {

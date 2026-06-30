@@ -187,3 +187,29 @@ export interface AnalyticsEventPayload {
   scenicScore?: number | null;
   metadata?: Record<string, unknown>;
 }
+
+export interface AnalyticsCountResponse {
+  name: string;
+  count: number;
+}
+
+export interface AnalyticsSummaryResponse {
+  from: string;
+  to: string;
+  totalEvents: number;
+  generateClicks: number;
+  submittedRoutes: number;
+  completedRoutes: number;
+  failedRoutes: number;
+  vibeUnavailableRoutes: number;
+  startDriveClicks: number;
+  navigationOpens: number;
+  planNewRouteClicks: number;
+  routeSuccessRate: number;
+  averageGenerationMs: number;
+  averageRouteOptions: number;
+  averageScenicScore: number;
+  topVibes: AnalyticsCountResponse[];
+  selectedProfiles: AnalyticsCountResponse[];
+  routeModes: AnalyticsCountResponse[];
+}
