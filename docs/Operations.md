@@ -116,10 +116,12 @@ On push to `main`, the workflow:
 
 1. builds service and frontend images
 2. pushes images to GHCR
-3. uploads `docker-compose.prod.yml`, `Caddyfile`, and deploy scripts
+3. uploads `docker-compose.prod.yml`, `docker-compose.admin.yml`, `Caddyfile`, and deploy scripts
 4. runs `scripts/deploy/deploy_prod.sh` on the VM
 5. health-checks production
 6. rolls back on failed health check
+
+The admin compose file is uploaded for operator use, but the normal production deploy does not start the admin profile.
 
 Manual deploy of an existing image:
 
@@ -135,6 +137,51 @@ cd /opt/moodride
 ```
 
 The deploy script explicitly recreates Caddy so domain/TLS config changes are loaded.
+
+## Admin Visibility
+
+Production includes an optional admin profile for internal visibility:
+
+- Dozzle: browser UI for Docker logs
+- CloudBeaver: browser UI for browsing Postgres tables
+
+These tools are intentionally bound to `127.0.0.1` on the production VM. They are not routed through Caddy and are not public.
+
+Start the tools on the VM:
+
+```bash
+cd /opt/moodride
+./scripts/deploy/manage_admin_tools.sh start
+```
+
+Open an SSH tunnel from your local machine:
+
+```bash
+ssh -L 8088:127.0.0.1:8088 -L 8978:127.0.0.1:8978 <prod-user>@<prod-host>
+```
+
+Then open:
+
+- logs: `http://localhost:8088`
+- database browser: `http://localhost:8978`
+
+In CloudBeaver, connect to Postgres with:
+
+- host: `postgres`
+- port: `5432`
+- database: value of `POSTGRES_DB`
+- user: value of `POSTGRES_USER`
+- password: value of `POSTGRES_PASSWORD`
+
+Useful commands on the VM:
+
+```bash
+./scripts/deploy/manage_admin_tools.sh status
+./scripts/deploy/manage_admin_tools.sh logs
+./scripts/deploy/manage_admin_tools.sh stop
+```
+
+Do not expose Dozzle or CloudBeaver directly to the internet. Dozzle can read Docker container metadata and logs through the Docker socket, and CloudBeaver can inspect production data. Keep access behind SSH.
 
 ## OSRM Data Release
 

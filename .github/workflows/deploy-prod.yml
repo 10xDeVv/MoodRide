@@ -8,6 +8,7 @@ on:
       - "services/**"
       - "frontend/**"
       - "docker-compose.prod.yml"
+      - "docker-compose.admin.yml"
       - "Caddyfile"
       - "scripts/deploy/**"
       - ".github/workflows/deploy-prod.yml"
@@ -188,8 +189,8 @@ jobs:
       - name: Upload deployment files
         shell: bash
         run: |
-          scp docker-compose.prod.yml Caddyfile "${{ secrets.PROD_SSH_USER }}@${{ secrets.PROD_SSH_HOST }}:/opt/moodride/"
-          scp scripts/deploy/deploy_prod.sh scripts/deploy/rollback_prod.sh scripts/deploy/deploy_data_release.sh "${{ secrets.PROD_SSH_USER }}@${{ secrets.PROD_SSH_HOST }}:/opt/moodride/scripts/deploy/"
+          scp docker-compose.prod.yml docker-compose.admin.yml Caddyfile "${{ secrets.PROD_SSH_USER }}@${{ secrets.PROD_SSH_HOST }}:/opt/moodride/"
+          scp scripts/deploy/deploy_prod.sh scripts/deploy/rollback_prod.sh scripts/deploy/deploy_data_release.sh scripts/deploy/manage_admin_tools.sh "${{ secrets.PROD_SSH_USER }}@${{ secrets.PROD_SSH_HOST }}:/opt/moodride/scripts/deploy/"
 
       - name: Upload .env.prod when secret is configured
         env:

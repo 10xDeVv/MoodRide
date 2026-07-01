@@ -19,6 +19,8 @@ Production runs with Docker Compose on one VM:
 | `kafka` + `zookeeper` | Async job and event transport |
 | `osrm` | Local OSRM routing engine using prepared OSM datasets |
 | `caddy` | TLS and reverse proxy for `usewayward.app` and `www.usewayward.app` |
+| `dozzle` | Optional admin-only Docker log viewer, bound to VM localhost |
+| `cloudbeaver` | Optional admin-only Postgres table browser, bound to VM localhost |
 
 The public production domain is:
 
@@ -113,6 +115,15 @@ Wayward tracks product analytics without accounts or personal identity.
 
 The analytics dashboard compares current aggregate metrics with the last browser-local snapshot for the selected range. This powers the up/down change signals without adding user accounts.
 
+## Admin Visibility
+
+Wayward has an optional admin tools profile for production visibility:
+
+- Dozzle provides a browser UI for Docker container logs.
+- CloudBeaver provides a browser UI for browsing Postgres databases and tables.
+
+These tools are not public runtime services. They bind only to `127.0.0.1` on the production VM and should be opened through an SSH tunnel. They are operational tools for debugging, database inspection, and launch support, not user-facing product surfaces.
+
 ## System Design And Scaling
 
 Current production is intentionally simple: one VM, Docker Compose, one Postgres, one Redis, one Kafka broker, one OSRM container, and one instance of each app service.
@@ -154,5 +165,6 @@ Do not introduce Kubernetes or multi-region deployment until the single-VM deplo
 - personalized route generation
 - multi-region production deployment
 - the old beam-search route engine
+- public admin/database dashboards
 
 Archived docs and design references may mention older ideas. The active architecture is the one described here.
