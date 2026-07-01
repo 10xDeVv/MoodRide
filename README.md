@@ -42,7 +42,7 @@ Runtime route generation does not calculate water, greenery, elevation, darkness
 
 Current scenic release train:
 
-- `3.1-darkness-urban-penalty-calibration`
+- `3.7-bridge-coastal-calibration`
 
 Main data scripts:
 
@@ -126,16 +126,13 @@ Production uses:
 
 App deploys are triggered from GitHub Actions. Data releases are published as GitHub release assets, then deployed by the OSRM/scenic release workflows.
 
-## Useful Docs
+## Official Docs
 
-- [Engineering Specification](docs/engineering-specification.md)
-- [Hybrid OSRM v2](docs/HybridOsrmV2.md)
-- [Data Pipeline](docs/DataPipeline.md)
-- [Deployment Pipeline](docs/DeploymentPipeline.md)
-- [Service Ownership](docs/ServiceOwnership.md)
-- [Route Quality Eval](docs/RouteQualityEval.md)
-- [Release QA Baseline](docs/ReleaseQABaseline.md)
-- [Vibe Profile Calibration](docs/VibeProfileCalibration.md)
+- [Architecture](docs/Architecture.md): runtime services, request flow, data model, caching, analytics, and scaling path.
+- [Route Engine](docs/RouteEngine.md): `hybrid_osrm_v2`, scenic tiles, vibe contracts, route explanations, and quality evaluation.
+- [Operations](docs/Operations.md): local development, production deploys, DNS, data releases, QA, rollback, and repo hygiene.
+
+Older implementation notes and route-quality evidence are retained under `docs/archive/` for history, but the three docs above are the official documentation set.
 
 ## Repo Layout
 
