@@ -1,0 +1,9 @@
+/* ─── Mapbox Customizations ─────────────────────────────────────────────── */
+.mapboxgl-ctrl-bottom-left,
+.mapboxgl-ctrl-bottom-right {
+  display: none !important;
+}
+
+.mapboxgl-canvas {
+  outline: none !important;
+}

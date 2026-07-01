@@ -71,6 +71,7 @@ class RouteServiceTest {
             routeRepository,
             calibrationRepository,
             scenicScoreTileRepository,
+            new RouteFailureGuidanceService(new ObjectMapper()),
             kafkaTemplate,
             new ObjectMapper()
         );

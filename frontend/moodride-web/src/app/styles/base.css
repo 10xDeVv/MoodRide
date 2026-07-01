@@ -1,0 +1,81 @@
+/* ═══════════════════════════════════════════════════════════════════════════
+   Wayward Design System — sourced directly from design reference HTML files
+   technical-map-workspace.html + route-loader.html + start-drive-handoff.html
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* ─── CSS Custom Properties ─────────────────────────────────────────────── */
+:root {
+  /* Core palette — from technical-map-workspace.html */
+  --clr-primary:   #1a2e1a;   /* deep forest green — sidebar, headers, borders */
+  --clr-primary-2: #2d4a2d;   /* mid forest green — hover states */
+  --clr-lime:      #e8f04a;   /* lime-yellow — accent, active states, CTA bg */
+  --clr-lime-dim:  #d4dc3a;   /* darker lime — hover on lime elements */
+  --clr-bg:        #f5f5f0;   /* off-white — page background */
+  --clr-bg-alt:    #ebebE5;   /* slightly darker off-white — card backgrounds */
+  --clr-white:     #ffffff;
+  --clr-black:     #0a0a0a;
+
+  /* Text */
+  --clr-text:      #1a2e1a;   /* primary text — same as primary green */
+  --clr-text-muted:#4a5e4a;   /* muted text */
+  --clr-text-dim:  #7a8e7a;   /* dimmed text */
+
+  /* Borders */
+  --clr-border:    #1a2e1a;   /* dark green borders — brutalist */
+  --clr-border-lt: #c8d4c8;   /* light border */
+
+  /* Sidebar */
+  --clr-sidebar:   #1a2e1a;   /* dark green sidebar background */
+  --clr-sidebar-2: #243824;   /* slightly lighter sidebar section */
+  --clr-sidebar-border: #2d4a2d;
+  --clr-sidebar-text: #a8c4a8; /* muted text on dark sidebar */
+  --clr-sidebar-text-dim: #6a8a6a;
+
+  /* Layout */
+  --sidebar-width: 420px;
+  --header-height: 64px;
+  --footer-height: 0px;
+
+  /* Display type */
+  --display-heavy-stroke: 0;
+  --display-command-stroke: 0;
+  --display-logo-stroke: 0;
+  --display-squash-y: 1;
+  --command-squash-y: 1;
+  --display-letter-spacing: -0.018em;
+  --display-scale-x: 1.025;
+  --display-scale-y: 0.965;
+}
+
+/* ─── Reset ─────────────────────────────────────────────────────────────── */
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html, body {
+  height: 100%;
+  overflow: hidden;
+}
+
+body {
+  font-family: var(--font-body);
+  background: var(--clr-bg);
+  color: var(--clr-text);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+button {
+  font-family: inherit;
+  cursor: pointer;
+}
+
+input, textarea, select {
+  font-family: inherit;
+}
+
+/* Suppress browser validation red borders */
+input:invalid { box-shadow: none; outline: none; }
+input:-moz-ui-invalid { box-shadow: none; }

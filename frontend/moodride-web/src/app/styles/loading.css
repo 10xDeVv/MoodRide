@@ -1,0 +1,199 @@
+/* ─── Loading Overlay ───────────────────────────────────────────────────── */
+.loading-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 500;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  padding: max(24px, env(safe-area-inset-top)) max(20px, env(safe-area-inset-right)) max(24px, env(safe-area-inset-bottom)) max(20px, env(safe-area-inset-left));
+  background: var(--clr-lime);
+  opacity: 0;
+  animation: fade-in 0.36s ease forwards;
+}
+
+@keyframes fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.loading-main {
+  width: min(680px, 100%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: clamp(18px, 2.7vh, 28px);
+  margin: 0 auto;
+  max-height: calc(100dvh - 48px);
+  padding: 24px 0;
+  opacity: 0;
+  animation: loading-rise 0.5s cubic-bezier(0.22, 1, 0.36, 1) 0.08s forwards;
+}
+
+@keyframes loading-rise {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.loading-brand {
+  order: 1;
+  font-size: clamp(50px, 12vw, 88px);
+  color: var(--clr-primary);
+  text-shadow: 0 2px 0 rgba(255, 255, 255, 0.42);
+}
+
+.loading-brand::after {
+  height: 0.07em;
+  opacity: 0.82;
+}
+
+.loading-route-mark {
+  order: 3;
+  position: relative;
+  width: min(156px, 42vw);
+  aspect-ratio: 1;
+  height: auto;
+  display: grid;
+  place-items: center;
+}
+
+.loading-blob-stage {
+  --loader-bg: var(--clr-primary);
+  --loader-ink: var(--clr-lime);
+  filter: drop-shadow(0 14px 28px rgba(3, 39, 7, 0.18));
+}
+
+.loading-blob-loader {
+  width: 100%;
+  aspect-ratio: 1;
+  box-sizing: border-box;
+  border: 14px solid transparent;
+  background:
+    radial-gradient(farthest-side, var(--loader-ink) 98%, transparent) 0 0 / 28% 28%,
+    radial-gradient(farthest-side, var(--loader-ink) 98%, transparent) 100% 0 / 28% 28%,
+    radial-gradient(farthest-side, var(--loader-ink) 98%, transparent) 100% 100% / 28% 28%,
+    radial-gradient(farthest-side, var(--loader-ink) 98%, transparent) 0 100% / 28% 28%,
+    linear-gradient(var(--loader-ink) 0 0) 50% / 52% 52%,
+    var(--loader-bg);
+  background-repeat: no-repeat;
+  filter: blur(5px) contrast(12);
+  animation: loading-blob 0.86s infinite;
+}
+
+@keyframes loading-blob {
+  100% {
+    background-position: 100% 0, 100% 100%, 0 100%, 0 0, center;
+  }
+}
+
+.loading-copy {
+  order: 2;
+  text-align: center;
+}
+
+.loading-title {
+  font-family: var(--font-body);
+  font-size: clamp(32px, 6.2vw, 46px);
+  font-weight: 900;
+  color: var(--clr-primary);
+  letter-spacing: 0;
+  line-height: 1.04;
+  margin: 0 0 10px;
+  text-transform: none;
+}
+
+.loading-subtitle {
+  font-family: var(--font-body);
+  font-size: clamp(14px, 2.5vw, 18px);
+  color: rgba(3, 39, 7, 0.72);
+  line-height: 1.45;
+  max-width: 560px;
+  margin: 0 auto;
+}
+
+.loading-steps {
+  order: 4;
+  width: min(520px, 100%);
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+
+.loading-step {
+  min-height: 50px;
+  border: 2px solid rgba(3, 39, 7, 0.18);
+  background: rgba(255, 255, 255, 0.16);
+  color: rgba(3, 39, 7, 0.62);
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 11px 15px;
+  transition: border-color 0.2s, background 0.2s, color 0.2s, transform 0.2s;
+}
+
+.loading-step.active {
+  background: rgba(255, 255, 255, 0.5);
+  border-color: var(--clr-primary);
+  color: var(--clr-primary);
+  transform: translateX(3px);
+}
+
+.loading-step.done {
+  background: rgba(3, 39, 7, 0.07);
+  color: var(--clr-primary);
+}
+
+.loading-step-icon {
+  flex-shrink: 0;
+  width: 20px;
+  height: 20px;
+}
+
+.loading-step-label {
+  font-family: var(--font-body);
+  font-size: 15px;
+  font-weight: 800;
+  letter-spacing: 0.03em;
+}
+
+.theme-night .loading-overlay {
+  background: #030503;
+}
+
+.theme-night .loading-brand,
+.theme-night .loading-title {
+  color: var(--clr-lime);
+}
+
+.theme-night .loading-subtitle {
+  color: var(--clr-text-muted);
+}
+
+.theme-night .loading-route-mark {
+  --loader-bg: var(--clr-lime);
+  --loader-ink: #030503;
+  filter: drop-shadow(0 18px 36px rgba(232, 240, 74, 0.18));
+}
+
+.theme-night .loading-step {
+  background: rgba(255, 255, 255, 0.05);
+  border-color: rgba(232, 240, 74, 0.12);
+  color: var(--clr-text-muted);
+}
+
+.theme-night .loading-step.active {
+  background: rgba(232, 240, 74, 0.08);
+  border-color: var(--clr-lime);
+  color: var(--clr-lime);
+}
+
+.theme-night .loading-step.done {
+  background: rgba(232, 240, 74, 0.06);
+  border-color: rgba(232, 240, 74, 0.14);
+  color: var(--clr-lime);
+}

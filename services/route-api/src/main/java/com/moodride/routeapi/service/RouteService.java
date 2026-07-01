@@ -144,6 +144,7 @@ public class RouteService {
     private final RouteRepository routeRepository;
     private final RouteWeightCalibrationRepository calibrationRepository;
     private final ScenicScoreTileRepository scenicScoreTileRepository;
+    private final RouteFailureGuidanceService routeFailureGuidanceService;
     private final KafkaTemplate<String, String> kafkaTemplate;
     private final ObjectMapper objectMapper;
     private final ScenicScoreCalculator scenicScoreCalculator = new ScenicScoreCalculator();
@@ -152,12 +153,14 @@ public class RouteService {
                         RouteRepository routeRepository,
                         RouteWeightCalibrationRepository calibrationRepository,
                         ScenicScoreTileRepository scenicScoreTileRepository,
+                        RouteFailureGuidanceService routeFailureGuidanceService,
                         KafkaTemplate<String, String> kafkaTemplate,
                         ObjectMapper objectMapper) {
         this.jobRepository = jobRepository;
         this.routeRepository = routeRepository;
         this.calibrationRepository = calibrationRepository;
         this.scenicScoreTileRepository = scenicScoreTileRepository;
+        this.routeFailureGuidanceService = routeFailureGuidanceService;
         this.kafkaTemplate = kafkaTemplate;
         this.objectMapper = objectMapper.copy().findAndRegisterModules();
     }
@@ -228,7 +231,7 @@ public class RouteService {
         Integer estimatedRemaining = job.getStatus() == RouteJob.JobStatus.QUEUED || job.getStatus() == RouteJob.JobStatus.PROCESSING
                 ? 3
                 : null;
-        FailureGuidance failureGuidance = buildFailureGuidance(job);
+        RouteFailureGuidance failureGuidance = routeFailureGuidanceService.buildFailureGuidance(job);
 
         return new RouteJobStatusResponse(
             job.getId(),
@@ -252,70 +255,6 @@ public class RouteService {
         );
     }
 
-    private FailureGuidance buildFailureGuidance(RouteJob job) {
-        if (job == null || job.getStatus() != RouteJob.JobStatus.FAILED) {
-            return FailureGuidance.empty();
-        }
-
-        String reason = job.getFailureReason();
-        if (reason == null || reason.isBlank()) {
-            return new FailureGuidance(
-                "route_generation_failed",
-                "Route generation failed. Try a different starting point, more time, or another vibe.",
-                List.of("scenic", "open_roads"),
-                List.of("Try Scenic", "Try Open Roads", "Increase time budget")
-            );
-        }
-
-        String normalized = reason.toLowerCase(Locale.ROOT);
-        if (normalized.contains("no strong ") || normalized.contains("no feasible route found")) {
-            return new FailureGuidance(
-                "vibe_unavailable",
-                reason,
-                suggestedFallbackVibes(job),
-                suggestedFailureActions(job)
-            );
-        }
-
-        return new FailureGuidance(
-            "route_generation_failed",
-            reason,
-            List.of("scenic", "open_roads"),
-            List.of("Try Scenic", "Try Open Roads", "Increase time budget")
-        );
-    }
-
-    private List<String> suggestedFallbackVibes(RouteJob job) {
-        List<String> routeVibes = resolveRouteVibes(job, null);
-        Set<String> suggestions = new LinkedHashSet<>();
-        if (routeVibes.stream().anyMatch(vibe -> vibe.equals("countryside") || vibe.equals("sunday_cruise"))) {
-            suggestions.add("scenic");
-            suggestions.add("open_roads");
-            suggestions.add("relaxing");
-        } else if (routeVibes.contains("mountain")) {
-            suggestions.add("scenic");
-            suggestions.add("winding_roads");
-            suggestions.add("open_roads");
-        } else {
-            suggestions.add("scenic");
-            suggestions.add("open_roads");
-            suggestions.add("relaxing");
-        }
-        suggestions.removeAll(routeVibes);
-        return List.copyOf(suggestions);
-    }
-
-    private List<String> suggestedFailureActions(RouteJob job) {
-        int currentBudget = job == null ? 60 : job.getTimeBudgetMinutes();
-        int nextBudget = currentBudget < 60 ? 60 : currentBudget < 90 ? 90 : currentBudget < 120 ? 120 : currentBudget + 30;
-        return List.of(
-            "Try Scenic",
-            "Try Open Roads",
-            "Increase time budget to " + nextBudget + " minutes",
-            "Move the start point farther from downtown"
-        );
-    }
-    
     @Cacheable(cacheNames = "routeResults", key = "#routeId.toString()")
     public RouteDetailResponse getRoute(UUID routeId) {
         Route route = routeRepository.findById(routeId)
@@ -2010,15 +1949,6 @@ public class RouteService {
                 "curves", normalized.curves(),
                 "poi", normalized.poi()
             );
-        }
-    }
-
-    private record FailureGuidance(String code,
-                                   String userMessage,
-                                   List<String> suggestedVibes,
-                                   List<String> suggestedActions) {
-        private static FailureGuidance empty() {
-            return new FailureGuidance(null, null, List.of(), List.of());
         }
     }
 

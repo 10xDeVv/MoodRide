@@ -1,0 +1,104 @@
+/* ─── Failed Card ───────────────────────────────────────────────────────── */
+.failed-card {
+  --failed-title-color: var(--clr-text);
+  --failed-body-color: var(--clr-text-muted);
+  --failed-chip-bg: var(--clr-bg-alt);
+  --failed-chip-border: var(--clr-primary);
+  --failed-chip-color: var(--clr-text);
+  --failed-chip-hover-bg: var(--clr-primary);
+  --failed-chip-hover-color: var(--clr-sidebar-text);
+  padding: 32px 24px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+  text-align: center;
+}
+
+.failed-icon {
+  width: 56px;
+  height: 56px;
+  background: #ffeaea;
+  border: 2px solid #e85454;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #e85454;
+}
+
+.failed-title {
+  font-family: var(--font-body);
+  font-size: 18px;
+  font-weight: 800;
+  color: var(--failed-title-color);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.failed-message {
+  font-family: var(--font-body);
+  font-size: 13px;
+  color: var(--failed-body-color);
+  line-height: 1.5;
+}
+
+.failed-suggestions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+  width: 100%;
+}
+
+.failed-chip {
+  min-height: 36px;
+  padding: 0 14px;
+  border: 2px solid var(--failed-chip-border);
+  background: var(--failed-chip-bg);
+  color: var(--failed-chip-color);
+  font-family: var(--font-body);
+  font-size: 12px;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.failed-chip:hover {
+  background: var(--failed-chip-hover-bg);
+  color: var(--failed-chip-hover-color);
+}
+
+.failed-action-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
+  max-width: 320px;
+}
+
+.failed-action-item {
+  font-family: var(--font-body);
+  font-size: 12px;
+  color: var(--failed-body-color);
+  line-height: 1.35;
+}
+
+/* ─── App Footer ────────────────────────────────────────────────────────── */
+.app-footer {
+  height: var(--footer-height);
+  background: var(--clr-primary);
+  border-top: 2px solid var(--clr-lime);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 20px;
+  flex-shrink: 0;
+}
+
+.footer-text {
+  font-family: var(--font-body);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--clr-sidebar-text-dim);
+}
