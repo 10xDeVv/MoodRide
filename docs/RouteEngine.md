@@ -42,6 +42,23 @@ Scenic H3 tile centers are no longer the only anchor source. When possible, scen
 
 The persisted `Route.scenicScore` is route quality, not only raw scenery.
 
+## Score Scales
+
+Wayward uses two score scales:
+
+- Internal algorithm and database scores are normalized from `0.0` to `1.0`.
+- Public API/frontend route scores are shown as `0` to `100` and should be called `Scenic Match`.
+
+Examples:
+
+| Internal | Public | Meaning |
+| --- | --- | --- |
+| `0.25` | `25` | weak scenic/vibe fit |
+| `0.50` | `50` | moderate scenic/vibe fit |
+| `0.80` | `80` | strong scenic/vibe fit |
+
+Tile/component scores such as `water_score`, `tree_canopy_score`, and `road_stress_score` remain `0.0` to `1.0`. Route responses multiply the stored route score by `100.0` so users and analytics see one readable `0-100` scale.
+
 The v2 score blends:
 
 - landscape quality

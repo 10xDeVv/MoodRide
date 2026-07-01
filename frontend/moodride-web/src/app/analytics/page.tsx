@@ -391,9 +391,9 @@ export default function AnalyticsPage() {
               />
               <MetricCard
                 icon={Gauge}
-                label="Avg Scenic Score"
+                label="Avg Scenic Match"
                 value={formatNumber(summary.averageScenicScore, 1)}
-                detail="Completed route average"
+                detail="Completed route average, 0-100"
                 delta={deltaFor("averageScenicScore", (value) => formatNumber(value, 1))}
               />
               <MetricCard

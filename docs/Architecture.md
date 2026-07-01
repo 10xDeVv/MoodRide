@@ -89,6 +89,29 @@ Core tables:
 
 `scenic_score_tiles` is the runtime scenic feature store. Route generation reads this table; it does not compute raw land cover, elevation, water, buildings, parks, or light-pollution signals during a user request.
 
+## Database Table Guide
+
+Core runtime tables:
+
+- `route_jobs`: one row per route request. Tracks status, start point, time budget, vibe, and failure reason.
+- `routes`: generated route options. The stored `scenic_score` is normalized `0.0-1.0`; API responses expose it as `0-100` Scenic Match.
+- `route_waypoints`: persisted points/instructions for each generated route option.
+- `road_segments`: imported road geometry and road metadata used for road-aware anchors, graph lookup, road stress, and scenic-road context.
+- `scenic_score_tiles`: H3 scenic feature vectors used by the route worker at runtime.
+
+Calibration and analytics tables:
+
+- `route_duration_calibrations`: learned radius/waypoint timing hints. A small row count is normal early on because buckets only appear after matching route jobs are generated.
+- `route_weight_calibrations`: older per-vibe multiplier table. It is not the main v2 routing contract; sparse rows are expected unless explicit feedback calibration is enabled.
+- `analytics_events` and `route_analytics_daily`: privacy-safe product analytics and daily rollups.
+
+Derived/import helper tables:
+
+- Tables such as `water_tile_summary` or `land_use_summary` are data-pipeline staging/summary artifacts. They help compute scenic tile features but are not directly queried for every route request.
+- `spatial_ref_sys` is a normal PostGIS system table. It stores coordinate reference system definitions and should be left alone.
+
+Some enrichment columns may be all zero if the matching data release has not populated them in that database, or if the source data for that signal was unavailable/sparse in the imported region. The schema can exist before the data is meaningful.
+
 ## Caching
 
 The route API and route worker share cache key/policy conventions.

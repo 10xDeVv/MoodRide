@@ -618,7 +618,7 @@ public class RouteService {
         Map<String, Object> summary = new HashMap<>();
         summary.put("type", "route_summary");
         summary.put("description", String.format(
-            "%s loop with scenic score %.1f and %d waypoint%s",
+            "%s loop with scenic match %.1f/100 and %d waypoint%s",
             route.getVibe(),
             route.getScenicScore() * 100.0,
             waypoints.size(),

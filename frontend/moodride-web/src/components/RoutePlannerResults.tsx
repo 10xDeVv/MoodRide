@@ -121,17 +121,17 @@ export function getSelectedRouteOption(route: RouteDetailResponse, selectedOptio
 
 function scenicFitLabel(score?: number | null) {
   if (!Number.isFinite(score ?? NaN)) return "Scenic match";
-  const score10 = (score ?? 0) > 10 ? (score ?? 0) / 10 : (score ?? 0);
-  if (score10 >= 7) return "Best scenic match";
-  if (score10 >= 4) return "Good scenic match";
+  const score100 = Math.max(0, Math.min(100, score ?? 0));
+  if (score100 >= 70) return "Best scenic match";
+  if (score100 >= 40) return "Good scenic match";
   return "Some scenic match";
 }
 
 function scenicFitBand(score?: number | null) {
   if (!Number.isFinite(score ?? NaN)) return "Scenic";
-  const score10 = (score ?? 0) > 10 ? (score ?? 0) / 10 : (score ?? 0);
-  if (score10 >= 7) return "Best";
-  if (score10 >= 4) return "Good";
+  const score100 = Math.max(0, Math.min(100, score ?? 0));
+  if (score100 >= 70) return "Best";
+  if (score100 >= 40) return "Good";
   return "Some";
 }
 
