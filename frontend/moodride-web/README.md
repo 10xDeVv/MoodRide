@@ -22,7 +22,7 @@ Copy `.env.example` to `.env.local` and set values.
 ## Run
 
 ```powershell
-Set-Location "C:\Users\aadeb\OneDrive\Desktop\MoodRide\frontend\moodride-web"
+Set-Location "C:\Users\aadeb\OneDrive\Desktop\Wayward\frontend\moodride-web"
 Copy-Item .env.example .env.local -Force
 npm install
 npm run dev
@@ -31,7 +31,7 @@ npm run dev
 ## Verify
 
 ```powershell
-Set-Location "C:\Users\aadeb\OneDrive\Desktop\MoodRide\frontend\moodride-web"
+Set-Location "C:\Users\aadeb\OneDrive\Desktop\Wayward\frontend\moodride-web"
 npm run lint
 npm run build
 ```

@@ -1,5 +1,5 @@
 param(
-    [string]$OutputDir = "C:\Users\aadeb\OneDrive\Desktop\MoodRide\data\elevation\dem_tiles",
+    [string]$OutputDir = "C:\Users\aadeb\OneDrive\Desktop\Wayward\data\elevation\dem_tiles",
     [string]$RegionName,
     [int]$MinLat = 41,
     [int]$MaxLat = 83,

@@ -1,5 +1,5 @@
 param(
-    [string]$WorkspaceRoot = "C:\Users\aadeb\OneDrive\Desktop\MoodRide",
+    [string]$WorkspaceRoot = "C:\Users\aadeb\OneDrive\Desktop\Wayward",
     [switch]$EmitJson
 )
 
