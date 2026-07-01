@@ -71,12 +71,12 @@ jobs:
 
           api_base_url="${{ vars.NEXT_PUBLIC_API_BASE_URL }}"
           if [ -z "$api_base_url" ]; then
-            api_base_url="https://app.moodrides.com"
+            api_base_url="https://usewayward.app"
           fi
 
           ws_base_url="${{ vars.NEXT_PUBLIC_WS_BASE_URL }}"
           if [ -z "$ws_base_url" ]; then
-            ws_base_url="wss://app.moodrides.com/ws"
+            ws_base_url="wss://usewayward.app/ws"
           fi
 
           echo "ghcr_namespace=$namespace" >> "$GITHUB_OUTPUT"

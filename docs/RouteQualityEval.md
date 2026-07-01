@@ -60,7 +60,7 @@ Those mismatch cases are important. They tell us whether the engine should event
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\monitoring\run-route-quality-eval.ps1 `
-  -BaseUrl "https://app.moodrides.com" `
+  -BaseUrl "https://usewayward.app" `
   -OutputDir "artifacts/route-quality-eval"
 ```
 
@@ -68,7 +68,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\monitoring\run-route-quality-
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\monitoring\run-route-quality-eval.ps1 `
-  -BaseUrl "https://app.moodrides.com" `
+  -BaseUrl "https://usewayward.app" `
   -MaxScenarios 2
 ```
 

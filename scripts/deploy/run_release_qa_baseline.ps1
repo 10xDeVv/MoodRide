@@ -1,5 +1,5 @@
 param(
-    [string]$BaseUrl = "https://app.moodrides.com",
+    [string]$BaseUrl = "https://usewayward.app",
     [int]$TimeBudgetMinutes = 90,
     [int]$PollIntervalSeconds = 4,
     [int]$JobTimeoutSeconds = 300,

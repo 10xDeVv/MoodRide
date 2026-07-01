@@ -1,5 +1,5 @@
 param(
-    [string]$BaseUrl = "https://app.moodrides.com",
+    [string]$BaseUrl = "https://usewayward.app",
     [string]$ScenarioFile = "scripts/monitoring/route-quality-scenarios.json",
     [string]$OutputDir = "artifacts/route-quality-eval",
     [string]$RouteMode = "drive",

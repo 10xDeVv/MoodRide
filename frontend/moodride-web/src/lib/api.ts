@@ -14,7 +14,7 @@ import {
 // In server-side code (SSR), call the upstream directly.
 const apiBase =
   process.env.NEXT_PUBLIC_API_BASE_URL ??
-  (typeof window !== "undefined" ? "" : "https://app.moodrides.com");
+  (typeof window !== "undefined" ? "" : "https://usewayward.app");
 
 // Helper: build the correct URL for a given API path
 function apiUrl(path: string): string {

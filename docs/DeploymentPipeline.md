@@ -15,10 +15,37 @@ Add these repository secrets:
 Optional repository variables:
 
 - `GHCR_NAMESPACE`: container namespace in lowercase (example: `10xdevv`).
-- `NEXT_PUBLIC_API_BASE_URL`: default `https://app.moodrides.com`.
-- `NEXT_PUBLIC_WS_BASE_URL`: default `wss://app.moodrides.com/ws`.
+- `NEXT_PUBLIC_API_BASE_URL`: default `https://usewayward.app`.
+- `NEXT_PUBLIC_WS_BASE_URL`: default `wss://usewayward.app/ws`.
 
-## 2. App deployment flow
+## 2. Domain and DNS setup
+
+Production serves:
+
+- `https://usewayward.app`
+- `https://www.usewayward.app`
+
+In Name.com DNS, point the domain at the production VM:
+
+| Type | Host | Value |
+| --- | --- | --- |
+| `A` | `@` | `<PROD_SSH_HOST public IPv4>` |
+| `CNAME` | `www` | `usewayward.app` |
+
+Use TTL `300` while switching domains, then raise it later if desired.
+
+Important: `.app` domains are HTTPS-only in modern browsers. The DNS records must point to the VM and ports `80`/`443` must be reachable so Caddy can issue the TLS certificate.
+
+If GitHub repository variables are configured, set:
+
+- `NEXT_PUBLIC_API_BASE_URL=https://usewayward.app`
+- `NEXT_PUBLIC_WS_BASE_URL=wss://usewayward.app/ws`
+
+If `PROD_ENV_FILE` is configured, include:
+
+- `MOODRIDE_CORS_ALLOWED_ORIGINS=https://usewayward.app,https://www.usewayward.app`
+
+## 3. App deployment flow
 
 Workflow file: `.github/workflows/deploy-prod.yml`.
 
@@ -30,7 +57,7 @@ Workflow file: `.github/workflows/deploy-prod.yml`.
   - Set `image_tag` to deploy a specific tag.
   - Set `skip_build=true` to deploy an existing tag only.
 
-## 3. Rollback flow
+## 4. Rollback flow
 
 Remote rollback script:
 
@@ -46,9 +73,9 @@ cd /opt/moodride
 ./scripts/deploy/rollback_prod.sh
 ```
 
-## 4. Data release flow (local machine -> GitHub Release -> VM)
+## 5. Data release flow (local machine -> GitHub Release -> VM)
 
-### 4A. Build full Canada OSRM dataset locally
+### 5A. Build full Canada OSRM dataset locally
 
 Use the build script (resume-friendly):
 
@@ -71,7 +98,7 @@ If a step fails and you want to resume from a later stage:
 
 The script writes logs under `D:\DATA\osrm\canada\logs\`.
 
-### 4B. Publish a data release from your local machine
+### 5B. Publish a data release from your local machine
 
 Run after OSRM preprocessing finishes:
 
@@ -90,7 +117,7 @@ This uploads:
 
 to the GitHub release tag you specify.
 
-### 4C. Deploy that release to production
+### 5C. Deploy that release to production
 
 Run workflow `.github/workflows/deploy-data-release.yml` with:
 
@@ -100,9 +127,9 @@ Run workflow `.github/workflows/deploy-data-release.yml` with:
 
 The workflow downloads the release asset, copies it to VM, updates `OSRM_DATASET_BASENAME`, and restarts `osrm` + `route-worker`.
 
-## 5. Scenic recompute + release flow (local machine -> GitHub Release -> VM)
+## 6. Scenic recompute + release flow (local machine -> GitHub Release -> VM)
 
-### 5A. Audit scenic data-quality readiness
+### 6A. Audit scenic data-quality readiness
 
 Before changing scenic scoring versions, run the read-only data-quality audit:
 
@@ -115,7 +142,7 @@ Before changing scenic scoring versions, run the read-only data-quality audit:
 
 Use the audit output to decide whether a new scoring train has enough evidence for road stress, water visibility, scenic viewpoints, tree canopy, bridge/coastal-road detection, or seasonal suitability. Do not increase route weights for a signal until the audit shows the source data is present and non-flat in the target region.
 
-### 5B. Run nationwide scenic recompute locally
+### 6B. Run nationwide scenic recompute locally
 
 Stable 3.1 release train:
 
@@ -202,7 +229,7 @@ Important behavior:
 - Older versioned SQL files are kept only for reproducing previous scenic releases.
 - The run is resumable. Re-running after interruption continues from remaining tiles not already at the expected scoring version.
 
-### 5C. Publish scenic tile release from your local machine
+### 6C. Publish scenic tile release from your local machine
 
 ```powershell
 ./scripts/deploy/publish_scenic_release.ps1 `
@@ -216,7 +243,7 @@ This uploads:
 - `scenic-tiles-<scoring-version>.tar.gz`
 - `scenic-tiles-<scoring-version>.tar.gz.sha256`
 
-### 5D. Deploy scenic release to production
+### 6D. Deploy scenic release to production
 
 Run workflow `.github/workflows/deploy-scenic-release.yml` with:
 
@@ -226,13 +253,13 @@ Run workflow `.github/workflows/deploy-scenic-release.yml` with:
 
 The workflow downloads the scenic asset, uploads it to VM, applies score updates into `scenic_score_tiles`, and restarts `route-api` + `route-worker`.
 
-## 6. Post-deploy release QA baseline
+## 7. Post-deploy release QA baseline
 
 Run a production QA sweep after app/data deploys:
 
 ```powershell
 ./scripts/deploy/run_release_qa_baseline.ps1 `
-  -BaseUrl "https://app.moodrides.com" `
+  -BaseUrl "https://usewayward.app" `
   -TimeBudgetMinutes 90 `
   -OutputDir "artifacts/release-qa"
 ```
@@ -242,7 +269,7 @@ Outputs:
 - `artifacts/release-qa/release-qa-<timestamp>.json`
 - `artifacts/release-qa/release-qa-<timestamp>.md`
 
-## 7. Required `.env.prod` keys
+## 8. Required `.env.prod` keys
 
 Make sure `.env.prod` contains at least:
 
@@ -252,10 +279,10 @@ Make sure `.env.prod` contains at least:
 - `REDIS_PASSWORD`
 - `GHCR_NAMESPACE` (lowercase)
 - `IMAGE_TAG`
-- `MOODRIDE_CORS_ALLOWED_ORIGINS=https://app.moodrides.com`
+- `MOODRIDE_CORS_ALLOWED_ORIGINS=https://usewayward.app,https://www.usewayward.app`
 - `OSRM_DATASET_BASENAME`
 
-## 8. Backup locations
+## 9. Backup locations
 
 - Keep production database and dataset backups outside the repository.
 - Do not commit generated dumps, OSRM archives, scenic release tarballs, or local restore artifacts.

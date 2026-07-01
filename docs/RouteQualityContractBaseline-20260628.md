@@ -2,7 +2,7 @@
 
 Baseline run:
 
-- Base URL: `https://app.moodrides.com`
+- Base URL: `https://usewayward.app`
 - Scenario file: `scripts/monitoring/route-quality-scenarios.json`
 - Output directory: `artifacts/route-quality-eval/contract-baseline-20260628`
 - JSON: `artifacts/route-quality-eval/contract-baseline-20260628/route-quality-eval-20260628-005053.json`

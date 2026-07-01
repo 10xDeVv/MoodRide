@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 
-const UPSTREAM = process.env.UPSTREAM_API_BASE ?? "https://app.moodrides.com";
+const UPSTREAM = process.env.UPSTREAM_API_BASE ?? "https://usewayward.app";
 
 async function handler(req: NextRequest, { params }: { params: Promise<{ path: string[] }> }) {
   const { path } = await params;

@@ -26,7 +26,7 @@ Use this after app/data deploys to verify route quality and endpoint health acro
 
 ```powershell
 ./scripts/deploy/run_release_qa_baseline.ps1 `
-  -BaseUrl "https://app.moodrides.com" `
+  -BaseUrl "https://usewayward.app" `
   -TimeBudgetMinutes 90 `
   -PollIntervalSeconds 4 `
   -JobTimeoutSeconds 300 `

@@ -41,7 +41,7 @@ Production compose (`docker-compose.prod.yml`) runs:
 - `frontend`
 - `caddy`
 
-The active production domain is `app.moodrides.com`.
+The active production domain is `usewayward.app`.
 
 ## Service Responsibilities
 

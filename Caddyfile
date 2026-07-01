@@ -1,4 +1,4 @@
-app.moodrides.com {
+usewayward.app, www.usewayward.app {
     handle /api/* {
         reverse_proxy route-api:8080
     }
