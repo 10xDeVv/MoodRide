@@ -34,23 +34,22 @@ import java.util.Set;
 import java.util.function.ToDoubleFunction;
 import java.util.stream.Collectors;
 
+import static com.moodride.routeworker.algorithm.RouteGeometry.bearingDegrees;
+import static com.moodride.routeworker.algorithm.RouteGeometry.clamp;
+import static com.moodride.routeworker.algorithm.RouteGeometry.clamp01;
+import static com.moodride.routeworker.algorithm.RouteGeometry.distanceKm;
+import static com.moodride.routeworker.algorithm.RouteGeometry.estimateCurvatureScore;
+import static com.moodride.routeworker.algorithm.RouteGeometry.normalizeLongitude;
+import static com.moodride.routeworker.algorithm.RouteGeometry.samplePath;
+
 @Service
 public class RoutePlanner {
 
     private static final Logger logger = LoggerFactory.getLogger(RoutePlanner.class);
     private static final int DEFAULT_H3_RESOLUTION = H3Utils.DEFAULT_RESOLUTION;
     private static final int SAMPLE_NEIGHBOR_EXPANSION_RING = 2;
-    private static final double FLAT_SCENIC_SCORE_EPSILON = 0.0001;
     private static final double DEFAULT_SCENIC_FALLBACK = 0.35;
     private static final int ROUTE_OPTION_COUNT = 3;
-    private static final double MAX_EFFECTIVE_DURATION_OVERRUN_RATIO = 1.15;
-    private static final double DIVERSE_ROUTE_SIMILARITY_THRESHOLD = 0.72;
-    private static final double ROUTE_OPTION_MIN_SEPARATION_KM = 0.35;
-    private static final double SHORTER_PROFILE_TARGET_RATIO = 0.78;
-    private static final double SHORTER_PROFILE_MIN_USEFUL_RATIO = 0.60;
-    private static final double MIN_USEFUL_DURATION_RATIO = 0.55;
-    private static final int MAX_CORRIDOR_SIGNATURE_SAMPLES = 96;
-    private static final int MAX_GEOMETRY_SEPARATION_SAMPLES = 80;
     private static final int MIN_VIBE_AVAILABILITY_TILES = 3;
     private static final int VIBE_AVAILABILITY_TOP_N = 12;
     private static final double MIN_VIBE_BEST_FIT_SCORE = 0.32;
@@ -68,16 +67,8 @@ public class RoutePlanner {
     private static final double V2_START_END_PENALTY_WEIGHT = 0.06;
     private static final double V2_STRATEGY_MISMATCH_PENALTY_WEIGHT = 0.08;
     private static final double V2_BACKTRACKING_PENALTY_WEIGHT = 0.08;
-    private static final double MOST_SCENIC_BACKTRACKING_PROFILE_WEIGHT = 0.18;
-    private static final double BALANCED_BACKTRACKING_PROFILE_WEIGHT = 0.12;
-    private static final double SHORTER_BACKTRACKING_PROFILE_WEIGHT = 0.07;
     private static final double V2_CONTINUITY_THRESHOLD = 0.45;
     private static final int V2_EDGE_SAMPLE_COUNT = 4;
-    private static final int ROUTE_CRAFT_H3_RESOLUTION = DEFAULT_H3_RESOLUTION + 1;
-    private static final int ROUTE_CRAFT_SAMPLE_METERS = 350;
-    private static final int ROUTE_CRAFT_NEAR_DUPLICATE_WINDOW = 4;
-    private static final double ROUTE_CRAFT_LEG_SEPARATION_GOOD_KM = 0.85;
-    private static final double ROUTE_CRAFT_NEAR_DUPLICATE_KM = 0.12;
     private static final int STRATEGY_ANCHOR_LIMIT = 12;
     private static final int STRATEGY_PAIR_LIMIT = 18;
     private static final double STRATEGY_ANCHOR_MIN_SEPARATION_KM = 1.6;
@@ -113,6 +104,8 @@ public class RoutePlanner {
     private final ApplicationConfiguration config;
     private final ObjectMapper objectMapper;
     private final ScenicScoreCalculator scenicScoreCalculator;
+    private final RouteOptionSelector routeOptionSelector;
+    private final RouteCraftAnalyzer routeCraftAnalyzer;
 
     public RoutePlanner(ScenicTileLookupService scenicTileLookupService,
                         RoadSegmentAnchorService roadSegmentAnchorService,
@@ -130,6 +123,8 @@ public class RoutePlanner {
         this.config = config;
         this.objectMapper = objectMapper;
         this.scenicScoreCalculator = scenicScoreCalculator;
+        this.routeOptionSelector = new RouteOptionSelector(config.getMaxDurationOverrunRatio());
+        this.routeCraftAnalyzer = new RouteCraftAnalyzer();
     }
 
     public RouteCandidate generateRoute(RouteJob job) {
@@ -161,31 +156,31 @@ public class RoutePlanner {
             durationCalibration
         );
         List<RouteCandidate> hybridCandidates = collectHybridCandidates(job, waypointVariants, preferences, vibeProfile, geometryStrategy);
-        if (hybridCandidates.isEmpty() || !hasDiverseCandidatePool(hybridCandidates, job.getTimeBudgetMinutes())) {
+        if (hybridCandidates.isEmpty() || !routeOptionSelector.hasDiverseCandidatePool(hybridCandidates, job.getTimeBudgetMinutes())) {
             List<List<RoadNode>> syntheticVariants = buildSyntheticWaypointRings(start, job.getTimeBudgetMinutes());
             List<RouteCandidate> syntheticCandidates = collectHybridCandidates(job, syntheticVariants, preferences, vibeProfile, geometryStrategy);
             if (hybridCandidates.isEmpty()) {
                 hybridCandidates = syntheticCandidates;
             } else if (!syntheticCandidates.isEmpty()) {
-                hybridCandidates = combineCandidates(hybridCandidates, syntheticCandidates);
+                hybridCandidates = routeOptionSelector.combineCandidates(hybridCandidates, syntheticCandidates);
             }
             if (!syntheticCandidates.isEmpty()) {
                 logger.info("Hybrid routing used synthetic waypoint variants for job {}", job.getId());
             }
         }
-        if (hybridCandidates.size() < ROUTE_OPTION_COUNT || needsBudgetRescue(hybridCandidates, job.getTimeBudgetMinutes())) {
+        if (hybridCandidates.size() < ROUTE_OPTION_COUNT || routeOptionSelector.needsBudgetRescue(hybridCandidates, job.getTimeBudgetMinutes())) {
             List<List<RoadNode>> budgetRescueVariants = buildBudgetRescueWaypointRings(start, job.getTimeBudgetMinutes());
             List<RouteCandidate> budgetRescueCandidates = collectHybridCandidates(job, budgetRescueVariants, preferences, vibeProfile, geometryStrategy);
             if (!budgetRescueCandidates.isEmpty()) {
-                hybridCandidates = combineCandidates(hybridCandidates, budgetRescueCandidates);
+                hybridCandidates = routeOptionSelector.combineCandidates(hybridCandidates, budgetRescueCandidates);
                 logger.info("Hybrid routing used budget-rescue waypoint variants for job {}", job.getId());
             }
         }
         if (!hybridCandidates.isEmpty()) {
-            List<RouteCandidate> differentiated = differentiateFlatScenicScores(hybridCandidates, job.getTimeBudgetMinutes());
+            List<RouteCandidate> differentiated = routeOptionSelector.differentiateFlatScenicScores(hybridCandidates, job.getTimeBudgetMinutes());
             List<RouteCandidate> candidatePool = contractCandidatePool(differentiated, vibeProfile, geometryStrategy, requestVibes, job);
-            List<RouteCandidate> selected = selectRouteOptions(candidatePool, job.getTimeBudgetMinutes());
-            if (selected.size() >= ROUTE_OPTION_COUNT && minRouteSeparationKm(selected) < ROUTE_OPTION_MIN_SEPARATION_KM) {
+            List<RouteCandidate> selected = routeOptionSelector.selectRouteOptions(candidatePool, job.getTimeBudgetMinutes());
+            if (selected.size() >= ROUTE_OPTION_COUNT && routeOptionSelector.minRouteSeparationKm(selected) < RouteOptionSelector.ROUTE_OPTION_MIN_SEPARATION_KM) {
                 List<RouteCandidate> rescueCandidates = collectHybridCandidates(
                     job,
                     buildDiversityRescueWaypointRings(start, job.getTimeBudgetMinutes()),
@@ -194,12 +189,12 @@ public class RoutePlanner {
                     geometryStrategy
                 );
                 if (!rescueCandidates.isEmpty()) {
-                    List<RouteCandidate> expanded = differentiateFlatScenicScores(
-                        combineCandidates(differentiated, rescueCandidates),
+                    List<RouteCandidate> expanded = routeOptionSelector.differentiateFlatScenicScores(
+                        routeOptionSelector.combineCandidates(differentiated, rescueCandidates),
                         job.getTimeBudgetMinutes()
                     );
                     List<RouteCandidate> expandedPool = contractCandidatePool(expanded, vibeProfile, geometryStrategy, requestVibes, job);
-                    selected = selectRouteOptions(expandedPool, job.getTimeBudgetMinutes());
+                    selected = routeOptionSelector.selectRouteOptions(expandedPool, job.getTimeBudgetMinutes());
                     logger.info("Hybrid routing used diversity-rescue waypoint variants for job {}", job.getId());
                 }
             }
@@ -209,7 +204,7 @@ public class RoutePlanner {
             return selected;
         }
 
-        int maxAllowedMinutes = maxAllowedMinutes(job.getTimeBudgetMinutes());
+        int maxAllowedMinutes = routeOptionSelector.maxAllowedMinutes(job.getTimeBudgetMinutes());
         throw new NoFeasibleRouteException(
             "No feasible route found within " + maxAllowedMinutes
                 + " minutes for requested " + job.getTimeBudgetMinutes()
@@ -223,7 +218,7 @@ public class RoutePlanner {
                                                          VibeCatalog.BlendedVibeProfile vibeProfile,
                                                          GeometryStrategy geometryStrategy) {
         List<RouteCandidate> candidates = new ArrayList<>();
-        int maxAllowedMinutes = maxAllowedMinutes(job.getTimeBudgetMinutes());
+        int maxAllowedMinutes = routeOptionSelector.maxAllowedMinutes(job.getTimeBudgetMinutes());
 
         for (List<RoadNode> variant : waypointVariants) {
             var result = osrmTripClient.requestRoundTrip(variant, job.getRouteMode());
@@ -263,7 +258,7 @@ public class RoutePlanner {
             return List.of();
         }
 
-        List<RouteCandidate> deduplicated = deduplicateCandidates(candidates);
+        List<RouteCandidate> deduplicated = routeOptionSelector.deduplicateCandidates(candidates);
         List<RouteCandidate> inBudget = deduplicated.stream()
             .filter(candidate -> candidate.getEstimatedMinutes() <= maxAllowedMinutes)
             .toList();
@@ -285,19 +280,6 @@ public class RoutePlanner {
         }
 
         return List.of();
-    }
-
-    private int maxAllowedMinutes(int targetMinutes) {
-        int safeTarget = Math.max(1, targetMinutes);
-        double configuredRatio = Math.max(1.0, config.getMaxDurationOverrunRatio());
-        double effectiveRatio = Math.min(MAX_EFFECTIVE_DURATION_OVERRUN_RATIO, configuredRatio);
-        int ratioCap = (int) Math.ceil(safeTarget * effectiveRatio);
-        int absoluteSlack = Math.max(3, Math.min(10, (int) Math.ceil(safeTarget * 0.15)));
-        return Math.max(safeTarget, Math.min(ratioCap, safeTarget + absoluteSlack));
-    }
-
-    private int minUsefulMinutes(int targetMinutes) {
-        return (int) Math.ceil(Math.max(10.0, Math.max(1, targetMinutes) * MIN_USEFUL_DURATION_RATIO));
     }
 
     private DurationCalibrationHint resolveDurationCalibrationHint(RoadNode start,
@@ -333,47 +315,6 @@ public class RoutePlanner {
     private String geometryStrategyName(GeometryStrategy geometryStrategy) {
         GeometryStrategy activeStrategy = geometryStrategy == null ? GeometryStrategy.BALANCED_VARIETY : geometryStrategy;
         return activeStrategy.name();
-    }
-
-    private List<RouteCandidate> combineCandidates(List<RouteCandidate> left, List<RouteCandidate> right) {
-        if ((left == null || left.isEmpty()) && (right == null || right.isEmpty())) {
-            return List.of();
-        }
-        List<RouteCandidate> combined = new ArrayList<>();
-        if (left != null) {
-            combined.addAll(left);
-        }
-        if (right != null) {
-            combined.addAll(right);
-        }
-        return deduplicateCandidates(combined);
-    }
-
-    private List<RouteCandidate> selectRouteOptions(List<RouteCandidate> candidates, int targetMinutes) {
-        if (candidates.isEmpty()) {
-            return List.of();
-        }
-
-        List<RouteCandidate> selected = new ArrayList<>();
-
-        addIfPresent(selected, pickBestCandidate(candidates, candidate -> mostScenicProfileScore(candidate, targetMinutes), selected, targetMinutes, false));
-        addIfPresent(selected, pickBestCandidate(candidates, candidate -> balancedProfileScore(candidate, targetMinutes), selected, targetMinutes, true));
-        addIfPresent(selected, pickBestCandidate(candidates, shorterProfileScorer(candidates, targetMinutes), selected, targetMinutes, true));
-
-        if (selected.size() < 3) {
-            addIfPresent(selected, pickBestCandidate(candidates, candidate -> balancedProfileScore(candidate, targetMinutes), selected, targetMinutes, false));
-            addIfPresent(selected, pickBestCandidate(candidates, shorterProfileScorer(candidates, targetMinutes), selected, targetMinutes, false));
-        }
-
-        if (selected.size() < ROUTE_OPTION_COUNT) {
-            candidates.stream()
-                .filter(candidate -> selected.stream().noneMatch(existing -> candidateSignature(existing).equals(candidateSignature(candidate))))
-                .sorted(Comparator.comparingDouble((RouteCandidate candidate) -> fallbackOptionScore(candidate, selected, targetMinutes)).reversed())
-                .limit(ROUTE_OPTION_COUNT - selected.size())
-                .forEach(selected::add);
-        }
-
-        return List.copyOf(selected);
     }
 
     private List<RouteCandidate> contractCandidatePool(List<RouteCandidate> candidates,
@@ -471,421 +412,6 @@ public class RoutePlanner {
             return fallback;
         }
         return breakdown.get(key);
-    }
-
-    private boolean needsBudgetRescue(List<RouteCandidate> candidates, int targetMinutes) {
-        if (candidates == null || candidates.isEmpty()) {
-            return true;
-        }
-
-        int minUsefulMinutes = minUsefulMinutes(targetMinutes);
-        long usefulCandidates = candidates.stream()
-            .filter(candidate -> candidate.getEstimatedMinutes() >= minUsefulMinutes)
-            .count();
-        int maxDuration = candidates.stream()
-            .mapToInt(RouteCandidate::getEstimatedMinutes)
-            .max()
-            .orElse(0);
-        int minDuration = candidates.stream()
-            .mapToInt(RouteCandidate::getEstimatedMinutes)
-            .min()
-            .orElse(0);
-
-        return usefulCandidates < ROUTE_OPTION_COUNT
-            || maxDuration < minUsefulMinutes
-            || (maxDuration - minDuration) < minDurationSeparationMinutes(targetMinutes);
-    }
-
-    private boolean hasDiverseCandidatePool(List<RouteCandidate> candidates, int targetMinutes) {
-        if (candidates == null || candidates.size() < ROUTE_OPTION_COUNT) {
-            return false;
-        }
-
-        List<RouteCandidate> diverse = new ArrayList<>();
-        candidates.stream()
-            .sorted(Comparator.comparingDouble((RouteCandidate candidate) -> mostScenicProfileScore(candidate, targetMinutes)).reversed())
-            .forEach(candidate -> {
-                boolean duplicate = diverse.stream()
-                    .anyMatch(existing -> candidateSignature(existing).equals(candidateSignature(candidate)));
-                if (!duplicate && isMeaningfullyDifferent(candidate, diverse, targetMinutes)) {
-                    diverse.add(candidate);
-                }
-            });
-        return diverse.size() >= ROUTE_OPTION_COUNT;
-    }
-
-    private RouteCandidate pickBestCandidate(List<RouteCandidate> candidates,
-                                             ToDoubleFunction<RouteCandidate> scorer,
-                                             List<RouteCandidate> selected,
-                                             int targetMinutes,
-                                             boolean requireDiversity) {
-        return candidates.stream()
-            .filter(candidate -> selected.stream().noneMatch(existing -> candidateSignature(existing).equals(candidateSignature(candidate))))
-            .filter(candidate -> !requireDiversity || isMeaningfullyDifferent(candidate, selected, targetMinutes))
-            .max(Comparator.comparingDouble(candidate -> scorer.applyAsDouble(candidate) - diversityPenalty(candidate, selected, targetMinutes)))
-            .orElse(null);
-    }
-
-    private void addIfPresent(List<RouteCandidate> selected, RouteCandidate candidate) {
-        if (candidate != null && selected.stream().noneMatch(existing -> candidateSignature(existing).equals(candidateSignature(candidate)))) {
-            selected.add(candidate);
-        }
-    }
-
-    private double mostScenicProfileScore(RouteCandidate candidate, int targetMinutes) {
-        return (candidate.getTotalScenicScore() * 0.74)
-            + (budgetFitScore(candidate, targetMinutes) * 0.08)
-            + (budgetUtilizationScore(candidate, targetMinutes) * 0.18)
-            - (candidateBacktrackingPenalty(candidate) * MOST_SCENIC_BACKTRACKING_PROFILE_WEIGHT);
-    }
-
-    private double balancedProfileScore(RouteCandidate candidate, int targetMinutes) {
-        return (candidate.getTotalScenicScore() * 0.46)
-            + (budgetFitScore(candidate, targetMinutes) * 0.34)
-            + (budgetUtilizationScore(candidate, targetMinutes) * 0.12)
-            + (estimateCurvatureScore(candidate.getWaypoints()) * 0.08)
-            - (candidateBacktrackingPenalty(candidate) * BALANCED_BACKTRACKING_PROFILE_WEIGHT);
-    }
-
-    private ToDoubleFunction<RouteCandidate> shorterProfileScorer(List<RouteCandidate> candidates, int targetMinutes) {
-        double maxDistance = Math.max(0.1, candidates.stream().mapToDouble(RouteCandidate::getTotalDistanceKm).max().orElse(0.1));
-        return candidate -> {
-            double shorterDistance = 1.0 - clamp01(candidate.getTotalDistanceKm() / maxDistance);
-            double usefulShorterFit = shorterProfileBudgetFitScore(candidate, targetMinutes);
-            return (usefulShorterFit * 0.46)
-                + (candidate.getTotalScenicScore() * 0.28)
-                + (budgetFitScore(candidate, targetMinutes) * 0.14)
-                + (shorterDistance * 0.08)
-                + (estimateCurvatureScore(candidate.getWaypoints()) * 0.04)
-                - (candidateBacktrackingPenalty(candidate) * SHORTER_BACKTRACKING_PROFILE_WEIGHT);
-        };
-    }
-
-    private double candidateBacktrackingPenalty(RouteCandidate candidate) {
-        return breakdownValue(candidate.getScoreBreakdown(), "backtracking_penalty", 0.0);
-    }
-
-    private double shorterProfileBudgetFitScore(RouteCandidate candidate, int targetMinutes) {
-        double safeTarget = Math.max(1.0, targetMinutes);
-        double ratio = candidate.getEstimatedMinutes() / safeTarget;
-        double targetFit = 1.0 - clamp01(Math.abs(ratio - SHORTER_PROFILE_TARGET_RATIO) / 0.28);
-        if (ratio < SHORTER_PROFILE_MIN_USEFUL_RATIO) {
-            targetFit *= clamp01(ratio / SHORTER_PROFILE_MIN_USEFUL_RATIO) * 0.55;
-        }
-        if (ratio > 1.0) {
-            targetFit *= Math.max(0.35, 1.0 - ((ratio - 1.0) * 2.0));
-        }
-        return clamp01(targetFit);
-    }
-
-    private double budgetFitScore(RouteCandidate candidate, int targetMinutes) {
-        int maxAllowedMinutes = maxAllowedMinutes(targetMinutes);
-        int gap = candidate.getEstimatedMinutes() <= targetMinutes
-            ? targetMinutes - candidate.getEstimatedMinutes()
-            : (candidate.getEstimatedMinutes() - targetMinutes) * 2;
-        return clamp01(1.0 - (gap / (double) Math.max(1, maxAllowedMinutes)));
-    }
-
-    private double budgetUtilizationScore(RouteCandidate candidate, int targetMinutes) {
-        return clamp01(candidate.getEstimatedMinutes() / (double) Math.max(1, targetMinutes));
-    }
-
-    private double diversityPenalty(RouteCandidate candidate, List<RouteCandidate> selected, int targetMinutes) {
-        double penalty = 0.0;
-        for (RouteCandidate existing : selected) {
-            double separationKm = geometrySeparationKm(candidate, existing);
-            if (separationKm < ROUTE_OPTION_MIN_SEPARATION_KM) {
-                penalty = Math.max(penalty, (ROUTE_OPTION_MIN_SEPARATION_KM - separationKm) * 0.65);
-            }
-
-            double similarity = routeSimilarity(candidate, existing);
-            if (similarity > DIVERSE_ROUTE_SIMILARITY_THRESHOLD) {
-                penalty = Math.max(penalty, 0.28 + (similarity - DIVERSE_ROUTE_SIMILARITY_THRESHOLD));
-            }
-
-            int durationGap = Math.abs(candidate.getEstimatedMinutes() - existing.getEstimatedMinutes());
-            double distanceGap = Math.abs(candidate.getTotalDistanceKm() - existing.getTotalDistanceKm());
-            if (similarity > 0.50
-                && durationGap < minDurationSeparationMinutes(targetMinutes)
-                && distanceGap < minDistanceSeparationKm(candidate, existing)) {
-                penalty = Math.max(penalty, 0.18);
-            }
-        }
-        return penalty;
-    }
-
-    private double fallbackOptionScore(RouteCandidate candidate, List<RouteCandidate> selected, int targetMinutes) {
-        double minSeparationKm = selected.isEmpty()
-            ? ROUTE_OPTION_MIN_SEPARATION_KM
-            : selected.stream()
-                .mapToDouble(existing -> geometrySeparationKm(candidate, existing))
-                .min()
-                .orElse(0.0);
-        double separationScore = clamp01(minSeparationKm / ROUTE_OPTION_MIN_SEPARATION_KM);
-        return mostScenicProfileScore(candidate, targetMinutes)
-            + (separationScore * 0.30)
-            + (budgetFitScore(candidate, targetMinutes) * 0.10)
-            - diversityPenalty(candidate, selected, targetMinutes);
-    }
-
-    private boolean isMeaningfullyDifferent(RouteCandidate candidate, List<RouteCandidate> selected, int targetMinutes) {
-        for (RouteCandidate existing : selected) {
-            if (geometrySeparationKm(candidate, existing) < ROUTE_OPTION_MIN_SEPARATION_KM) {
-                return false;
-            }
-
-            double similarity = routeSimilarity(candidate, existing);
-            if (similarity > DIVERSE_ROUTE_SIMILARITY_THRESHOLD) {
-                return false;
-            }
-
-            int durationGap = Math.abs(candidate.getEstimatedMinutes() - existing.getEstimatedMinutes());
-            double distanceGap = Math.abs(candidate.getTotalDistanceKm() - existing.getTotalDistanceKm());
-            if (similarity > 0.50
-                && durationGap < minDurationSeparationMinutes(targetMinutes)
-                && distanceGap < minDistanceSeparationKm(candidate, existing)) {
-                return false;
-            }
-        }
-        return true;
-    }
-
-    private double minRouteSeparationKm(List<RouteCandidate> candidates) {
-        if (candidates == null || candidates.size() < 2) {
-            return ROUTE_OPTION_MIN_SEPARATION_KM;
-        }
-
-        double minSeparationKm = Double.POSITIVE_INFINITY;
-        for (int i = 0; i < candidates.size(); i++) {
-            for (int j = i + 1; j < candidates.size(); j++) {
-                minSeparationKm = Math.min(minSeparationKm, geometrySeparationKm(candidates.get(i), candidates.get(j)));
-            }
-        }
-        return Double.isInfinite(minSeparationKm) ? ROUTE_OPTION_MIN_SEPARATION_KM : minSeparationKm;
-    }
-
-    private double geometrySeparationKm(RouteCandidate left, RouteCandidate right) {
-        List<RoadNode> leftSamples = sampledGeometryPoints(left.getWaypoints());
-        List<RoadNode> rightSamples = sampledGeometryPoints(right.getWaypoints());
-        if (leftSamples.isEmpty() || rightSamples.isEmpty()) {
-            return ROUTE_OPTION_MIN_SEPARATION_KM;
-        }
-
-        double forward = averageNearestDistanceKm(leftSamples, rightSamples);
-        double reverse = averageNearestDistanceKm(rightSamples, leftSamples);
-        return (forward + reverse) / 2.0;
-    }
-
-    private List<RoadNode> sampledGeometryPoints(List<RoadNode> points) {
-        if (points == null || points.isEmpty()) {
-            return List.of();
-        }
-        if (points.size() <= MAX_GEOMETRY_SEPARATION_SAMPLES) {
-            return points;
-        }
-
-        List<RoadNode> sampled = new ArrayList<>(MAX_GEOMETRY_SEPARATION_SAMPLES);
-        int lastIndex = points.size() - 1;
-        for (int i = 0; i < MAX_GEOMETRY_SEPARATION_SAMPLES; i++) {
-            int index = (int) Math.round((i * lastIndex) / (double) Math.max(1, MAX_GEOMETRY_SEPARATION_SAMPLES - 1));
-            sampled.add(points.get(index));
-        }
-        return sampled;
-    }
-
-    private double averageNearestDistanceKm(List<RoadNode> fromPoints, List<RoadNode> toPoints) {
-        double sum = 0.0;
-        for (RoadNode point : fromPoints) {
-            double minDistanceKm = Double.POSITIVE_INFINITY;
-            for (RoadNode candidate : toPoints) {
-                minDistanceKm = Math.min(minDistanceKm, distanceKm(point, candidate));
-            }
-            if (!Double.isInfinite(minDistanceKm)) {
-                sum += minDistanceKm;
-            }
-        }
-        return sum / Math.max(1, fromPoints.size());
-    }
-
-    private int minDurationSeparationMinutes(int targetMinutes) {
-        return Math.max(4, (int) Math.ceil(targetMinutes * 0.08));
-    }
-
-    private double minDistanceSeparationKm(RouteCandidate left, RouteCandidate right) {
-        return Math.max(2.0, Math.min(left.getTotalDistanceKm(), right.getTotalDistanceKm()) * 0.08);
-    }
-
-    private double routeSimilarity(RouteCandidate left, RouteCandidate right) {
-        Set<String> leftCells = corridorSignature(left);
-        Set<String> rightCells = corridorSignature(right);
-        if (leftCells.isEmpty() || rightCells.isEmpty()) {
-            return 0.0;
-        }
-
-        int intersection = 0;
-        for (String cell : leftCells) {
-            if (rightCells.contains(cell)) {
-                intersection++;
-            }
-        }
-        int union = leftCells.size() + rightCells.size() - intersection;
-        if (union <= 0) {
-            return 0.0;
-        }
-        return intersection / (double) union;
-    }
-
-    private Set<String> corridorSignature(RouteCandidate candidate) {
-        List<RoadNode> path = candidate.getWaypoints();
-        if (path.isEmpty()) {
-            return Set.of();
-        }
-
-        Set<String> cells = new HashSet<>();
-        int step = Math.max(1, (int) Math.ceil(path.size() / (double) MAX_CORRIDOR_SIGNATURE_SAMPLES));
-        for (int i = 0; i < path.size(); i += step) {
-            cells.add(coarseCoordinateKey(path.get(i)));
-        }
-        cells.add(coarseCoordinateKey(path.getLast()));
-        return cells;
-    }
-
-    private String coarseCoordinateKey(RoadNode node) {
-        return String.format(Locale.ROOT, "%.3f,%.3f", node.getLatitude(), node.getLongitude());
-    }
-
-    private List<RouteCandidate> differentiateFlatScenicScores(List<RouteCandidate> candidates, int targetMinutes) {
-        if (candidates.size() < 2) {
-            return candidates;
-        }
-
-        double minScenic = candidates.stream()
-            .mapToDouble(RouteCandidate::getTotalScenicScore)
-            .min()
-            .orElse(0.0);
-        double maxScenic = candidates.stream()
-            .mapToDouble(RouteCandidate::getTotalScenicScore)
-            .max()
-            .orElse(0.0);
-        if ((maxScenic - minScenic) > FLAT_SCENIC_SCORE_EPSILON) {
-            return candidates;
-        }
-
-        double minDistance = candidates.stream()
-            .mapToDouble(RouteCandidate::getTotalDistanceKm)
-            .min()
-            .orElse(0.0);
-        double maxDistance = candidates.stream()
-            .mapToDouble(RouteCandidate::getTotalDistanceKm)
-            .max()
-            .orElse(minDistance);
-
-        List<RouteCandidate> adjusted = new ArrayList<>(candidates.size());
-        for (RouteCandidate candidate : candidates) {
-            double fallbackScore = estimateFallbackScenicScore(candidate, minDistance, maxDistance, targetMinutes);
-            Map<String, Double> adjustedBreakdown = new LinkedHashMap<>(candidate.getScoreBreakdown());
-            adjustedBreakdown.put("final_score", fallbackScore);
-            adjustedBreakdown.put("fallback_selection_score", fallbackScore);
-            adjusted.add(new RouteCandidate(
-                candidate.getWaypoints(),
-                fallbackScore,
-                candidate.getTotalDistanceKm(),
-                candidate.getEstimatedMinutes(),
-                candidate.getAlgorithmVersion(),
-                candidate.getBeamCandidates(),
-                adjustedBreakdown
-            ));
-        }
-
-        logger.info(
-            "Scenic score fallback differentiation applied for {} candidate(s) at target {} minutes",
-            adjusted.size(),
-            targetMinutes
-        );
-        return List.copyOf(adjusted);
-    }
-
-    private double estimateFallbackScenicScore(RouteCandidate candidate,
-                                               double minDistanceKm,
-                                               double maxDistanceKm,
-                                               int targetMinutes) {
-        double distanceComponent = normalizeRange(candidate.getTotalDistanceKm(), minDistanceKm, maxDistanceKm);
-        double curvatureComponent = estimateCurvatureScore(candidate.getWaypoints());
-        double timeFitComponent = clamp01(
-            1.0 - (Math.abs(candidate.getEstimatedMinutes() - targetMinutes) / Math.max(1.0, (double) targetMinutes))
-        );
-        double hashJitter = (Math.abs(candidateSignature(candidate).hashCode()) % 1000) / 1_000_000.0;
-
-        return clamp01(
-            0.25
-                + (distanceComponent * 0.40)
-                + (curvatureComponent * 0.25)
-                + (timeFitComponent * 0.10)
-                + hashJitter
-        );
-    }
-
-    private double normalizeRange(double value, double min, double max) {
-        if ((max - min) <= FLAT_SCENIC_SCORE_EPSILON) {
-            return 0.5;
-        }
-        return clamp01((value - min) / (max - min));
-    }
-
-    private double estimateCurvatureScore(List<RoadNode> path) {
-        if (path == null || path.size() < 3) {
-            return 0.0;
-        }
-
-        double totalTurn = 0.0;
-        int turnSamples = 0;
-        for (int i = 1; i < path.size() - 1; i++) {
-            double previousBearing = bearingDegrees(path.get(i - 1), path.get(i));
-            double nextBearing = bearingDegrees(path.get(i), path.get(i + 1));
-            double delta = Math.abs(nextBearing - previousBearing);
-            if (delta > 180.0) {
-                delta = 360.0 - delta;
-            }
-            totalTurn += delta;
-            turnSamples++;
-        }
-
-        if (turnSamples == 0) {
-            return 0.0;
-        }
-        double averageTurn = totalTurn / turnSamples;
-        return clamp01(averageTurn / 90.0);
-    }
-
-    private List<RouteCandidate> deduplicateCandidates(List<RouteCandidate> candidates) {
-        Map<String, RouteCandidate> unique = new LinkedHashMap<>();
-        for (RouteCandidate candidate : candidates) {
-            String signature = candidateSignature(candidate);
-            RouteCandidate existing = unique.get(signature);
-            if (existing == null || shouldReplace(existing, candidate)) {
-                unique.put(signature, candidate);
-            }
-        }
-        return List.copyOf(unique.values());
-    }
-
-    private boolean shouldReplace(RouteCandidate existing, RouteCandidate replacement) {
-        if (replacement.getTotalScenicScore() > existing.getTotalScenicScore() + 0.0001) {
-            return true;
-        }
-        if (Math.abs(replacement.getTotalScenicScore() - existing.getTotalScenicScore()) <= 0.0001) {
-            if (replacement.getEstimatedMinutes() != existing.getEstimatedMinutes()) {
-                return replacement.getEstimatedMinutes() < existing.getEstimatedMinutes();
-            }
-            return replacement.getTotalDistanceKm() < existing.getTotalDistanceKm();
-        }
-        return false;
-    }
-
-    private String candidateSignature(RouteCandidate candidate) {
-        return candidate.getWaypoints().stream()
-            .map(node -> String.format(Locale.ROOT, "%.5f,%.5f", node.getLatitude(), node.getLongitude()))
-            .collect(Collectors.joining("|"));
     }
 
     private List<TileCandidate> scoreNearbyTiles(RoadNode start,
@@ -1783,18 +1309,6 @@ public class RoutePlanner {
         return (scenicScore * 0.55) + (vibeFit * 0.35) + (radiusFit * 0.10);
     }
 
-    private double bearingDegrees(RoadNode from, RoadNode to) {
-        double lat1 = Math.toRadians(from.getLatitude());
-        double lat2 = Math.toRadians(to.getLatitude());
-        double dLon = Math.toRadians(to.getLongitude() - from.getLongitude());
-
-        double y = Math.sin(dLon) * Math.cos(lat2);
-        double x = Math.cos(lat1) * Math.sin(lat2)
-            - Math.sin(lat1) * Math.cos(lat2) * Math.cos(dLon);
-
-        return (Math.toDegrees(Math.atan2(y, x)) + 360.0) % 360.0;
-    }
-
     private RoadNode offsetNode(RoadNode origin, double distanceKm, double bearingDegrees) {
         final double earthRadiusKm = 6371.0;
         double angularDistance = Math.max(0.0, distanceKm) / earthRadiusKm;
@@ -1817,17 +1331,6 @@ public class RoutePlanner {
         return new RoadNode(Math.toDegrees(lat2), normalizeLongitude(Math.toDegrees(lon2)));
     }
 
-    private double normalizeLongitude(double longitude) {
-        double normalized = longitude;
-        while (normalized > 180.0) {
-            normalized -= 360.0;
-        }
-        while (normalized < -180.0) {
-            normalized += 360.0;
-        }
-        return normalized;
-    }
-
     private RouteScoreResult computeHybridV2RouteScore(List<RoadNode> path,
                                                        PreferenceWeights preferences,
                                                        VibeCatalog.BlendedVibeProfile vibeProfile,
@@ -1838,7 +1341,7 @@ public class RoutePlanner {
             return new RouteScoreResult(0.0, Map.of("final_score", 0.0));
         }
 
-        RouteCraftMetrics routeCraftMetrics = computeRouteCraftMetrics(path);
+        RouteCraftMetrics routeCraftMetrics = routeCraftAnalyzer.analyze(path);
         CorridorTileCoverage coverage = findCorridorTileCoverage(path);
         List<ScenicScoreTile> tiles = coverage.orderedTiles();
         if (tiles.isEmpty()) {
@@ -2157,172 +1660,6 @@ public class RoutePlanner {
         return clamp01((peakScore * 0.32) + (continuityScore * 0.46) + (consistencyScore * 0.22));
     }
 
-    private RouteCraftMetrics computeRouteCraftMetrics(List<RoadNode> path) {
-        if (path == null || path.size() < 4) {
-            return new RouteCraftMetrics(0.0, 0.0, 1.0, 0.0, 0.0);
-        }
-
-        List<RoadNode> samples = samplePath(path, ROUTE_CRAFT_SAMPLE_METERS);
-        if (samples.size() < 4) {
-            samples = path;
-        }
-
-        List<String> compressedCells = compressedRouteCraftCells(samples);
-        double repeatedCellShare = repeatedCorridorCellShare(compressedCells);
-        double reverseOverlapShare = reverseOverlapShare(compressedCells);
-        double legSeparationScore = legSeparationScore(samples);
-        double nearDuplicateRisk = selfIntersectionOrNearDuplicateRisk(samples);
-        double backtrackingPenalty = clamp01(
-            (repeatedCellShare * 0.34)
-                + (reverseOverlapShare * 0.30)
-                + ((1.0 - legSeparationScore) * 0.24)
-                + (nearDuplicateRisk * 0.12)
-        );
-
-        return new RouteCraftMetrics(
-            repeatedCellShare,
-            reverseOverlapShare,
-            legSeparationScore,
-            nearDuplicateRisk,
-            backtrackingPenalty
-        );
-    }
-
-    private List<String> compressedRouteCraftCells(List<RoadNode> samples) {
-        List<String> cells = new ArrayList<>();
-        String previous = null;
-        for (RoadNode sample : samples) {
-            String cell = H3Utils.getH3Index(sample.getLatitude(), sample.getLongitude(), ROUTE_CRAFT_H3_RESOLUTION);
-            if (!cell.equals(previous)) {
-                cells.add(cell);
-                previous = cell;
-            }
-        }
-        return cells;
-    }
-
-    private double repeatedCorridorCellShare(List<String> compressedCells) {
-        if (compressedCells == null || compressedCells.size() < 2) {
-            return 0.0;
-        }
-        Set<String> uniqueCells = new HashSet<>(compressedCells);
-        return clamp01((compressedCells.size() - uniqueCells.size()) / (double) compressedCells.size());
-    }
-
-    private double reverseOverlapShare(List<String> compressedCells) {
-        if (compressedCells == null || compressedCells.size() < 3) {
-            return 0.0;
-        }
-
-        int edgeCount = 0;
-        Set<String> uniqueUndirectedEdges = new HashSet<>();
-        for (int i = 1; i < compressedCells.size(); i++) {
-            String left = compressedCells.get(i - 1);
-            String right = compressedCells.get(i);
-            if (left.equals(right)) {
-                continue;
-            }
-            edgeCount++;
-            uniqueUndirectedEdges.add(undirectedEdgeKey(left, right));
-        }
-        if (edgeCount == 0) {
-            return 0.0;
-        }
-        return clamp01((edgeCount - uniqueUndirectedEdges.size()) / (double) edgeCount);
-    }
-
-    private String undirectedEdgeKey(String left, String right) {
-        return left.compareTo(right) <= 0 ? left + "|" + right : right + "|" + left;
-    }
-
-    private double legSeparationScore(List<RoadNode> samples) {
-        if (samples == null || samples.size() < 9) {
-            return 1.0;
-        }
-
-        int size = samples.size();
-        int firstEnd = Math.max(2, size / 3);
-        int middleEnd = Math.max(firstEnd + 2, (size * 2) / 3);
-        List<RoadNode> firstLeg = trimmedLeg(samples, 0, firstEnd, true, false);
-        List<RoadNode> middleLeg = trimmedLeg(samples, firstEnd, middleEnd, false, false);
-        List<RoadNode> finalLeg = trimmedLeg(samples, middleEnd, size, false, true);
-        if (firstLeg.isEmpty() || middleLeg.isEmpty() || finalLeg.isEmpty()) {
-            return 1.0;
-        }
-
-        double firstToMiddle = symmetricLegSeparationScore(firstLeg, middleLeg);
-        double middleToFinal = symmetricLegSeparationScore(middleLeg, finalLeg);
-        double firstToFinal = symmetricLegSeparationScore(firstLeg, finalLeg);
-        return clamp01(Math.min(firstToFinal, Math.min(firstToMiddle, middleToFinal)));
-    }
-
-    private List<RoadNode> trimmedLeg(List<RoadNode> samples, int fromInclusive, int toExclusive, boolean trimStart, boolean trimEnd) {
-        int from = Math.max(0, fromInclusive);
-        int to = Math.min(samples.size(), Math.max(from, toExclusive));
-        int length = to - from;
-        if (length <= 0) {
-            return List.of();
-        }
-        int trim = Math.max(1, length / 5);
-        if (trimStart && length > 3) {
-            from = Math.min(to, from + trim);
-        }
-        if (trimEnd && (to - from) > 3) {
-            to = Math.max(from, to - trim);
-        }
-        return from >= to ? List.of() : new ArrayList<>(samples.subList(from, to));
-    }
-
-    private double symmetricLegSeparationScore(List<RoadNode> left, List<RoadNode> right) {
-        if (left.isEmpty() || right.isEmpty()) {
-            return 1.0;
-        }
-        return (averageNearestSeparationScore(left, right) + averageNearestSeparationScore(right, left)) / 2.0;
-    }
-
-    private double averageNearestSeparationScore(List<RoadNode> fromPoints, List<RoadNode> toPoints) {
-        double sum = 0.0;
-        for (RoadNode point : fromPoints) {
-            double minDistanceKm = Double.POSITIVE_INFINITY;
-            for (RoadNode candidate : toPoints) {
-                minDistanceKm = Math.min(minDistanceKm, distanceKm(point, candidate));
-            }
-            if (!Double.isInfinite(minDistanceKm)) {
-                sum += clamp01(minDistanceKm / ROUTE_CRAFT_LEG_SEPARATION_GOOD_KM);
-            }
-        }
-        return sum / Math.max(1, fromPoints.size());
-    }
-
-    private double selfIntersectionOrNearDuplicateRisk(List<RoadNode> samples) {
-        if (samples == null || samples.size() < 8) {
-            return 0.0;
-        }
-
-        int riskyPoints = 0;
-        for (int i = 0; i < samples.size(); i++) {
-            boolean risky = false;
-            for (int j = i + ROUTE_CRAFT_NEAR_DUPLICATE_WINDOW + 1; j < samples.size(); j++) {
-                if (isExpectedLoopClosure(i, j, samples.size())) {
-                    continue;
-                }
-                if (distanceKm(samples.get(i), samples.get(j)) <= ROUTE_CRAFT_NEAR_DUPLICATE_KM) {
-                    risky = true;
-                    break;
-                }
-            }
-            if (risky) {
-                riskyPoints++;
-            }
-        }
-        return clamp01(riskyPoints / (double) samples.size());
-    }
-
-    private boolean isExpectedLoopClosure(int leftIndex, int rightIndex, int sampleCount) {
-        return leftIndex <= ROUTE_CRAFT_NEAR_DUPLICATE_WINDOW
-            && rightIndex >= sampleCount - ROUTE_CRAFT_NEAR_DUPLICATE_WINDOW - 1;
-    }
-
     private void addRouteCraftBreakdown(Map<String, Double> breakdown, RouteCraftMetrics metrics) {
         breakdown.put("repeated_corridor_cell_share", metrics.repeatedCorridorCellShare());
         breakdown.put("reverse_overlap_share", metrics.reverseOverlapShare());
@@ -2573,31 +1910,6 @@ public class RoutePlanner {
         return new CorridorTileCoverage(orderedTiles);
     }
 
-    private List<RoadNode> samplePath(List<RoadNode> path, int sampleMeters) {
-        List<RoadNode> samples = new ArrayList<>();
-        samples.add(path.getFirst());
-
-        double accumulatedMeters = 0.0;
-        for (int i = 1; i < path.size(); i++) {
-            RoadNode previous = path.get(i - 1);
-            RoadNode current = path.get(i);
-
-            accumulatedMeters += distanceKm(previous, current) * 1000.0;
-            if (accumulatedMeters >= sampleMeters) {
-                samples.add(current);
-                accumulatedMeters = 0.0;
-            }
-        }
-
-        RoadNode lastPoint = path.getLast();
-        RoadNode lastSample = samples.getLast();
-        if (!lastPoint.equals(lastSample)) {
-            samples.add(lastPoint);
-        }
-
-        return samples;
-    }
-
     private PreferenceWeights resolvePreferenceWeights(List<String> vibes, String rawPreferenceVectorJson) {
         PreferenceWeights defaults = blendVibeDefaults(vibes);
         Map<String, Double> overrides = parsePreferenceOverrides(rawPreferenceVectorJson);
@@ -2769,38 +2081,10 @@ public class RoutePlanner {
         return scenicScoreCalculator.scoreTile(tile, preferences);
     }
 
-    private double distanceKm(RoadNode from, RoadNode to) {
-        final double earthRadiusKm = 6371.0;
-        double lat1 = Math.toRadians(from.getLatitude());
-        double lat2 = Math.toRadians(to.getLatitude());
-        double dLat = lat2 - lat1;
-        double dLon = Math.toRadians(to.getLongitude() - from.getLongitude());
-
-        double a = Math.sin(dLat / 2) * Math.sin(dLat / 2)
-            + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
-        double c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-        return earthRadiusKm * c;
-    }
-
-    private double clamp01(double value) {
-        return Math.max(0.0, Math.min(1.0, value));
-    }
-
-    private double clamp(double value, double min, double max) {
-        return Math.max(min, Math.min(max, value));
-    }
-
     private record CorridorTileCoverage(List<ScenicScoreTile> orderedTiles) {
     }
 
     private record RouteScoreResult(double finalScore, Map<String, Double> breakdown) {
-    }
-
-    private record RouteCraftMetrics(double repeatedCorridorCellShare,
-                                     double reverseOverlapShare,
-                                     double legSeparationScore,
-                                     double selfIntersectionOrNearDuplicateScore,
-                                     double backtrackingPenalty) {
     }
 
     private record StrategyCorridorMetrics(double waterCorridorShare,
