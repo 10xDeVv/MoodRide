@@ -24,7 +24,16 @@ param(
     [string]$Password,
 
     [Parameter(Mandatory = $false)]
-    [string]$PostgresContainerName = "moodride-postgres"
+    [string]$PostgresContainerName = "moodride-postgres",
+
+    [Parameter(Mandatory = $false)]
+    [switch]$DeployToProduction,
+
+    [Parameter(Mandatory = $false)]
+    [switch]$WaitForProductionDeploy,
+
+    [Parameter(Mandatory = $false)]
+    [string]$DeployWorkflow = "deploy-scenic-release.yml"
 )
 
 Set-StrictMode -Version Latest
@@ -278,6 +287,68 @@ WHERE scoring_version = '$escapedVersion';
     Write-Host "Assets:"
     Write-Host "  - $assetName"
     Write-Host "  - $(Split-Path -Leaf $checksumPath)"
+
+    if ($DeployToProduction) {
+        $workflowArgs = @(
+            "workflow", "run", $DeployWorkflow,
+            "-f", "release_tag=$ReleaseTag",
+            "-f", "scoring_version=$ScoringVersion",
+            "-f", "asset_name=$assetName"
+        )
+        if ($Repo) {
+            $workflowArgs += @("--repo", $Repo)
+        }
+
+        Write-Host "Triggering production scenic deploy workflow: $DeployWorkflow"
+        $workflowOutput = & gh @workflowArgs
+        if ($LASTEXITCODE -ne 0) {
+            throw "Failed to trigger production scenic deploy workflow."
+        }
+        if ($workflowOutput) {
+            $workflowOutput | ForEach-Object { Write-Host $_ }
+        }
+
+        if ($WaitForProductionDeploy) {
+            $workflowOutputText = ($workflowOutput | Out-String).Trim()
+            $runId = $null
+            if ($workflowOutputText -match '/actions/runs/(\d+)') {
+                $runId = $Matches[1]
+            }
+            if (-not $runId) {
+                Start-Sleep -Seconds 5
+                $runListArgs = @(
+                    "run", "list",
+                    "--workflow", $DeployWorkflow,
+                    "--event", "workflow_dispatch",
+                    "--limit", "1",
+                    "--json", "databaseId",
+                    "--jq", ".[0].databaseId"
+                )
+                if ($Repo) {
+                    $runListArgs += @("--repo", $Repo)
+                }
+                $latestRunId = & gh @runListArgs
+                if ($LASTEXITCODE -ne 0) {
+                    throw "Production deploy workflow was triggered, but the run id could not be resolved."
+                }
+                $runId = ($latestRunId | Select-Object -First 1 | Out-String).Trim()
+            }
+            if (-not $runId) {
+                throw "Production deploy workflow was triggered, but no run id was found."
+            }
+
+            $watchArgs = @("run", "watch", $runId, "--exit-status")
+            if ($Repo) {
+                $watchArgs += @("--repo", $Repo)
+            }
+            & gh @watchArgs
+            if ($LASTEXITCODE -ne 0) {
+                throw "Production scenic deploy workflow failed. Run id: $runId"
+            }
+        }
+    } else {
+        Write-Host "Production deploy was not triggered. Re-run with -DeployToProduction to apply this release to production."
+    }
 } finally {
     if (Test-Path $workDir) {
         Remove-Item -LiteralPath $workDir -Recurse -Force

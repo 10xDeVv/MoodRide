@@ -237,16 +237,37 @@ Publish scenic tiles:
 ./scripts/deploy/publish_scenic_release.ps1 `
   -ScoringVersion "3.7-bridge-coastal-calibration" `
   -ReleaseTag "scenic-3.7-bridge-coastal-calibration-$(Get-Date -Format 'yyyyMMdd-HHmm')" `
-  -Repo "10xDeVv/Wayward"
+  -Repo "10xDeVv/Wayward" `
+  -DeployToProduction `
+  -WaitForProductionDeploy
 ```
 
-Deploy with:
+Publishing creates the GitHub Release asset. `-DeployToProduction` immediately triggers the production scenic deploy workflow so production Postgres consumes that asset. `-WaitForProductionDeploy` keeps the command open until the workflow succeeds or fails.
+
+Manual deploy, if the release asset already exists:
 
 ```text
 .github/workflows/deploy-scenic-release.yml
 ```
 
 The scenic deploy applies score updates into `scenic_score_tiles` and restarts route services so caches refresh.
+
+After deploy, verify the active scenic release in CloudBeaver or psql:
+
+```sql
+SELECT
+  scoring_version,
+  COUNT(*) AS tiles,
+  COUNT(*) FILTER (WHERE road_stress_score > 0) AS road_stress,
+  COUNT(*) FILTER (WHERE water_visibility_score > 0) AS water_visibility,
+  COUNT(*) FILTER (WHERE tree_canopy_score > 0) AS tree_canopy,
+  COUNT(*) FILTER (WHERE scenic_poi_score > 0) AS scenic_poi,
+  COUNT(*) FILTER (WHERE viewpoint_score > 0) AS viewpoint,
+  COUNT(*) FILTER (WHERE bridge_coastal_score > 0) AS bridge_coastal
+FROM scenic_score_tiles
+GROUP BY scoring_version
+ORDER BY tiles DESC;
+```
 
 ## Release QA
 
