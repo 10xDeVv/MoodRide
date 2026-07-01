@@ -172,6 +172,52 @@
   text-transform: uppercase;
 }
 
+.metric-card-value-row {
+  display: flex;
+  align-items: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 12px 0 8px;
+}
+
+.metric-card-value-row .metric-card-value {
+  margin: 0;
+}
+
+.metric-delta {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  min-height: 24px;
+  padding: 3px 7px;
+  border: 1px solid currentColor;
+  font-size: 12px;
+  font-weight: 950;
+  letter-spacing: 0.04em;
+  line-height: 1;
+  text-transform: uppercase;
+}
+
+.metric-delta-up {
+  color: #134e24;
+  background: rgba(34, 197, 94, 0.18);
+}
+
+.metric-delta-down {
+  color: #7f1d1d;
+  background: rgba(239, 68, 68, 0.16);
+}
+
+:root[data-theme="dark"] .metric-delta-up {
+  color: #7dff9c;
+  background: rgba(34, 197, 94, 0.16);
+}
+
+:root[data-theme="dark"] .metric-delta-down {
+  color: #ff9d9d;
+  background: rgba(239, 68, 68, 0.15);
+}
+
 .analytics-muted,
 .analytics-empty-copy {
   color: var(--clr-text-muted);

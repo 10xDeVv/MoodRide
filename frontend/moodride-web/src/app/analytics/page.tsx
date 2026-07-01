@@ -2,11 +2,39 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Activity, ArrowLeft, BarChart3, Compass, Gauge, Map, MapPinned, Navigation, RefreshCw, Route, Timer, TrendingUp, Users } from "lucide-react";
+import {
+  Activity,
+  ArrowDownRight,
+  ArrowLeft,
+  ArrowUpRight,
+  BarChart3,
+  Compass,
+  Gauge,
+  Map,
+  MapPinned,
+  Navigation,
+  RefreshCw,
+  Route,
+  Timer,
+  TrendingUp,
+  Users
+} from "lucide-react";
 import { getAnalyticsSummary } from "@/lib/api";
 import type { AnalyticsCountResponse, AnalyticsSummaryResponse } from "@/lib/types";
 
 const DAY_OPTIONS = [1, 7, 30, 90];
+const ANALYTICS_SNAPSHOT_VERSION = 1;
+
+type AnalyticsSnapshot = {
+  version: number;
+  viewedAt: string;
+  metrics: Record<string, number>;
+};
+
+type MetricDelta = {
+  direction: "up" | "down";
+  label: string;
+};
 
 function formatNumber(value: number, digits = 0) {
   return new Intl.NumberFormat("en", {
@@ -49,16 +77,83 @@ function formatRange(from: string, to: string) {
   return `${start.toLocaleDateString(undefined, { month: "short", day: "numeric" })} - ${end.toLocaleDateString(undefined, { month: "short", day: "numeric" })}`;
 }
 
+function snapshotStorageKey(days: number) {
+  return `wayward-analytics-snapshot-v${ANALYTICS_SNAPSHOT_VERSION}:${days}d`;
+}
+
+function readSnapshot(days: number): AnalyticsSnapshot | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = window.localStorage.getItem(snapshotStorageKey(days));
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as AnalyticsSnapshot;
+    if (parsed.version !== ANALYTICS_SNAPSHOT_VERSION || !parsed.metrics) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function writeSnapshot(days: number, metrics: Record<string, number>) {
+  if (typeof window === "undefined") return;
+  try {
+    const snapshot: AnalyticsSnapshot = {
+      version: ANALYTICS_SNAPSHOT_VERSION,
+      viewedAt: new Date().toISOString(),
+      metrics
+    };
+    window.localStorage.setItem(snapshotStorageKey(days), JSON.stringify(snapshot));
+  } catch {
+    // Analytics movement hints are best-effort and should never block the page.
+  }
+}
+
+function metricsFromSummary(summary: AnalyticsSummaryResponse): Record<string, number> {
+  return {
+    completedRoutes: summary.completedRoutes,
+    uniqueAnonymousClients: summary.uniqueAnonymousClients,
+    routeSuccessRate: summary.routeSuccessRate,
+    averageGenerationMs: summary.averageGenerationMs,
+    p95GenerationMs: summary.p95GenerationMs,
+    averageRouteOptions: summary.averageRouteOptions,
+    threeOptionRouteRate: summary.threeOptionRouteRate,
+    averageScenicScore: summary.averageScenicScore,
+    startDriveClicks: summary.startDriveClicks,
+    navigationOpens: summary.navigationOpens,
+    planNewRouteClicks: summary.planNewRouteClicks
+  };
+}
+
+function buildDelta(
+  key: string,
+  currentMetrics: Record<string, number> | null,
+  previousSnapshot: AnalyticsSnapshot | null,
+  formatter: (value: number) => string
+): MetricDelta | null {
+  if (!currentMetrics || !previousSnapshot) return null;
+  const current = currentMetrics[key];
+  const previous = previousSnapshot.metrics[key];
+  if (!Number.isFinite(current) || !Number.isFinite(previous)) return null;
+  const change = current - previous;
+  if (Math.abs(change) < 0.0001) return null;
+  return {
+    direction: change > 0 ? "up" : "down",
+    label: formatter(Math.abs(change))
+  };
+}
+
 function MetricCard({
   label,
   value,
   detail,
-  icon: Icon
+  icon: Icon,
+  delta
 }: {
   label: string;
   value: string;
   detail: string;
   icon: typeof Activity;
+  delta?: MetricDelta | null;
 }) {
   return (
     <section className="analytics-card metric-card">
@@ -67,7 +162,15 @@ function MetricCard({
       </div>
       <div>
         <div className="analytics-label">{label}</div>
-        <div className="metric-card-value">{value}</div>
+        <div className="metric-card-value-row">
+          <div className="metric-card-value">{value}</div>
+          {delta && (
+            <span className={`metric-delta metric-delta-${delta.direction}`} title="Change since your last dashboard visit">
+              {delta.direction === "up" ? <ArrowUpRight size={16} /> : <ArrowDownRight size={16} />}
+              {delta.label}
+            </span>
+          )}
+        </div>
         <div className="analytics-muted">{detail}</div>
       </div>
     </section>
@@ -124,14 +227,19 @@ function AnalyticsSkeleton() {
 export default function AnalyticsPage() {
   const [days, setDays] = useState(30);
   const [summary, setSummary] = useState<AnalyticsSummaryResponse | null>(null);
+  const [previousSnapshot, setPreviousSnapshot] = useState<AnalyticsSnapshot | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   const loadSummary = useCallback(async () => {
     setLoading(true);
     setError(null);
+    setPreviousSnapshot(null);
     try {
       const nextSummary = await getAnalyticsSummary(days);
+      const nextMetrics = metricsFromSummary(nextSummary);
+      setPreviousSnapshot(readSnapshot(days));
+      writeSnapshot(days, nextMetrics);
       setSummary(nextSummary);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Analytics summary could not be loaded.");
@@ -153,6 +261,29 @@ export default function AnalyticsPage() {
     if (!summary || summary.startDriveClicks === 0) return 0;
     return summary.navigationOpens / summary.startDriveClicks;
   }, [summary]);
+
+  const metricValues = useMemo<Record<string, number> | null>(() => {
+    if (!summary) return null;
+    return metricsFromSummary(summary);
+  }, [summary]);
+
+  const lastViewedLabel = useMemo(() => {
+    if (!previousSnapshot?.viewedAt) return null;
+    const viewedAt = new Date(previousSnapshot.viewedAt);
+    if (Number.isNaN(viewedAt.getTime())) return null;
+    return viewedAt.toLocaleString(undefined, {
+      month: "short",
+      day: "numeric",
+      hour: "numeric",
+      minute: "2-digit"
+    });
+  }, [previousSnapshot]);
+
+  const deltaFor = useCallback(
+    (key: string, formatter: (value: number) => string = (value) => formatNumber(value)) =>
+      buildDelta(key, metricValues, previousSnapshot, formatter),
+    [metricValues, previousSnapshot]
+  );
 
   return (
     <main className="analytics-page">
@@ -189,6 +320,7 @@ export default function AnalyticsPage() {
         {summary && (
           <div className="analytics-window">
             {formatRange(summary.from, summary.to)} · {formatNumber(summary.totalEvents)} total events
+            {lastViewedLabel ? ` · changes since ${lastViewedLabel}` : ""}
           </div>
         )}
 
@@ -213,66 +345,77 @@ export default function AnalyticsPage() {
                 label="Generated"
                 value={formatNumber(summary.completedRoutes)}
                 detail={`${formatNumber(summary.generateClicks)} generate clicks`}
+                delta={deltaFor("completedRoutes")}
               />
               <MetricCard
                 icon={Users}
                 label="Anonymous Clients"
                 value={formatNumber(summary.uniqueAnonymousClients)}
                 detail="Hashed browser/device ids"
+                delta={deltaFor("uniqueAnonymousClients")}
               />
               <MetricCard
                 icon={TrendingUp}
                 label="Success Rate"
                 value={formatPercent(summary.routeSuccessRate)}
                 detail={`${formatNumber(summary.failedRoutes)} failed · ${formatNumber(summary.vibeUnavailableRoutes)} unavailable`}
+                delta={deltaFor("routeSuccessRate", formatPercent)}
               />
               <MetricCard
                 icon={Timer}
                 label="Avg Generation"
                 value={formatDuration(summary.averageGenerationMs)}
                 detail="Route job completion time"
+                delta={deltaFor("averageGenerationMs", formatDuration)}
               />
               <MetricCard
                 icon={BarChart3}
                 label="P95 Generation"
                 value={formatDuration(summary.p95GenerationMs)}
                 detail="Slowest normal route jobs"
+                delta={deltaFor("p95GenerationMs", formatDuration)}
               />
               <MetricCard
                 icon={Compass}
                 label="Avg Options"
                 value={formatNumber(summary.averageRouteOptions, 1)}
                 detail="Routes returned per success"
+                delta={deltaFor("averageRouteOptions", (value) => formatNumber(value, 1))}
               />
               <MetricCard
                 icon={Map}
                 label="3-Option Rate"
                 value={formatPercent(summary.threeOptionRouteRate)}
                 detail="Completed jobs with full choice set"
+                delta={deltaFor("threeOptionRouteRate", formatPercent)}
               />
               <MetricCard
                 icon={Gauge}
                 label="Avg Scenic Score"
                 value={formatNumber(summary.averageScenicScore, 1)}
                 detail="Completed route average"
+                delta={deltaFor("averageScenicScore", (value) => formatNumber(value, 1))}
               />
               <MetricCard
                 icon={MapPinned}
                 label="Start Drive"
                 value={formatNumber(summary.startDriveClicks)}
                 detail={`${formatPercent(conversion)} of generate clicks`}
+                delta={deltaFor("startDriveClicks")}
               />
               <MetricCard
                 icon={Navigation}
                 label="Navigation Opens"
                 value={formatNumber(summary.navigationOpens)}
                 detail={`${formatPercent(navigationRate)} of start-drive clicks`}
+                delta={deltaFor("navigationOpens")}
               />
               <MetricCard
                 icon={Activity}
                 label="Plan New Route"
                 value={formatNumber(summary.planNewRouteClicks)}
                 detail="Users returning to planning"
+                delta={deltaFor("planNewRouteClicks")}
               />
             </div>
 

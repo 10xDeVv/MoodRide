@@ -126,12 +126,14 @@ docker compose -f "$COMPOSE_FILE" --env-file "$ENV_FILE" pull
 
 echo "Launching stack"
 docker compose -f "$COMPOSE_FILE" --env-file "$ENV_FILE" up -d --remove-orphans
+docker compose -f "$COMPOSE_FILE" --env-file "$ENV_FILE" up -d --force-recreate caddy
 
 if ! run_healthcheck "$HEALTHCHECK_URL" "$HEALTHCHECK_TIMEOUT_SECONDS"; then
   echo "Rolling back to previous env snapshot: $backup_env"
   cp "$backup_env" "$ENV_FILE"
   docker compose -f "$COMPOSE_FILE" --env-file "$ENV_FILE" pull
   docker compose -f "$COMPOSE_FILE" --env-file "$ENV_FILE" up -d --remove-orphans
+  docker compose -f "$COMPOSE_FILE" --env-file "$ENV_FILE" up -d --force-recreate caddy
   echo "Rollback completed. Previous image tag: $previous_tag" >&2
   exit 1
 fi
