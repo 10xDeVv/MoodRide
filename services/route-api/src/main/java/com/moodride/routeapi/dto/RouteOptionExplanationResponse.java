@@ -1,5 +1,6 @@
 package com.moodride.routeapi.dto;
 
+import java.io.Serializable;
 import java.util.List;
 import java.util.Map;
 
@@ -16,5 +17,5 @@ public record RouteOptionExplanationResponse(
         List<String> contractWarnings,
         int sampleTileCount,
         int baselineTileCount
-) {
+) implements Serializable {
 }

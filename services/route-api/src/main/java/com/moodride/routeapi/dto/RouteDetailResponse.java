@@ -1,5 +1,6 @@
 package com.moodride.routeapi.dto;
 
+import java.io.Serializable;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
@@ -29,6 +30,6 @@ public record RouteDetailResponse(
         Instant ratedAt,
         Instant createdAt,
         Instant expiresAt
-) {
+) implements Serializable {
 }
 

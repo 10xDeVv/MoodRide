@@ -10,18 +10,31 @@ import {
   ScenicRegionsResponse
 } from "@/lib/types";
 
-// In the browser, use the same-origin proxy to avoid CORS issues.
-// In server-side code (SSR), call the upstream directly.
 const apiBase =
   process.env.NEXT_PUBLIC_API_BASE_URL ??
   (typeof window !== "undefined" ? "" : "https://usewayward.app");
 
-// Helper: build the correct URL for a given API path
 function apiUrl(path: string): string {
-  if (typeof window !== "undefined" && !process.env.NEXT_PUBLIC_API_BASE_URL) {
-    // Browser: route through Next.js proxy to avoid CORS
-    return `/api/proxy${path}`;
+  if (typeof window !== "undefined") {
+    const configuredBase = process.env.NEXT_PUBLIC_API_BASE_URL;
+    if (!configuredBase) {
+      return `/api/proxy${path}`;
+    }
+
+    try {
+      const configuredUrl = new URL(configuredBase);
+      const currentHost = window.location.hostname;
+      const configuredHost = configuredUrl.hostname;
+      const isWaywardHost = currentHost === "usewayward.app" || currentHost === "www.usewayward.app";
+      const isConfiguredWaywardHost = configuredHost === "usewayward.app" || configuredHost === "www.usewayward.app";
+      if (configuredUrl.origin === window.location.origin || (isWaywardHost && isConfiguredWaywardHost)) {
+        return path;
+      }
+    } catch {
+      // Fall through to the configured API base below.
+    }
   }
+
   return `${apiBase}${path}`;
 }
 

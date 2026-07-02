@@ -8,7 +8,7 @@ import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
 @Configuration
 public class WebCorsConfig implements WebMvcConfigurer {
 
-    @Value("${moodride.cors.allowed-origins:http://localhost:3000,http://localhost:3001}")
+    @Value("${moodride.cors.allowed-origins:http://localhost:3000,http://localhost:3001,https://usewayward.app,https://www.usewayward.app}")
     private String[] allowedOrigins;
 
     @Override

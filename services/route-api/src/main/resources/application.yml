@@ -85,7 +85,7 @@ logging:
 
 moodride:
   cors:
-    allowed-origins: http://localhost:3000,http://localhost:3001
+    allowed-origins: http://localhost:3000,http://localhost:3001,https://usewayward.app,https://www.usewayward.app
   cache:
     warmup:
       enabled: true

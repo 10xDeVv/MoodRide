@@ -1,5 +1,6 @@
 package com.moodride.routeapi.dto;
 
+import java.io.Serializable;
 import java.util.Map;
 import java.util.UUID;
 
@@ -12,5 +13,5 @@ public record RouteOptionResponse(
         double totalDistanceKm,
         int estimatedDurationMinutes,
         RouteOptionExplanationResponse explanation
-) {
+) implements Serializable {
 }
