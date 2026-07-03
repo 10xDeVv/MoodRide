@@ -13,6 +13,8 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.kafka.support.Acknowledgment;
 import org.springframework.stereotype.Service;
+import java.time.Duration;
+import java.time.Instant;
 import java.util.UUID;
 
 @Service
@@ -74,15 +76,27 @@ public class RouteJobConsumer {
             
             // Mark as started
             job.markStarted();
+            long queueMs = millisBetween(job.getSubmittedAt(), job.getStartedAt());
             if (retryCount > 0) {
                 logger.info("Retrying job {} (attempt {})", jobId, retryCount + 1);
             }
+            logger.info("Route job {} started queueMs={} retryCount={}", jobId, queueMs, retryCount);
             jobRepository.save(job);
             
             // Process and persist route before publishing completion
+            long processingStartedNanos = System.nanoTime();
             RouteGenerationService.RouteGenerationResult result = routeGenerationService.processRoute(job);
+            long processingMs = Duration.ofNanos(System.nanoTime() - processingStartedNanos).toMillis();
             job.markCompleted(result.route().getId());
             jobRepository.save(job);
+            logger.info(
+                "Route job {} completed processingMs={} routeId={} optionsPrimaryDistanceKm={} optionsPrimaryDurationMin={}",
+                jobId,
+                processingMs,
+                result.route().getId(),
+                result.route().getTotalDistanceKm(),
+                result.route().getEstimatedDurationMinutes()
+            );
 
             completionProducer.publishCompletion(
                 job.getId(),
@@ -112,6 +126,12 @@ public class RouteJobConsumer {
         }
     }
     
+    private long millisBetween(Instant from, Instant to) {
+        if (from == null || to == null) {
+            return -1L;
+        }
+        return Math.max(0L, Duration.between(from, to).toMillis());
+    }
     private void handleFailureAndRetry(UUID jobId) {
         try {
             jobRepository.findById(jobId).ifPresent(job -> {

@@ -91,7 +91,7 @@ Optional repository variables:
 
 - `GHCR_NAMESPACE`
 - `NEXT_PUBLIC_API_BASE_URL=https://usewayward.app`
-- `NEXT_PUBLIC_WS_BASE_URL=wss://usewayward.app/ws`
+- `NEXT_PUBLIC_WS_BASE_URL=https://usewayward.app/ws`
 
 Minimum `.env.prod` keys:
 
