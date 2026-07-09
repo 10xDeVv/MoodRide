@@ -415,6 +415,10 @@ public class RoutePlanner {
                                         int targetMinutes,
                                         VibeCatalog.BlendedVibeProfile vibeProfile,
                                         GeometryStrategy geometryStrategy) {
+        if (geometryStrategy != GeometryStrategy.BALANCED_VARIETY) {
+            return false;
+        }
+
         if (!config.isOsrmEarlyStopEnabled()
             || attemptedRequests < Math.max(ROUTE_OPTION_COUNT, config.getOsrmEarlyStopMinRequests())
             || candidates.size() < Math.max(ROUTE_OPTION_COUNT, config.getOsrmEarlyStopMinCandidates())) {
@@ -849,7 +853,7 @@ public class RoutePlanner {
                                                             GeometryStrategy geometryStrategy,
                                                             DurationCalibrationHint durationCalibration) {
         List<List<RoadNode>> variants = new ArrayList<>();
-        variants.addAll(buildWaypointRings(start, scoredTiles, timeBudgetMinutes, vibeProfile, durationCalibration));
+        List<List<RoadNode>> baseVariants = buildWaypointRings(start, scoredTiles, timeBudgetMinutes, vibeProfile, durationCalibration);
 
         List<List<RoadNode>> intentVariants = buildTargetAnchorWaypointRings(
             start,
@@ -866,7 +870,13 @@ public class RoutePlanner {
             geometryStrategy,
             durationCalibration
         );
-        addInterleavedVariants(variants, intentVariants, strategyVariants);
+        if (geometryStrategy == GeometryStrategy.BALANCED_VARIETY) {
+            variants.addAll(baseVariants);
+            addInterleavedVariants(variants, intentVariants, strategyVariants);
+        } else {
+            addInterleavedVariants(variants, strategyVariants, intentVariants);
+            variants.addAll(baseVariants);
+        }
 
         if (!intentVariants.isEmpty()) {
             logger.info(

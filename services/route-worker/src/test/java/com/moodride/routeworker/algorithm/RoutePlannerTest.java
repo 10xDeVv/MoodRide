@@ -117,6 +117,12 @@ class RoutePlannerTest {
         routePlanner = routePlanner(config);
     }
 
+    private void usePlannerWithOsrmParallelism(int osrmRequestParallelism) {
+        ApplicationConfiguration config = testConfiguration();
+        config.setOsrmRequestParallelism(osrmRequestParallelism);
+        routePlanner = routePlanner(config);
+    }
+
     @Test
     void generateRouteRejectsMissingScenicDataForRequestedVibe() {
         when(scenicTileLookupService.findByH3Indexes(anyCollection())).thenReturn(List.of());
@@ -258,6 +264,28 @@ class RoutePlannerTest {
     }
 
     @Test
+    void intentSpecificVibesDoNotEarlyStopBeforeStrategySearch() {
+        usePlannerWithOsrmLimits(30, 6, 3);
+        when(scenicTileLookupService.findByH3Indexes(anyCollection())).thenReturn(manyHighScenicTilesAroundStart(80));
+        AtomicInteger osrmRequests = new AtomicInteger();
+        when(osrmTripClient.requestRoundTrip(anyList(), eq(RouteMode.DRIVE))).thenAnswer(invocation -> {
+            @SuppressWarnings("unchecked")
+            List<RoadNode> variant = invocation.getArgument(0);
+            int index = osrmRequests.getAndIncrement();
+            int durationMinutes = 32 + (index % 10);
+            double distanceKm = 11.0 + (index * 0.5);
+            return Optional.of(new OsrmTripClient.TripResult(variant, distanceKm, durationMinutes));
+        });
+
+        List<RouteCandidate> options = routePlanner.generateRouteOptions(sampleJob(45, "open_roads"));
+
+        assertThat(options).hasSize(3);
+        assertThat(osrmRequests.get()).isGreaterThan(12);
+        assertThat(options.getFirst().getScoreBreakdown().get("geometry_strategy_code"))
+            .isEqualTo(1.0);
+    }
+
+    @Test
     void openRoadsUsesOpenSpaceGeometryStrategy() {
         when(scenicTileLookupService.findByH3Indexes(anyCollection())).thenReturn(highScenicTilesAroundStart());
         when(osrmTripClient.requestRoundTrip(anyList(), eq(RouteMode.DRIVE))).thenAnswer(invocation -> {
@@ -361,6 +389,7 @@ class RoutePlannerTest {
 
     @Test
     void shorterProfilePrefersUsefulShortRouteInsteadOfTinyRescueLoop() {
+        usePlannerWithOsrmParallelism(1);
         when(scenicTileLookupService.findByH3Indexes(anyCollection())).thenReturn(highScenicTilesAroundStart());
         int[] durations = {60, 56, 20, 47, 45, 50, 22, 48, 52, 24, 44, 40, 38, 35};
         AtomicInteger callIndex = new AtomicInteger();
@@ -382,6 +411,7 @@ class RoutePlannerTest {
 
     @Test
     void mostScenicProfileAvoidsTinyLoopsWhenLongerUsefulOptionsExist() {
+        usePlannerWithOsrmParallelism(1);
         when(scenicTileLookupService.findByH3Indexes(anyCollection())).thenReturn(highScenicTilesAroundStart());
         int[] durations = {32, 61, 46, 35, 58, 52, 34, 63, 44, 40, 55, 48, 36, 50};
         AtomicInteger callIndex = new AtomicInteger();
