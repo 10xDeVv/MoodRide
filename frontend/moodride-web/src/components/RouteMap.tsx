@@ -1,7 +1,10 @@
 "use client";
 
 import { useEffect, useRef, type MutableRefObject } from "react";
+import mapboxgl, { type GeoJSONSource, type Map as MapboxMap, type MapLayerMouseEvent } from "mapbox-gl";
+import "mapbox-gl/dist/mapbox-gl.css";
 import { Minus, Plus } from "lucide-react";
+import type { FeatureCollection, LineString } from "geojson";
 import type { RouteDetailResponse } from "@/lib/types";
 
 interface RouteMapProps {
@@ -28,6 +31,15 @@ const PROFILE_COLORS: Record<string, string> = {
   most_scenic: ROUTE_BLUE,
   balanced: ROUTE_BLUE,
   shorter: ROUTE_BLUE
+};
+
+type RouteLineProperties = {
+  routeId: string;
+  color: string;
+  lightColor: string;
+  selected: boolean;
+  offset: number;
+  order: number;
 };
 
 function TopoBackground({ theme }: { theme: "day" | "night" }) {
@@ -140,7 +152,7 @@ function lightenColor(hex: string, amount = 0.62): string {
   return `rgb(${newR}, ${newG}, ${newB})`;
 }
 
-function routesToGeoJson(route: RouteDetailResponse, selectedRouteId: string | undefined, theme: "day" | "night") {
+function routesToGeoJson(route: RouteDetailResponse, selectedRouteId: string | undefined, theme: "day" | "night"): FeatureCollection<LineString, RouteLineProperties> {
   const activeOption = route.routeOptions?.find((option) => option.routeId === (selectedRouteId ?? route.routeId));
   const color = theme === "night"
     ? ROUTE_LIME
@@ -197,8 +209,7 @@ function getRouteFitPadding() {
   return 70;
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function ensureRouteLayers(map: any) {
+function ensureRouteLayers(map: MapboxMap) {
   if (!map.getLayer("routes-alternate-bg")) {
     map.addLayer({
       id: "routes-alternate-bg",
@@ -244,12 +255,15 @@ function ensureRouteLayers(map: any) {
   }
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function ensureRouteInteractions(map: any, onSelectRef: MutableRefObject<((routeId: string) => void) | undefined>) {
-  if (map.__waywardRouteInteractionsBound) return;
+function routeIdFromMapEvent(event: MapLayerMouseEvent): string | undefined {
+  const routeId = event.features?.[0]?.properties?.routeId;
+  return typeof routeId === "string" ? routeId : undefined;
+}
 
-  const handleRouteClick = (event: { features?: Array<{ properties?: { routeId?: string } }> }) => {
-    const routeId = event.features?.[0]?.properties?.routeId;
+function ensureRouteInteractions(map: MapboxMap, onSelectRef: MutableRefObject<((routeId: string) => void) | undefined>) {
+  if (map.getCanvas().dataset.waywardRouteInteractionsBound === "true") return;
+  const handleRouteClick = (event: MapLayerMouseEvent) => {
+    const routeId = routeIdFromMapEvent(event);
     if (routeId) onSelectRef.current?.(routeId);
   };
 
@@ -257,38 +271,38 @@ function ensureRouteInteractions(map: any, onSelectRef: MutableRefObject<((route
   map.on("click", "routes-selected-stroke", handleRouteClick);
   map.on("mouseenter", "routes-alternate-stroke", () => { map.getCanvas().style.cursor = "pointer"; });
   map.on("mouseleave", "routes-alternate-stroke", () => { map.getCanvas().style.cursor = ""; });
-  map.__waywardRouteInteractionsBound = true;
+  map.getCanvas().dataset.waywardRouteInteractionsBound = "true";
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function renderAllRoutes(map: any, route: RouteDetailResponse, selectedRouteId: string | undefined, theme: "day" | "night") {
+function renderAllRoutes(map: MapboxMap, route: RouteDetailResponse, selectedRouteId: string | undefined, theme: "day" | "night", fitRoute: boolean) {
   const geojson = routesToGeoJson(route, selectedRouteId, theme);
 
   if (!map.getSource(ALL_ROUTES_SOURCE_ID)) {
     map.addSource(ALL_ROUTES_SOURCE_ID, { type: "geojson", data: geojson });
     ensureRouteLayers(map);
   } else {
-    const source = map.getSource(ALL_ROUTES_SOURCE_ID);
-    source.setData(geojson);
+    const source = map.getSource(ALL_ROUTES_SOURCE_ID) as GeoJSONSource | undefined;
+    source?.setData(geojson);
     ensureRouteLayers(map);
   }
 
-  const coordinates = geojson.features.flatMap((feature) => feature?.geometry.coordinates ?? []);
+  if (!fitRoute) return;
+  const coordinates = geojson.features.flatMap((feature) => feature.geometry.coordinates);
   if (coordinates.length > 1) {
     const lngs = coordinates.map(([lng]) => lng);
     const lats = coordinates.map(([, lat]) => lat);
-    map.fitBounds([[Math.min(...lngs), Math.min(...lats)], [Math.max(...lngs), Math.max(...lats)]], { padding: getRouteFitPadding(), duration: 900 });
+    map.fitBounds([[Math.min(...lngs), Math.min(...lats)], [Math.max(...lngs), Math.max(...lats)]], { padding: getRouteFitPadding(), duration: 260 });
   }
 }
 
 export function RouteMap({ route, selectedRouteId, centerLat = 49.28, centerLng = -123.12, theme = "day", onRouteSelect }: RouteMapProps) {
   const mapContainerRef = useRef<HTMLDivElement>(null);
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const mapRef = useRef<any>(null);
+  const mapRef = useRef<MapboxMap | null>(null);
   const onRouteSelectRef = useRef(onRouteSelect);
   const routeRef = useRef(route);
   const selectedRouteIdRef = useRef(selectedRouteId);
   const themeRef = useRef(theme);
+  const lastFitRouteIdRef = useRef<string | null>(null);
   const hasToken = Boolean(MAPBOX_TOKEN);
 
   useEffect(() => {
@@ -301,47 +315,34 @@ export function RouteMap({ route, selectedRouteId, centerLat = 49.28, centerLng 
     themeRef.current = theme;
   }, [route, selectedRouteId, theme]);
 
-
   useEffect(() => {
-    if (!hasToken || !mapContainerRef.current) return;
-    let disposed = false;
+    const mapboxToken = MAPBOX_TOKEN;
+    if (!mapboxToken || !mapContainerRef.current) return;
+    mapboxgl.accessToken = mapboxToken;
+    const map = new mapboxgl.Map({
+      container: mapContainerRef.current,
+      style: MAPBOX_STYLES[themeRef.current],
+      center: [centerLng, centerLat],
+      zoom: 10,
+      attributionControl: false
+    });
 
-    const initMap = async () => {
-      const mapboxgl = (await import("mapbox-gl")).default;
-      // @ts-expect-error — CSS module import, handled by Next.js
-      await import("mapbox-gl/dist/mapbox-gl.css");
-      if (disposed || !mapContainerRef.current) return;
-
-      mapboxgl.accessToken = MAPBOX_TOKEN!;
-      const map = new mapboxgl.Map({
-        container: mapContainerRef.current,
-        style: MAPBOX_STYLES[themeRef.current],
-        center: [centerLng, centerLat],
-        zoom: 10,
-        attributionControl: false
-      });
-
-      mapRef.current = map;
-
-      map.on("load", () => {
-        if (route) {
-          renderAllRoutes(map, route, selectedRouteId, themeRef.current);
-          ensureRouteInteractions(map, onRouteSelectRef);
-        }
-      });
-    };
-
-    void initMap();
+    mapRef.current = map;
+    map.on("load", () => {
+      const currentRoute = routeRef.current;
+      if (currentRoute) {
+        renderAllRoutes(map, currentRoute, selectedRouteIdRef.current, themeRef.current, true);
+        lastFitRouteIdRef.current = currentRoute.routeId;
+        ensureRouteInteractions(map, onRouteSelectRef);
+      }
+    });
 
     return () => {
-      disposed = true;
-      if (mapRef.current) {
-        mapRef.current.remove();
-        mapRef.current = null;
-      }
+      map.remove();
+      mapRef.current = null;
+      lastFitRouteIdRef.current = null;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hasToken]);
+  }, [centerLat, centerLng, hasToken]);
 
   useEffect(() => {
     if (!hasToken || !mapRef.current) return;
@@ -351,7 +352,8 @@ export function RouteMap({ route, selectedRouteId, centerLat = 49.28, centerLng 
     map.once("style.load", () => {
       const currentRoute = routeRef.current;
       if (currentRoute) {
-        renderAllRoutes(map, currentRoute, selectedRouteIdRef.current, theme);
+        renderAllRoutes(map, currentRoute, selectedRouteIdRef.current, theme, true);
+        lastFitRouteIdRef.current = currentRoute.routeId;
         ensureRouteInteractions(map, onRouteSelectRef);
       }
     });
@@ -360,12 +362,16 @@ export function RouteMap({ route, selectedRouteId, centerLat = 49.28, centerLng 
   useEffect(() => {
     if (!hasToken || !mapRef.current || !route) return;
     const map = mapRef.current;
+    const shouldFitRoute = lastFitRouteIdRef.current !== route.routeId;
+
     if (map.loaded()) {
-      renderAllRoutes(map, route, selectedRouteId, theme);
+      renderAllRoutes(map, route, selectedRouteId, theme, shouldFitRoute);
+      if (shouldFitRoute) lastFitRouteIdRef.current = route.routeId;
       ensureRouteInteractions(map, onRouteSelectRef);
     } else {
       map.once("load", () => {
-        renderAllRoutes(map, route, selectedRouteId, theme);
+        renderAllRoutes(map, route, selectedRouteId, theme, true);
+        lastFitRouteIdRef.current = route.routeId;
         ensureRouteInteractions(map, onRouteSelectRef);
       });
     }

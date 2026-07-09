@@ -165,6 +165,7 @@ interface PlannerPanelProps {
   locationQuery: string;
   locationSuggestions: LocationSuggestion[];
   locationPending: boolean;
+  locationResolving: boolean;
   locationError: string | null;
   showDropdown: boolean;
   routeMode: RouteMode;
@@ -176,6 +177,7 @@ interface PlannerPanelProps {
   onLatChange: (v: number) => void;
   onLngChange: (v: number) => void;
   onLocationQueryChange: (v: string) => void;
+  onLocationSubmit: () => void;
   onSuggestionSelect: (s: LocationSuggestion) => void;
   onGeolocate: () => void;
   onModeChange: (m: RouteMode) => void;
@@ -186,10 +188,10 @@ interface PlannerPanelProps {
 
 function PlannerPanel({
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  lat, lng, locationQuery, locationSuggestions, locationPending, locationError, showDropdown,
+  lat, lng, locationQuery, locationSuggestions, locationPending, locationResolving, locationError, showDropdown,
   routeMode, timeBudget, vibes, phase, statusMessage, compactVibeList = false,
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  onLatChange, onLngChange, onLocationQueryChange, onSuggestionSelect, onGeolocate,
+  onLatChange, onLngChange, onLocationQueryChange, onLocationSubmit, onSuggestionSelect, onGeolocate,
   onModeChange, onTimeBudgetChange, onVibeToggle, onGenerate
 }: PlannerPanelProps) {
   const [showAllVibes, setShowAllVibes] = useState(false);
@@ -218,9 +220,15 @@ function PlannerPanel({
             <input
               className="location-input"
               type="text"
-              placeholder="ENTER LOCATION"
+              placeholder="Search city, address, park, or paste coordinates"
               value={locationQuery}
               onChange={(e) => onLocationQueryChange(e.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                  onLocationSubmit();
+                }
+              }}
               autoComplete="off"
               aria-label="Starting location search"
             />
@@ -248,9 +256,12 @@ function PlannerPanel({
               </div>
             )}
           </div>
-          <button className="use-location-btn" onClick={onGeolocate} type="button">
-            <Navigation size={14} />
-            USE MY LOCATION
+          <p className="location-helper">
+            Press Enter to use the top result or paste coordinates like 49.2827, -123.1207.
+          </p>
+          <button className="use-location-btn" onClick={onGeolocate} type="button" disabled={locationResolving}>
+            {locationResolving ? <Loader2 size={14} className="spin" /> : <Navigation size={14} />}
+            {locationResolving ? "FINDING LOCATION…" : "USE MY LOCATION"}
           </button>
 
 
@@ -423,6 +434,20 @@ function LoadingOverlay({ phase, progressStep }: { phase: Phase; progressStep: n
   );
 }
 
+function parseCoordinateInput(value: string): { lat: number; lng: number } | null {
+  const match = value.trim().match(/^\s*(-?\d+(?:\.\d+)?)\s*[, ]\s*(-?\d+(?:\.\d+)?)\s*$/);
+  if (!match) return null;
+  const parsedLat = Number(match[1]);
+  const parsedLng = Number(match[2]);
+  if (!Number.isFinite(parsedLat) || !Number.isFinite(parsedLng)) return null;
+  if (Math.abs(parsedLat) > 90 || Math.abs(parsedLng) > 180) return null;
+  return { lat: parsedLat, lng: parsedLng };
+}
+
+function formatCoordinateLabel(nextLat: number, nextLng: number): string {
+  return `${nextLat.toFixed(4)}, ${nextLng.toFixed(4)}`;
+}
+
 // ─── Main Orchestrator ────────────────────────────────────────────────────────
 export function RoutePlanner() {
   const [lat, setLat] = useState(49.2827);
@@ -430,6 +455,7 @@ export function RoutePlanner() {
   const [locationQuery, setLocationQuery] = useState("");
   const [locationSuggestions, setLocationSuggestions] = useState<LocationSuggestion[]>([]);
   const [locationPending, setLocationPending] = useState(false);
+  const [locationResolving, setLocationResolving] = useState(false);
   const [locationError, setLocationError] = useState<string | null>(null);
   const [showDropdown, setShowDropdown] = useState(false);
   const [routeMode, setRouteMode] = useState<RouteMode>("drive");
@@ -483,10 +509,11 @@ export function RoutePlanner() {
 
   // Geocode as user types
   useEffect(() => {
-    if (geocodeTimerRef.current) clearTimeout(geocodeTimerRef.current);
-    if (!locationQuery || locationQuery.length < 3) {
+    clearTimeout(geocodeTimerRef.current ?? undefined);
+    if (!locationQuery || locationQuery.trim().length < 2) {
       setLocationSuggestions([]);
       setShowDropdown(false);
+      setLocationPending(false);
       return;
     }
     setLocationPending(true);
@@ -501,34 +528,89 @@ export function RoutePlanner() {
         setLocationPending(false);
       } catch {
         if (seq !== seqRef.current) return;
-        setLocationError("Search failed. Enter coordinates directly.");
+        setLocationError("Search failed. Try coordinates or a nearby landmark.");
         setLocationPending(false);
       }
-    }, 400);
-    return () => { if (geocodeTimerRef.current) clearTimeout(geocodeTimerRef.current); };
+    }, 300);
+    return () => { clearTimeout(geocodeTimerRef.current ?? undefined); };
   }, [locationQuery]);
 
-  const handleSuggestionSelect = useCallback((s: LocationSuggestion) => {
-    setLat(s.lat);
-    setLng(s.lng);
-    setLocationQuery(s.displayName);
+  const handleLocationQueryChange = useCallback((value: string) => {
+    setLocationQuery(value);
+    setLocationError(null);
+    setStatusMessage("");
+  }, []);
+
+  const applyResolvedLocation = useCallback((nextLat: number, nextLng: number, label: string, source: "search" | "coordinates" | "geolocation") => {
+    setLat(Number(nextLat.toFixed(5)));
+    setLng(Number(nextLng.toFixed(5)));
+    setLocationQuery(label);
     setLocationSuggestions([]);
     setShowDropdown(false);
+    setLocationPending(false);
+    setLocationResolving(false);
+    setLocationError(null);
+    setStatusMessage(source === "geolocation" ? "Location set from your device." : "");
     trackAnalyticsEvent({
       eventName: "location_selected",
       routeMode,
       vibes,
       timeBudgetMinutes: timeBudget,
-      regionKey: coarseAnalyticsRegionKey(s.lat, s.lng),
-      metadata: { source: "search" }
+      regionKey: coarseAnalyticsRegionKey(nextLat, nextLng),
+      metadata: { source }
     });
   }, [routeMode, vibes, timeBudget]);
 
-  const handleGeolocate = useCallback(() => {
-    if (!navigator.geolocation) {
-      setStatusMessage("Geolocation not supported.");
+  const handleSuggestionSelect = useCallback((s: LocationSuggestion) => {
+    applyResolvedLocation(s.lat, s.lng, s.displayName, "search");
+  }, [applyResolvedLocation]);
+
+  const handleLocationSubmit = useCallback(async () => {
+    const trimmed = locationQuery.trim();
+    if (!trimmed) {
+      setLocationError("Enter a city, address, landmark, or coordinates.");
+      setShowDropdown(true);
       return;
     }
+
+    const coordinates = parseCoordinateInput(trimmed);
+    if (coordinates) {
+      applyResolvedLocation(coordinates.lat, coordinates.lng, formatCoordinateLabel(coordinates.lat, coordinates.lng), "coordinates");
+      return;
+    }
+
+    if (locationSuggestions.length > 0) {
+      handleSuggestionSelect(locationSuggestions[0]);
+      return;
+    }
+
+    setLocationPending(true);
+    setShowDropdown(true);
+    setLocationError(null);
+    try {
+      const [firstResult] = await searchLocations(trimmed, 1);
+      if (!firstResult) {
+        setLocationError("No matching place found. Try a nearby city, landmark, or coordinates.");
+        return;
+      }
+      applyResolvedLocation(firstResult.lat, firstResult.lng, firstResult.displayName, "search");
+    } catch {
+      setLocationError("Search failed. Try coordinates or a nearby landmark.");
+    } finally {
+      setLocationPending(false);
+    }
+  }, [applyResolvedLocation, handleSuggestionSelect, locationQuery, locationSuggestions]);
+
+  const handleGeolocate = useCallback(() => {
+    if (!navigator.geolocation) {
+      setLocationError("Geolocation is not supported by this browser.");
+      setShowDropdown(true);
+      return;
+    }
+    setLocationResolving(true);
+    setLocationPending(false);
+    setLocationError(null);
+    setStatusMessage("Detecting your location…");
     trackAnalyticsEvent({
       eventName: "geolocate_clicked",
       routeMode,
@@ -538,13 +620,19 @@ export function RoutePlanner() {
     });
     navigator.geolocation.getCurrentPosition(
       (pos) => {
-        setLat(Number(pos.coords.latitude.toFixed(5)));
-        setLng(Number(pos.coords.longitude.toFixed(5)));
-        setLocationQuery(`${pos.coords.latitude.toFixed(4)}, ${pos.coords.longitude.toFixed(4)}`);
+        const nextLat = Number(pos.coords.latitude.toFixed(5));
+        const nextLng = Number(pos.coords.longitude.toFixed(5));
+        applyResolvedLocation(nextLat, nextLng, formatCoordinateLabel(nextLat, nextLng), "geolocation");
       },
-      () => setStatusMessage("Could not detect location. Enter coordinates manually.")
+      () => {
+        setLocationResolving(false);
+        setLocationError("Could not detect your location. Allow browser location access or enter a place manually.");
+        setShowDropdown(true);
+        setStatusMessage("");
+      },
+      { enableHighAccuracy: true, timeout: 10000, maximumAge: 60000 }
     );
-  }, [lat, lng, routeMode, vibes, timeBudget]);
+  }, [applyResolvedLocation, lat, lng, routeMode, vibes, timeBudget]);
 
   const handleVibeToggle = useCallback((vibe: string) => {
     setVibes((prev) =>
@@ -561,6 +649,19 @@ export function RoutePlanner() {
     const detail = await getRoute(routeId);
     routeDetailsRef.current[routeId] = detail;
     return detail;
+  }, []);
+
+  const prefetchRouteDetails = useCallback((detail: RouteDetailResponse) => {
+    for (const option of detail.routeOptions ?? []) {
+      if (!option.routeId || routeDetailsRef.current[option.routeId]) continue;
+      void getRoute(option.routeId)
+        .then((optionDetail) => {
+          routeDetailsRef.current[option.routeId] = optionDetail;
+        })
+        .catch(() => {
+          // Option prefetch is an interaction optimization; direct selection still retries.
+        });
+    }
   }, []);
 
   const handleGenerate = useCallback(async () => {
@@ -625,6 +726,7 @@ export function RoutePlanner() {
             try {
               const detail = await resolveRouteDetail(event.routeId);
               setRoute(detail);
+              prefetchRouteDetails(detail);
               setSelectedOptionId(event.routeId);
               setPhase("completed");
               const selectedOption = getSelectedRouteOption(detail, event.routeId);
@@ -673,6 +775,7 @@ export function RoutePlanner() {
                 const detail = await resolveRouteDetail(routeId);
                 setRoute(detail);
                 setSelectedOptionId(routeId);
+                prefetchRouteDetails(detail);
                 setPhase("completed");
                 const selectedOption = getSelectedRouteOption(detail, routeId);
                 trackAnalyticsEvent({
@@ -751,7 +854,7 @@ export function RoutePlanner() {
         metadata: { message: msg.slice(0, 240) }
       });
     }
-  }, [lat, lng, routeMode, vibes, timeBudget, resolveRouteDetail]);
+  }, [lat, lng, routeMode, vibes, timeBudget, resolveRouteDetail, prefetchRouteDetails]);
 
   const handleReset = useCallback(() => {
     if (stopWsRef.current) { stopWsRef.current(); stopWsRef.current = null; }
@@ -804,9 +907,30 @@ export function RoutePlanner() {
 
   const handleOptionSelect = useCallback(async (id: string) => {
     setSelectedOptionId(id);
+    const cachedDetail = routeDetailsRef.current[id];
+    if (cachedDetail) {
+      setRoute(cachedDetail);
+      prefetchRouteDetails(cachedDetail);
+      const selectedOption = getSelectedRouteOption(cachedDetail, id);
+      trackAnalyticsEvent({
+        eventName: "route_option_selected",
+        jobId: cachedDetail.jobId,
+        routeId: id,
+        routeProfile: selectedOption?.profile,
+        routeMode: cachedDetail.routeMode,
+        vibes: cachedDetail.vibes,
+        timeBudgetMinutes: cachedDetail.timeBudgetMinutes,
+        regionKey: coarseAnalyticsRegionKey(lat, lng),
+        routeCount: cachedDetail.routeOptions?.length ?? 1,
+        scenicScore: selectedOption?.scenicScore ?? cachedDetail.scenicScore
+      });
+      return;
+    }
     try {
       const detail = await resolveRouteDetail(id);
       setRoute(detail);
+      prefetchRouteDetails(detail);
+
       const selectedOption = getSelectedRouteOption(detail, id);
       trackAnalyticsEvent({
         eventName: "route_option_selected",
@@ -824,7 +948,7 @@ export function RoutePlanner() {
       const msg = e instanceof Error ? e.message : "Failed to load route detail.";
       setStatusMessage(msg);
     }
-  }, [lat, lng, resolveRouteDetail]);
+  }, [lat, lng, resolveRouteDetail, prefetchRouteDetails]);
 
   const handleViewRoutes = useCallback(() => {
     if (!route) return;
@@ -990,6 +1114,7 @@ export function RoutePlanner() {
             locationQuery={locationQuery}
             locationSuggestions={locationSuggestions}
             locationPending={locationPending}
+            locationResolving={locationResolving}
             locationError={locationError}
             showDropdown={showDropdown}
             routeMode={routeMode}
@@ -999,7 +1124,8 @@ export function RoutePlanner() {
             statusMessage={phase === "idle" || phase === "failed" ? statusMessage : ""}
             onLatChange={setLat}
             onLngChange={setLng}
-            onLocationQueryChange={setLocationQuery}
+            onLocationQueryChange={handleLocationQueryChange}
+            onLocationSubmit={handleLocationSubmit}
             onSuggestionSelect={handleSuggestionSelect}
             onGeolocate={handleGeolocate}
             onModeChange={setRouteMode}
@@ -1055,6 +1181,7 @@ export function RoutePlanner() {
                   locationQuery={locationQuery}
                   locationSuggestions={locationSuggestions}
                   locationPending={locationPending}
+                  locationResolving={locationResolving}
                   locationError={locationError}
                   showDropdown={showDropdown}
                   routeMode={routeMode}
@@ -1064,7 +1191,8 @@ export function RoutePlanner() {
                   statusMessage={phase === "idle" ? statusMessage : ""}
                   onLatChange={setLat}
                   onLngChange={setLng}
-                  onLocationQueryChange={setLocationQuery}
+                  onLocationQueryChange={handleLocationQueryChange}
+                  onLocationSubmit={handleLocationSubmit}
                   onSuggestionSelect={handleSuggestionSelect}
                   onGeolocate={handleGeolocate}
                   onModeChange={setRouteMode}
@@ -1106,6 +1234,7 @@ export function RoutePlanner() {
                 locationQuery={locationQuery}
                 locationSuggestions={locationSuggestions}
                 locationPending={locationPending}
+                locationResolving={locationResolving}
                 locationError={locationError}
                 showDropdown={showDropdown}
                 routeMode={routeMode}
@@ -1116,7 +1245,8 @@ export function RoutePlanner() {
                 compactVibeList
                 onLatChange={setLat}
                 onLngChange={setLng}
-                onLocationQueryChange={setLocationQuery}
+                onLocationQueryChange={handleLocationQueryChange}
+                onLocationSubmit={handleLocationSubmit}
                 onSuggestionSelect={handleSuggestionSelect}
                 onGeolocate={handleGeolocate}
                 onModeChange={setRouteMode}
