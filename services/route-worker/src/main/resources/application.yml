@@ -78,6 +78,10 @@ moodride:
     max-duration-overrun-ratio: 1.15
     anchored-tile-selection-limit: 48
     max-osrm-requests-per-job: 48
+    osrm-request-parallelism: 6
+    osrm-early-stop-enabled: true
+    osrm-early-stop-min-requests: 24
+    osrm-early-stop-min-candidates: 12
   osrm:
     base-url: ${MOODRIDE_OSRM_BASE_URL:http://127.0.0.1:5002}
     request-timeout-ms: 7000
@@ -87,7 +91,7 @@ moodride:
   kafka:
     listener:
       group-id: route-workers
-      concurrency: 1
+      concurrency: 2
     consumer:
       retry:
         max-attempts: 4

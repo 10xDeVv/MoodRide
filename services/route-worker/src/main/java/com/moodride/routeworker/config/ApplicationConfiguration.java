@@ -15,6 +15,10 @@ public class ApplicationConfiguration {
     private double maxDurationOverrunRatio = 1.15;
     private int anchoredTileSelectionLimit = 48;
     private int maxOsrmRequestsPerJob = 48;
+    private int osrmRequestParallelism = 6;
+    private boolean osrmEarlyStopEnabled = true;
+    private int osrmEarlyStopMinRequests = 24;
+    private int osrmEarlyStopMinCandidates = 12;
 
 
     public int getH3Resolution() {
@@ -72,7 +76,6 @@ public class ApplicationConfiguration {
         this.anchoredTileSelectionLimit = anchoredTileSelectionLimit;
     }
 
-
     public double getMaxDurationOverrunRatio() {
         return maxDurationOverrunRatio;
     }
@@ -87,5 +90,37 @@ public class ApplicationConfiguration {
 
     public void setMaxOsrmRequestsPerJob(int maxOsrmRequestsPerJob) {
         this.maxOsrmRequestsPerJob = maxOsrmRequestsPerJob;
+    }
+
+    public int getOsrmRequestParallelism() {
+        return osrmRequestParallelism;
+    }
+
+    public void setOsrmRequestParallelism(int osrmRequestParallelism) {
+        this.osrmRequestParallelism = osrmRequestParallelism;
+    }
+
+    public boolean isOsrmEarlyStopEnabled() {
+        return osrmEarlyStopEnabled;
+    }
+
+    public void setOsrmEarlyStopEnabled(boolean osrmEarlyStopEnabled) {
+        this.osrmEarlyStopEnabled = osrmEarlyStopEnabled;
+    }
+
+    public int getOsrmEarlyStopMinRequests() {
+        return osrmEarlyStopMinRequests;
+    }
+
+    public void setOsrmEarlyStopMinRequests(int osrmEarlyStopMinRequests) {
+        this.osrmEarlyStopMinRequests = osrmEarlyStopMinRequests;
+    }
+
+    public int getOsrmEarlyStopMinCandidates() {
+        return osrmEarlyStopMinCandidates;
+    }
+
+    public void setOsrmEarlyStopMinCandidates(int osrmEarlyStopMinCandidates) {
+        this.osrmEarlyStopMinCandidates = osrmEarlyStopMinCandidates;
     }
 }

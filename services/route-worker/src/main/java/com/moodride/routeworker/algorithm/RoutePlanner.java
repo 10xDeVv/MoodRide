@@ -22,6 +22,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashSet;
@@ -31,6 +32,10 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.ToDoubleFunction;
 import java.util.stream.Collectors;
 
@@ -132,6 +137,7 @@ public class RoutePlanner {
     }
 
     public List<RouteCandidate> generateRouteOptions(RouteJob job) {
+        long generationStartedNanos = System.nanoTime();
         RoadNode start = new RoadNode(job.getStartLatitude(), job.getStartLongitude());
         List<String> requestVibes = resolveJobVibes(job);
         VibeCatalog.BlendedVibeProfile vibeProfile = VibeCatalog.blendProfiles(requestVibes);
@@ -139,6 +145,7 @@ public class RoutePlanner {
         GeometryStrategy geometryStrategy = resolveGeometryStrategy(vibeProfile);
         DurationCalibrationHint durationCalibration = resolveDurationCalibrationHint(start, job, geometryStrategy);
 
+        long stageStartedNanos = System.nanoTime();
         List<TileCandidate> scoredTiles = scoreNearbyTiles(
             start,
             job.getTimeBudgetMinutes(),
@@ -146,7 +153,10 @@ public class RoutePlanner {
             vibeProfile,
             durationCalibration
         );
+        long tileScoringMs = elapsedMillis(stageStartedNanos);
         validateVibeAvailability(job, requestVibes, vibeProfile, scoredTiles);
+
+        stageStartedNanos = System.nanoTime();
         List<List<RoadNode>> waypointVariants = buildHybridV2WaypointRings(
             start,
             scoredTiles,
@@ -155,10 +165,18 @@ public class RoutePlanner {
             geometryStrategy,
             durationCalibration
         );
+        long variantBuildMs = elapsedMillis(stageStartedNanos);
+
+        stageStartedNanos = System.nanoTime();
         List<RouteCandidate> hybridCandidates = collectHybridCandidates(job, waypointVariants, preferences, vibeProfile, geometryStrategy);
+        long primaryOsrmMs = elapsedMillis(stageStartedNanos);
+        long rescueMs = 0L;
+
         if (hybridCandidates.isEmpty() || !routeOptionSelector.hasDiverseCandidatePool(hybridCandidates, job.getTimeBudgetMinutes())) {
+            stageStartedNanos = System.nanoTime();
             List<List<RoadNode>> syntheticVariants = buildSyntheticWaypointRings(start, job.getTimeBudgetMinutes());
             List<RouteCandidate> syntheticCandidates = collectHybridCandidates(job, syntheticVariants, preferences, vibeProfile, geometryStrategy);
+            rescueMs += elapsedMillis(stageStartedNanos);
             if (hybridCandidates.isEmpty()) {
                 hybridCandidates = syntheticCandidates;
             } else if (!syntheticCandidates.isEmpty()) {
@@ -169,18 +187,22 @@ public class RoutePlanner {
             }
         }
         if (hybridCandidates.size() < ROUTE_OPTION_COUNT || routeOptionSelector.needsBudgetRescue(hybridCandidates, job.getTimeBudgetMinutes())) {
+            stageStartedNanos = System.nanoTime();
             List<List<RoadNode>> budgetRescueVariants = buildBudgetRescueWaypointRings(start, job.getTimeBudgetMinutes());
             List<RouteCandidate> budgetRescueCandidates = collectHybridCandidates(job, budgetRescueVariants, preferences, vibeProfile, geometryStrategy);
+            rescueMs += elapsedMillis(stageStartedNanos);
             if (!budgetRescueCandidates.isEmpty()) {
                 hybridCandidates = routeOptionSelector.combineCandidates(hybridCandidates, budgetRescueCandidates);
                 logger.info("Hybrid routing used budget-rescue waypoint variants for job {}", job.getId());
             }
         }
         if (!hybridCandidates.isEmpty()) {
+            stageStartedNanos = System.nanoTime();
             List<RouteCandidate> differentiated = routeOptionSelector.differentiateFlatScenicScores(hybridCandidates, job.getTimeBudgetMinutes());
             List<RouteCandidate> candidatePool = contractCandidatePool(differentiated, vibeProfile, geometryStrategy, requestVibes, job);
             List<RouteCandidate> selected = routeOptionSelector.selectRouteOptions(candidatePool, job.getTimeBudgetMinutes());
             if (selected.size() >= ROUTE_OPTION_COUNT && routeOptionSelector.minRouteSeparationKm(selected) < RouteOptionSelector.ROUTE_OPTION_MIN_SEPARATION_KM) {
+                long diversityStartedNanos = System.nanoTime();
                 List<RouteCandidate> rescueCandidates = collectHybridCandidates(
                     job,
                     buildDiversityRescueWaypointRings(start, job.getTimeBudgetMinutes()),
@@ -188,6 +210,7 @@ public class RoutePlanner {
                     vibeProfile,
                     geometryStrategy
                 );
+                rescueMs += elapsedMillis(diversityStartedNanos);
                 if (!rescueCandidates.isEmpty()) {
                     List<RouteCandidate> expanded = routeOptionSelector.differentiateFlatScenicScores(
                         routeOptionSelector.combineCandidates(differentiated, rescueCandidates),
@@ -198,12 +221,40 @@ public class RoutePlanner {
                     logger.info("Hybrid routing used diversity-rescue waypoint variants for job {}", job.getId());
                 }
             }
+            long selectionMs = elapsedMillis(stageStartedNanos);
+            logger.info(
+                "Route job {} generation timings totalMs={} tileScoringMs={} variantBuildMs={} primaryOsrmMs={} rescueMs={} selectionMs={} scoredTiles={} waypointVariants={} candidates={} selected={} strategy={}",
+                job.getId(),
+                elapsedMillis(generationStartedNanos),
+                tileScoringMs,
+                variantBuildMs,
+                primaryOsrmMs,
+                rescueMs,
+                selectionMs,
+                scoredTiles.size(),
+                waypointVariants.size(),
+                hybridCandidates.size(),
+                selected.size(),
+                geometryStrategy
+            );
             if (requiresStrictContractOptions(vibeProfile, geometryStrategy) && selected.size() < ROUTE_OPTION_COUNT) {
                 throw noStrongStrategyRoute(requestVibes, job);
             }
             return selected;
         }
 
+        logger.info(
+            "Route job {} generation timings totalMs={} tileScoringMs={} variantBuildMs={} primaryOsrmMs={} rescueMs={} selectionMs=0 scoredTiles={} waypointVariants={} candidates=0 selected=0 strategy={}",
+            job.getId(),
+            elapsedMillis(generationStartedNanos),
+            tileScoringMs,
+            variantBuildMs,
+            primaryOsrmMs,
+            rescueMs,
+            scoredTiles.size(),
+            waypointVariants.size(),
+            geometryStrategy
+        );
         int maxAllowedMinutes = routeOptionSelector.maxAllowedMinutes(job.getTimeBudgetMinutes());
         throw new NoFeasibleRouteException(
             "No feasible route found within " + maxAllowedMinutes
@@ -220,52 +271,77 @@ public class RoutePlanner {
         List<RouteCandidate> candidates = new ArrayList<>();
         int maxAllowedMinutes = routeOptionSelector.maxAllowedMinutes(job.getTimeBudgetMinutes());
         int requestLimit = Math.max(ROUTE_OPTION_COUNT, config.getMaxOsrmRequestsPerJob());
-        int attemptedRequests = 0;
+        int parallelism = Math.max(1, Math.min(requestLimit, config.getOsrmRequestParallelism()));
+        AtomicInteger attemptedRequests = new AtomicInteger();
+        long evaluationStartedNanos = System.nanoTime();
+        boolean earlyStopped = false;
 
-        for (List<RoadNode> variant : waypointVariants) {
-            if (attemptedRequests >= requestLimit) {
-                break;
+        if (parallelism == 1) {
+            for (List<RoadNode> variant : waypointVariants) {
+                if (attemptedRequests.get() >= requestLimit) {
+                    break;
+                }
+                attemptedRequests.incrementAndGet();
+                RouteCandidate candidate = solveVariant(job, variant, preferences, vibeProfile, geometryStrategy);
+                if (candidate != null) {
+                    candidates.add(candidate);
+                }
+                if (shouldStopOsrmEarly(candidates, attemptedRequests.get(), job.getTimeBudgetMinutes(), vibeProfile, geometryStrategy)) {
+                    earlyStopped = true;
+                    break;
+                }
             }
-            attemptedRequests++;
-            var result = osrmTripClient.requestRoundTrip(variant, job.getRouteMode());
-            if (result.isEmpty()) {
-                continue;
+        } else {
+            ExecutorService executor = Executors.newFixedThreadPool(parallelism);
+            try {
+                int variantIndex = 0;
+                while (variantIndex < waypointVariants.size() && attemptedRequests.get() < requestLimit) {
+                    int remainingRequestBudget = requestLimit - attemptedRequests.get();
+                    int batchSize = Math.min(parallelism, Math.min(remainingRequestBudget, waypointVariants.size() - variantIndex));
+                    List<CompletableFuture<RouteCandidate>> futures = new ArrayList<>(batchSize);
+                    for (int i = 0; i < batchSize; i++) {
+                        List<RoadNode> variant = waypointVariants.get(variantIndex++);
+                        attemptedRequests.incrementAndGet();
+                        futures.add(CompletableFuture.supplyAsync(
+                            () -> solveVariant(job, variant, preferences, vibeProfile, geometryStrategy),
+                            executor
+                        ));
+                    }
+                    for (CompletableFuture<RouteCandidate> future : futures) {
+                        RouteCandidate candidate = future.join();
+                        if (candidate != null) {
+                            candidates.add(candidate);
+                        }
+                    }
+                    if (shouldStopOsrmEarly(candidates, attemptedRequests.get(), job.getTimeBudgetMinutes(), vibeProfile, geometryStrategy)) {
+                        earlyStopped = true;
+                        break;
+                    }
+                }
+            } finally {
+                executor.shutdown();
             }
-
-            var trip = result.get();
-            RouteScoreResult routeScore = computeHybridV2RouteScore(
-                trip.path(),
-                preferences,
-                vibeProfile,
-                job.getTimeBudgetMinutes(),
-                trip.durationMinutes(),
-                geometryStrategy
-            );
-            Map<String, Double> scoreBreakdown = withDurationCalibrationBreakdown(
-                routeScore.breakdown(),
-                variant,
-                startNode(job),
-                job.getTimeBudgetMinutes(),
-                trip.durationMinutes()
-            );
-            RouteCandidate candidate = new RouteCandidate(
-                trip.path(),
-                routeScore.finalScore(),
-                trip.totalDistanceKm(),
-                trip.durationMinutes(),
-                HYBRID_OSRM_V2,
-                null,
-                scoreBreakdown
-            );
-            candidates.add(candidate);
         }
 
-        if (waypointVariants.size() > attemptedRequests) {
+        long evaluationMs = elapsedMillis(evaluationStartedNanos);
+        if (waypointVariants.size() > attemptedRequests.get()) {
             logger.info(
-                "Route job {} capped OSRM trip requests at {} of {} waypoint variant(s)",
+                "Route job {} stopped OSRM evaluation at {} of {} waypoint variant(s) parallelism={} earlyStopped={} elapsedMs={}",
                 job.getId(),
-                attemptedRequests,
-                waypointVariants.size()
+                attemptedRequests.get(),
+                waypointVariants.size(),
+                parallelism,
+                earlyStopped,
+                evaluationMs
+            );
+        } else {
+            logger.info(
+                "Route job {} evaluated {} OSRM waypoint variant(s) parallelism={} earlyStopped={} elapsedMs={}",
+                job.getId(),
+                attemptedRequests.get(),
+                parallelism,
+                earlyStopped,
+                evaluationMs
             );
         }
 
@@ -295,6 +371,70 @@ public class RoutePlanner {
         }
 
         return List.of();
+    }
+
+    private RouteCandidate solveVariant(RouteJob job,
+                                        List<RoadNode> variant,
+                                        PreferenceWeights preferences,
+                                        VibeCatalog.BlendedVibeProfile vibeProfile,
+                                        GeometryStrategy geometryStrategy) {
+        var result = osrmTripClient.requestRoundTrip(variant, job.getRouteMode());
+        if (result.isEmpty()) {
+            return null;
+        }
+
+        var trip = result.get();
+        RouteScoreResult routeScore = computeHybridV2RouteScore(
+            trip.path(),
+            preferences,
+            vibeProfile,
+            job.getTimeBudgetMinutes(),
+            trip.durationMinutes(),
+            geometryStrategy
+        );
+        Map<String, Double> scoreBreakdown = withDurationCalibrationBreakdown(
+            routeScore.breakdown(),
+            variant,
+            startNode(job),
+            job.getTimeBudgetMinutes(),
+            trip.durationMinutes()
+        );
+        return new RouteCandidate(
+            trip.path(),
+            routeScore.finalScore(),
+            trip.totalDistanceKm(),
+            trip.durationMinutes(),
+            HYBRID_OSRM_V2,
+            null,
+            scoreBreakdown
+        );
+    }
+
+    private boolean shouldStopOsrmEarly(List<RouteCandidate> candidates,
+                                        int attemptedRequests,
+                                        int targetMinutes,
+                                        VibeCatalog.BlendedVibeProfile vibeProfile,
+                                        GeometryStrategy geometryStrategy) {
+        if (!config.isOsrmEarlyStopEnabled()
+            || attemptedRequests < Math.max(ROUTE_OPTION_COUNT, config.getOsrmEarlyStopMinRequests())
+            || candidates.size() < Math.max(ROUTE_OPTION_COUNT, config.getOsrmEarlyStopMinCandidates())) {
+            return false;
+        }
+
+        int maxAllowedMinutes = routeOptionSelector.maxAllowedMinutes(targetMinutes);
+        List<RouteCandidate> deduplicated = routeOptionSelector.deduplicateCandidates(candidates);
+        List<RouteCandidate> eligibleCandidates = deduplicated.stream()
+            .filter(candidate -> candidate.getEstimatedMinutes() <= maxAllowedMinutes)
+            .filter(candidate -> !requiresStrictContractOptions(vibeProfile, geometryStrategy)
+                || satisfiesStrictContract(candidate, vibeProfile, geometryStrategy))
+            .toList();
+        if (eligibleCandidates.size() < ROUTE_OPTION_COUNT || routeOptionSelector.needsBudgetRescue(eligibleCandidates, targetMinutes)) {
+            return false;
+        }
+
+        List<RouteCandidate> selected = routeOptionSelector.selectRouteOptions(eligibleCandidates, targetMinutes);
+        return selected.size() >= ROUTE_OPTION_COUNT
+            && routeOptionSelector.minRouteSeparationKm(selected) >= RouteOptionSelector.ROUTE_OPTION_MIN_SEPARATION_KM;
     }
 
     private DurationCalibrationHint resolveDurationCalibrationHint(RoadNode start,
@@ -2116,6 +2256,10 @@ public class RoutePlanner {
         }
         String normalized = VibeCatalog.normalize(vibe);
         return normalized.isBlank() ? VibeCatalog.defaultVibe() : normalized;
+    }
+
+    private long elapsedMillis(long startedNanos) {
+        return Duration.ofNanos(System.nanoTime() - startedNanos).toMillis();
     }
 
     private double scoreTile(ScenicScoreTile tile, PreferenceWeights preferences) {

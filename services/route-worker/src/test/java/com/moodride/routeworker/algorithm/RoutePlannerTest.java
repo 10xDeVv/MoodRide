@@ -67,6 +67,16 @@ class RoutePlannerTest {
 
     @BeforeEach
     void setUp() {
+        routePlanner = routePlanner(testConfiguration());
+        lenient().when(routeWeightCalibrationRepository.findByVibeIn(anyCollection())).thenReturn(List.of());
+        lenient().when(routeDurationCalibrationRepository.findById(org.mockito.ArgumentMatchers.anyString())).thenReturn(Optional.empty());
+        lenient().when(roadSegmentAnchorService.anchorFor(
+            org.mockito.ArgumentMatchers.any(ScenicScoreTile.class),
+            org.mockito.ArgumentMatchers.any(RoadNode.class)
+        )).thenAnswer(invocation -> invocation.getArgument(1));
+    }
+
+    private ApplicationConfiguration testConfiguration() {
         ApplicationConfiguration config = new ApplicationConfiguration();
         config.setH3Resolution(9);
         config.setTileSelectionRingMin(1);
@@ -75,7 +85,11 @@ class RoutePlannerTest {
         config.setSectorCount(6);
         config.setCorridorSampleMeters(500);
         config.setMaxDurationOverrunRatio(1.0);
-        routePlanner = new RoutePlanner(
+        return config;
+    }
+
+    private RoutePlanner routePlanner(ApplicationConfiguration config) {
+        return new RoutePlanner(
             scenicTileLookupService,
             roadSegmentAnchorService,
             routeWeightCalibrationRepository,
@@ -85,12 +99,22 @@ class RoutePlannerTest {
             new ObjectMapper(),
             new ScenicScoreCalculator()
         );
-        lenient().when(routeWeightCalibrationRepository.findByVibeIn(anyCollection())).thenReturn(List.of());
-        lenient().when(routeDurationCalibrationRepository.findById(org.mockito.ArgumentMatchers.anyString())).thenReturn(Optional.empty());
-        lenient().when(roadSegmentAnchorService.anchorFor(
-            org.mockito.ArgumentMatchers.any(ScenicScoreTile.class),
-            org.mockito.ArgumentMatchers.any(RoadNode.class)
-        )).thenAnswer(invocation -> invocation.getArgument(1));
+    }
+
+    private void usePlannerWithMaxOsrmRequests(int maxOsrmRequestsPerJob) {
+        ApplicationConfiguration config = testConfiguration();
+        config.setMaxOsrmRequestsPerJob(maxOsrmRequestsPerJob);
+        routePlanner = routePlanner(config);
+    }
+
+    private void usePlannerWithOsrmLimits(int maxOsrmRequestsPerJob,
+                                          int earlyStopMinRequests,
+                                          int earlyStopMinCandidates) {
+        ApplicationConfiguration config = testConfiguration();
+        config.setMaxOsrmRequestsPerJob(maxOsrmRequestsPerJob);
+        config.setOsrmEarlyStopMinRequests(earlyStopMinRequests);
+        config.setOsrmEarlyStopMinCandidates(earlyStopMinCandidates);
+        routePlanner = routePlanner(config);
     }
 
     @Test
@@ -187,6 +211,50 @@ class RoutePlannerTest {
         assertThat(options).hasSize(3);
         verify(roadSegmentAnchorService, atMost(48)).anchorFor(any(ScenicScoreTile.class), any(RoadNode.class));
         verify(osrmTripClient, atMost(48)).requestRoundTrip(anyList(), eq(RouteMode.DRIVE));
+    }
+
+    @Test
+    void generateRouteOptionsReturnsThreeOptionsWhenOsrmEvaluationIsCapped() {
+        usePlannerWithMaxOsrmRequests(12);
+        when(scenicTileLookupService.findByH3Indexes(anyCollection())).thenReturn(manyHighScenicTilesAroundStart(80));
+        AtomicInteger osrmRequests = new AtomicInteger();
+        when(osrmTripClient.requestRoundTrip(anyList(), eq(RouteMode.DRIVE))).thenAnswer(invocation -> {
+            @SuppressWarnings("unchecked")
+            List<RoadNode> variant = invocation.getArgument(0);
+            int index = osrmRequests.getAndIncrement();
+            int durationMinutes = 34 + (index % 9);
+            double distanceKm = 12.0 + index;
+            return Optional.of(new OsrmTripClient.TripResult(variant, distanceKm, durationMinutes));
+        });
+
+        List<RouteCandidate> options = routePlanner.generateRouteOptions(sampleJob(45));
+
+        assertThat(options).hasSize(3);
+        assertThat(osrmRequests.get()).isLessThanOrEqualTo(12);
+        assertThat(options.stream().map(this::pathSignature).collect(Collectors.toSet()))
+            .hasSizeGreaterThanOrEqualTo(2);
+    }
+
+    @Test
+    void generateRouteOptionsStopsBeforeConfiguredCapAfterEnoughDiverseInBudgetCandidates() {
+        usePlannerWithOsrmLimits(48, 12, 9);
+        when(scenicTileLookupService.findByH3Indexes(anyCollection())).thenReturn(manyHighScenicTilesAroundStart(80));
+        AtomicInteger osrmRequests = new AtomicInteger();
+        when(osrmTripClient.requestRoundTrip(anyList(), eq(RouteMode.DRIVE))).thenAnswer(invocation -> {
+            @SuppressWarnings("unchecked")
+            List<RoadNode> variant = invocation.getArgument(0);
+            int index = osrmRequests.getAndIncrement();
+            int durationMinutes = 32 + (index % 11);
+            double distanceKm = 10.0 + (index * 0.75);
+            return Optional.of(new OsrmTripClient.TripResult(variant, distanceKm, durationMinutes));
+        });
+
+        List<RouteCandidate> options = routePlanner.generateRouteOptions(sampleJob(45));
+
+        assertThat(options).hasSize(3);
+        assertThat(osrmRequests.get()).isLessThan(48);
+        assertThat(options.stream().map(RouteCandidate::getEstimatedMinutes))
+            .allSatisfy(minutes -> assertThat(minutes).isLessThanOrEqualTo(45));
     }
 
     @Test
