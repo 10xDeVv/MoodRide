@@ -79,6 +79,9 @@ public class RoutePlanner {
     private static final double STRATEGY_ANCHOR_MIN_SEPARATION_KM = 1.6;
     private static final double STRICT_MOUNTAIN_STRATEGY_MIN_FIT = 0.32;
     private static final double STRICT_MOUNTAIN_MIN_CURVE_ELEVATION_SHARE = 0.28;
+    private static final double STRICT_OPEN_SPACE_STRATEGY_MIN_FIT = 0.24;
+    private static final double STRICT_OPEN_SPACE_MAX_URBAN_PRESSURE = 0.72;
+    private static final double STRICT_OPEN_SPACE_MIN_OPEN_SHARE = 0.18;
     private static final double STRICT_LOW_PRESSURE_STRATEGY_MIN_FIT = 0.30;
     private static final double STRICT_LOW_PRESSURE_MAX_URBAN_PRESSURE = 0.58;
     private static final double STRICT_LOW_PRESSURE_MIN_QUIET_SHARE = 0.32;
@@ -200,7 +203,7 @@ public class RoutePlanner {
             stageStartedNanos = System.nanoTime();
             List<RouteCandidate> differentiated = routeOptionSelector.differentiateFlatScenicScores(hybridCandidates, job.getTimeBudgetMinutes());
             List<RouteCandidate> candidatePool = contractCandidatePool(differentiated, vibeProfile, geometryStrategy, requestVibes, job);
-            List<RouteCandidate> selected = routeOptionSelector.selectRouteOptions(candidatePool, job.getTimeBudgetMinutes());
+            List<RouteCandidate> selected = routeOptionSelector.selectRouteOptions(candidatePool, job.getTimeBudgetMinutes(), primaryRouteScorer(geometryStrategy, job.getTimeBudgetMinutes()));
             if (selected.size() >= ROUTE_OPTION_COUNT && routeOptionSelector.minRouteSeparationKm(selected) < RouteOptionSelector.ROUTE_OPTION_MIN_SEPARATION_KM) {
                 long diversityStartedNanos = System.nanoTime();
                 List<RouteCandidate> rescueCandidates = collectHybridCandidates(
@@ -217,7 +220,7 @@ public class RoutePlanner {
                         job.getTimeBudgetMinutes()
                     );
                     List<RouteCandidate> expandedPool = contractCandidatePool(expanded, vibeProfile, geometryStrategy, requestVibes, job);
-                    selected = routeOptionSelector.selectRouteOptions(expandedPool, job.getTimeBudgetMinutes());
+                    selected = routeOptionSelector.selectRouteOptions(expandedPool, job.getTimeBudgetMinutes(), primaryRouteScorer(geometryStrategy, job.getTimeBudgetMinutes()));
                     logger.info("Hybrid routing used diversity-rescue waypoint variants for job {}", job.getId());
                 }
             }
@@ -415,13 +418,14 @@ public class RoutePlanner {
                                         int targetMinutes,
                                         VibeCatalog.BlendedVibeProfile vibeProfile,
                                         GeometryStrategy geometryStrategy) {
+        int minRequests = Math.max(ROUTE_OPTION_COUNT, config.getOsrmEarlyStopMinRequests());
         if (geometryStrategy != GeometryStrategy.BALANCED_VARIETY) {
-            return false;
+            minRequests = Math.max(minRequests, 24);
         }
-
+        int minCandidates = Math.max(ROUTE_OPTION_COUNT, config.getOsrmEarlyStopMinCandidates());
         if (!config.isOsrmEarlyStopEnabled()
-            || attemptedRequests < Math.max(ROUTE_OPTION_COUNT, config.getOsrmEarlyStopMinRequests())
-            || candidates.size() < Math.max(ROUTE_OPTION_COUNT, config.getOsrmEarlyStopMinCandidates())) {
+            || attemptedRequests < minRequests
+            || candidates.size() < minCandidates) {
             return false;
         }
 
@@ -436,9 +440,28 @@ public class RoutePlanner {
             return false;
         }
 
-        List<RouteCandidate> selected = routeOptionSelector.selectRouteOptions(eligibleCandidates, targetMinutes);
+        List<RouteCandidate> selected = routeOptionSelector.selectRouteOptions(eligibleCandidates, targetMinutes, primaryRouteScorer(geometryStrategy, targetMinutes));
         return selected.size() >= ROUTE_OPTION_COUNT
             && routeOptionSelector.minRouteSeparationKm(selected) >= RouteOptionSelector.ROUTE_OPTION_MIN_SEPARATION_KM;
+    }
+
+    private ToDoubleFunction<RouteCandidate> primaryRouteScorer(GeometryStrategy geometryStrategy, int targetMinutes) {
+        GeometryStrategy activeStrategy = geometryStrategy == null ? GeometryStrategy.BALANCED_VARIETY : geometryStrategy;
+        if (activeStrategy == GeometryStrategy.BALANCED_VARIETY) {
+            return candidate -> candidate.getTotalScenicScore();
+        }
+        return candidate -> {
+            Map<String, Double> breakdown = candidate.getScoreBreakdown();
+            double strategyFit = breakdownValue(breakdown, "strategy_fit_score", 0.0);
+            double mismatchPenalty = breakdownValue(breakdown, "strategy_mismatch_penalty", 0.0);
+            double budgetFit = 1.0 - clamp01(Math.abs(candidate.getEstimatedMinutes() - targetMinutes) / (double) Math.max(1, targetMinutes));
+            double durationUse = clamp01(candidate.getEstimatedMinutes() / (double) Math.max(1, targetMinutes));
+            return (strategyFit * 0.42)
+                + (candidate.getTotalScenicScore() * 0.32)
+                + (budgetFit * 0.14)
+                + (durationUse * 0.08)
+                - (mismatchPenalty * 0.18);
+        };
     }
 
     private DurationCalibrationHint resolveDurationCalibrationHint(RoadNode start,
@@ -528,7 +551,7 @@ public class RoutePlanner {
             return isStrictMountainCandidate(candidate);
         }
         if (geometryStrategy == GeometryStrategy.OPEN_SPACE_ESCAPE) {
-            return isStrictLowPressureCandidate(candidate);
+            return isStrictOpenSpaceCandidate(candidate);
         }
         if (geometryStrategy == GeometryStrategy.QUIET_LOW_PRESSURE && requiresStrictContractOptions(vibeProfile, geometryStrategy)) {
             return isStrictLowPressureCandidate(candidate);
@@ -542,6 +565,20 @@ public class RoutePlanner {
         double curveElevationShare = breakdownValue(breakdown, "curve_elevation_corridor_share", 0.0);
         return strategyFit >= STRICT_MOUNTAIN_STRATEGY_MIN_FIT
             && curveElevationShare >= STRICT_MOUNTAIN_MIN_CURVE_ELEVATION_SHARE;
+    }
+
+    private boolean isStrictOpenSpaceCandidate(RouteCandidate candidate) {
+        Map<String, Double> breakdown = candidate.getScoreBreakdown();
+        double strategyFit = breakdownValue(breakdown, "strategy_fit_score", 0.0);
+        double urbanPressure = breakdownValue(
+            breakdown,
+            "corridor_urban_pressure",
+            breakdownValue(breakdown, "urban_penalty", 1.0)
+        );
+        double openShare = breakdownValue(breakdown, "open_space_corridor_share", 0.0);
+        return strategyFit >= STRICT_OPEN_SPACE_STRATEGY_MIN_FIT
+            && urbanPressure <= STRICT_OPEN_SPACE_MAX_URBAN_PRESSURE
+            && openShare >= STRICT_OPEN_SPACE_MIN_OPEN_SHARE;
     }
 
     private boolean isStrictLowPressureCandidate(RouteCandidate candidate) {

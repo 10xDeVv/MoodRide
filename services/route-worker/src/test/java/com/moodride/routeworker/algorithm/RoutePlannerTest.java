@@ -117,6 +117,18 @@ class RoutePlannerTest {
         routePlanner = routePlanner(config);
     }
 
+    private void usePlannerWithOsrmLimitsAndParallelism(int maxOsrmRequestsPerJob,
+                                                        int earlyStopMinRequests,
+                                                        int earlyStopMinCandidates,
+                                                        int osrmRequestParallelism) {
+        ApplicationConfiguration config = testConfiguration();
+        config.setMaxOsrmRequestsPerJob(maxOsrmRequestsPerJob);
+        config.setOsrmEarlyStopMinRequests(earlyStopMinRequests);
+        config.setOsrmEarlyStopMinCandidates(earlyStopMinCandidates);
+        config.setOsrmRequestParallelism(osrmRequestParallelism);
+        routePlanner = routePlanner(config);
+    }
+
     private void usePlannerWithOsrmParallelism(int osrmRequestParallelism) {
         ApplicationConfiguration config = testConfiguration();
         config.setOsrmRequestParallelism(osrmRequestParallelism);
@@ -264,15 +276,15 @@ class RoutePlannerTest {
     }
 
     @Test
-    void intentSpecificVibesDoNotEarlyStopBeforeStrategySearch() {
-        usePlannerWithOsrmLimits(30, 6, 3);
+    void intentSpecificVibesCanReturnBeforeFullOsrmCapWhenStrategySearchIsEnough() {
+        usePlannerWithOsrmLimitsAndParallelism(48, 24, 9, 1);
         when(scenicTileLookupService.findByH3Indexes(anyCollection())).thenReturn(manyHighScenicTilesAroundStart(80));
         AtomicInteger osrmRequests = new AtomicInteger();
         when(osrmTripClient.requestRoundTrip(anyList(), eq(RouteMode.DRIVE))).thenAnswer(invocation -> {
             @SuppressWarnings("unchecked")
             List<RoadNode> variant = invocation.getArgument(0);
             int index = osrmRequests.getAndIncrement();
-            int durationMinutes = 32 + (index % 10);
+            int durationMinutes = 34 + (index % 9);
             double distanceKm = 11.0 + (index * 0.5);
             return Optional.of(new OsrmTripClient.TripResult(variant, distanceKm, durationMinutes));
         });
@@ -280,28 +292,38 @@ class RoutePlannerTest {
         List<RouteCandidate> options = routePlanner.generateRouteOptions(sampleJob(45, "open_roads"));
 
         assertThat(options).hasSize(3);
-        assertThat(osrmRequests.get()).isGreaterThan(12);
+        assertThat(osrmRequests.get()).isLessThan(48);
         assertThat(options.getFirst().getScoreBreakdown().get("geometry_strategy_code"))
             .isEqualTo(1.0);
     }
 
     @Test
-    void openRoadsUsesOpenSpaceGeometryStrategy() {
-        when(scenicTileLookupService.findByH3Indexes(anyCollection())).thenReturn(highScenicTilesAroundStart());
+    void openRoadsReturnsThreeOptionsForModerateOpenSpaceUrbanPressureCorridors() {
+        AtomicInteger repositoryCalls = new AtomicInteger();
+        when(scenicTileLookupService.findByH3Indexes(anyCollection())).thenAnswer(invocation -> {
+            if (repositoryCalls.getAndIncrement() == 0) {
+                return highOpenRoadTilesAroundStart();
+            }
+            return moderateOpenRoadTilesAroundStart();
+        });
         when(osrmTripClient.requestRoundTrip(anyList(), eq(RouteMode.DRIVE))).thenAnswer(invocation -> {
             @SuppressWarnings("unchecked")
             List<RoadNode> variant = invocation.getArgument(0);
-            return Optional.of(new OsrmTripClient.TripResult(variant, variant.size() * 2.5, variant.size() * 8));
+            return Optional.of(new OsrmTripClient.TripResult(variant, variant.size() * 2.5, 48));
         });
 
-        List<RouteCandidate> options = routePlanner.generateRouteOptions(sampleJob(45, "open_roads"));
+        List<RouteCandidate> options = routePlanner.generateRouteOptions(sampleJob(60, "open_roads"));
 
         assertThat(options).hasSize(3);
-        assertThat(options.getFirst().getScoreBreakdown().get("geometry_strategy_code"))
-            .isEqualTo(1.0);
-        assertThat(options.getFirst().getScoreBreakdown())
-            .containsKeys("strategy_fit_score", "strategy_mismatch_penalty", "open_space_corridor_share");
+        assertThat(options).allSatisfy(option -> {
+            Map<String, Double> breakdown = option.getScoreBreakdown();
+            assertThat(breakdown.get("geometry_strategy_code")).isEqualTo(1.0);
+            assertThat(breakdown.get("strategy_fit_score")).isGreaterThanOrEqualTo(0.24);
+            assertThat(breakdown.get("open_space_corridor_share")).isGreaterThanOrEqualTo(0.18);
+            assertThat(breakdown.get("corridor_urban_pressure")).isBetween(0.55, 0.72);
+        });
     }
+
 
     @Test
     void countrysideUsesGradedQuietStrategyFitForModerateCorridors() {
@@ -374,6 +396,45 @@ class RoutePlannerTest {
             .isInstanceOf(NoFeasibleRouteException.class)
             .hasMessageContaining("No strong Open Roads route found");
     }
+
+
+    @Test
+    void optionSelectorCanPromoteStrategyFitOverGenericScenicPrimary() throws Exception {
+        RouteOptionSelector selector = new RouteOptionSelector(1.15);
+        RouteCandidate genericScenic = routeCandidateWithBreakdown(
+            List.of(new RoadNode(46.0945, -64.7809), new RoadNode(46.1200, -64.7809), new RoadNode(46.0945, -64.7809)),
+            0.95,
+            0.12,
+            0.60
+        );
+        RouteCandidate strategyFit = routeCandidateWithBreakdown(
+            List.of(new RoadNode(46.0945, -64.7809), new RoadNode(46.0945, -64.7200), new RoadNode(46.0945, -64.7809)),
+            0.70,
+            0.88,
+            0.02
+        );
+        RouteCandidate alternate = routeCandidateWithBreakdown(
+            List.of(new RoadNode(46.0945, -64.7809), new RoadNode(46.0600, -64.8000), new RoadNode(46.0945, -64.7809)),
+            0.72,
+            0.65,
+            0.08
+        );
+        java.util.function.ToDoubleFunction<RouteCandidate> openRoadPrimaryScorer =
+            primaryRouteScorerFor("OPEN_SPACE_ESCAPE", 60);
+
+        List<RouteCandidate> options = selector.selectRouteOptions(
+            List.of(genericScenic, strategyFit, alternate),
+            60,
+            openRoadPrimaryScorer
+        );
+
+        assertThat(options).hasSize(3);
+        assertThat(genericScenic.getTotalScenicScore()).isGreaterThan(strategyFit.getTotalScenicScore());
+        assertThat(strategyFit.getScoreBreakdown().get("strategy_fit_score"))
+            .isGreaterThan(genericScenic.getScoreBreakdown().get("strategy_fit_score"));
+        assertThat(options.getFirst()).isSameAs(strategyFit);
+    }
+
 
     @Test
     void backtrackingMetricsPenalizeOutAndBackMoreThanRealLoop() throws Exception {
@@ -480,6 +541,36 @@ class RoutePlannerTest {
             .anyMatch(index -> H3Utils.getResolution(index) == H3Utils.DEFAULT_RESOLUTION);
     }
 
+    private RouteCandidate routeCandidateWithBreakdown(List<RoadNode> path,
+                                                       double scenicScore,
+                                                       double strategyFit,
+                                                       double strategyMismatchPenalty) {
+        return new RouteCandidate(
+            path,
+            scenicScore,
+            18.0,
+            52,
+            "hybrid_osrm_v2",
+            null,
+            Map.of(
+                "strategy_fit_score", strategyFit,
+                "strategy_mismatch_penalty", strategyMismatchPenalty,
+                "backtracking_penalty", 0.0
+            )
+        );
+    }
+
+    @SuppressWarnings({ "unchecked", "rawtypes" })
+    private java.util.function.ToDoubleFunction<RouteCandidate> primaryRouteScorerFor(String geometryStrategyName,
+                                                                                      int targetMinutes) throws Exception {
+        Class<?> strategyClass = Class.forName("com.moodride.routeworker.algorithm.RoutePlanner$GeometryStrategy");
+        Object strategy = Enum.valueOf((Class<Enum>) strategyClass.asSubclass(Enum.class), geometryStrategyName);
+        Method scorerMethod = RoutePlanner.class.getDeclaredMethod("primaryRouteScorer", strategyClass, int.class);
+        scorerMethod.setAccessible(true);
+        return (java.util.function.ToDoubleFunction<RouteCandidate>) scorerMethod.invoke(routePlanner, strategy, targetMinutes);
+    }
+
+
     @SuppressWarnings("unchecked")
     private Map<String, Double> scoreBreakdownForPath(List<RoadNode> path) throws Exception {
         Method scoreMethod = RoutePlanner.class.getDeclaredMethod(
@@ -571,6 +662,29 @@ class RoutePlannerTest {
                 );
             })
             .toList();
+    }
+
+    private List<ScenicScoreTile> moderateOpenRoadTilesAroundStart() {
+        return List.of(
+            moderateOpenRoadTile("moderate-open-1", 46.1100, -64.7800),
+            moderateOpenRoadTile("moderate-open-2", 46.1030, -64.7500),
+            moderateOpenRoadTile("moderate-open-3", 46.0800, -64.7420),
+            moderateOpenRoadTile("moderate-open-4", 46.0600, -64.7700),
+            moderateOpenRoadTile("moderate-open-5", 46.0720, -64.8120),
+            moderateOpenRoadTile("moderate-open-6", 46.1050, -64.8250),
+            moderateOpenRoadTile("moderate-open-7", 46.1250, -64.8000),
+            moderateOpenRoadTile("moderate-open-8", 46.1250, -64.7500)
+        );
+    }
+
+    private ScenicScoreTile moderateOpenRoadTile(String h3Index, double latitude, double longitude) {
+        ScenicScoreTile tile = scenicTile(h3Index, latitude, longitude, 0.10, 0.58, 0.30, 0.62, 0.38, 0.22);
+        tile.setRoadDensity(0.60);
+        tile.setBuildingDensityScore(0.58);
+        tile.setUrbanPenaltyScore(0.60);
+        tile.setRoadStressScore(0.18);
+        tile.setDarknessScore(0.42);
+        return tile;
     }
 
     private List<ScenicScoreTile> lowWaterTilesAroundStart() {

@@ -68,13 +68,22 @@ final class RouteOptionSelector {
     }
 
     List<RouteCandidate> selectRouteOptions(List<RouteCandidate> candidates, int targetMinutes) {
+        return selectRouteOptions(candidates, targetMinutes, candidate -> mostScenicProfileScore(candidate, targetMinutes));
+    }
+
+    List<RouteCandidate> selectRouteOptions(List<RouteCandidate> candidates,
+                                            int targetMinutes,
+                                            ToDoubleFunction<RouteCandidate> primaryScorer) {
         if (candidates.isEmpty()) {
             return List.of();
         }
 
         List<RouteCandidate> selected = new ArrayList<>();
+        ToDoubleFunction<RouteCandidate> safePrimaryScorer = primaryScorer == null
+            ? candidate -> mostScenicProfileScore(candidate, targetMinutes)
+            : primaryScorer;
 
-        addIfPresent(selected, pickBestCandidate(candidates, candidate -> mostScenicProfileScore(candidate, targetMinutes), selected, targetMinutes, false));
+        addIfPresent(selected, pickBestCandidate(candidates, safePrimaryScorer, selected, targetMinutes, false));
         addIfPresent(selected, pickBestCandidate(candidates, candidate -> balancedProfileScore(candidate, targetMinutes), selected, targetMinutes, true));
         addIfPresent(selected, pickBestCandidate(candidates, shorterProfileScorer(candidates, targetMinutes), selected, targetMinutes, true));
 

@@ -77,7 +77,7 @@ const VIBE_PREFERENCE_DEFAULTS: Record<string, Record<string, number>> = {
 };
 
 const TIME_BUDGET_OPTIONS = [30, 60, 90, 120] as const;
-const JOB_STATUS_POLL_INTERVAL_MS = 1500;
+const JOB_STATUS_POLL_INTERVAL_MS = 750;
 
 const ROUTE_MODES: Array<{ value: RouteMode; label: string; status: string; enabled: boolean }> = [
   { value: "drive", label: "Drive",  status: "Live",  enabled: true },

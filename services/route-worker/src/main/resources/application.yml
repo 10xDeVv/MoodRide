@@ -91,7 +91,7 @@ moodride:
   kafka:
     listener:
       group-id: route-workers
-      concurrency: 2
+      concurrency: 3
     consumer:
       retry:
         max-attempts: 4
