@@ -38,6 +38,8 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.anyCollection;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.atMost;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.verify;
@@ -167,6 +169,24 @@ class RoutePlannerTest {
             .max()
             .orElse(0.0);
         assertThat(options.getFirst().getTotalScenicScore()).isEqualTo(maxScenicScore);
+    }
+
+    @Test
+    void generateRouteOptionsCapsColdAnchorAndOsrmWork() {
+        when(scenicTileLookupService.findByH3Indexes(anyCollection())).thenReturn(manyHighScenicTilesAroundStart(80));
+        when(osrmTripClient.requestRoundTrip(anyList(), eq(RouteMode.DRIVE))).thenAnswer(invocation -> {
+            @SuppressWarnings("unchecked")
+            List<RoadNode> variant = invocation.getArgument(0);
+            int durationMinutes = variant.size() * 8;
+            double distanceKm = variant.size() * 2.5;
+            return Optional.of(new OsrmTripClient.TripResult(variant, distanceKm, durationMinutes));
+        });
+
+        List<RouteCandidate> options = routePlanner.generateRouteOptions(sampleJob(45));
+
+        assertThat(options).hasSize(3);
+        verify(roadSegmentAnchorService, atMost(48)).anchorFor(any(ScenicScoreTile.class), any(RoadNode.class));
+        verify(osrmTripClient, atMost(48)).requestRoundTrip(anyList(), eq(RouteMode.DRIVE));
     }
 
     @Test
@@ -439,6 +459,20 @@ class RoutePlannerTest {
             scenicTile("test-7", 46.1250, -64.8000),
             scenicTile("test-8", 46.1250, -64.7500)
         );
+    }
+
+    private List<ScenicScoreTile> manyHighScenicTilesAroundStart(int count) {
+        return java.util.stream.IntStream.range(0, count)
+            .mapToObj(index -> {
+                double angle = (Math.PI * 2.0 * index) / Math.max(1, count);
+                double radius = 0.015 + (0.002 * (index % 12));
+                return scenicTile(
+                    "bulk-" + index,
+                    46.0945 + (Math.sin(angle) * radius),
+                    -64.7809 + (Math.cos(angle) * radius)
+                );
+            })
+            .toList();
     }
 
     private List<ScenicScoreTile> lowWaterTilesAroundStart() {

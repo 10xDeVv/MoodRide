@@ -219,8 +219,14 @@ public class RoutePlanner {
                                                          GeometryStrategy geometryStrategy) {
         List<RouteCandidate> candidates = new ArrayList<>();
         int maxAllowedMinutes = routeOptionSelector.maxAllowedMinutes(job.getTimeBudgetMinutes());
+        int requestLimit = Math.max(ROUTE_OPTION_COUNT, config.getMaxOsrmRequestsPerJob());
+        int attemptedRequests = 0;
 
         for (List<RoadNode> variant : waypointVariants) {
+            if (attemptedRequests >= requestLimit) {
+                break;
+            }
+            attemptedRequests++;
             var result = osrmTripClient.requestRoundTrip(variant, job.getRouteMode());
             if (result.isEmpty()) {
                 continue;
@@ -252,6 +258,15 @@ public class RoutePlanner {
                 scoreBreakdown
             );
             candidates.add(candidate);
+        }
+
+        if (waypointVariants.size() > attemptedRequests) {
+            logger.info(
+                "Route job {} capped OSRM trip requests at {} of {} waypoint variant(s)",
+                job.getId(),
+                attemptedRequests,
+                waypointVariants.size()
+            );
         }
 
         if (candidates.isEmpty()) {
@@ -441,21 +456,34 @@ public class RoutePlanner {
         }
 
         double targetRadiusKm = targetWaypointRadiusKm(timeBudgetMinutes, vibeProfile, durationCalibration);
-        return nearbyTiles.stream()
+        int anchoredLimit = Math.max(
+            20,
+            Math.min(config.getTileSelectionLimit(), Math.max(1, config.getAnchoredTileSelectionLimit()))
+        );
+        List<PreAnchorTileCandidate> preselectedTiles = nearbyTiles.stream()
             .filter(tile -> tile.getGeometry() != null && !tile.getGeometry().isEmpty())
             .map(tile -> {
                 RoadNode tileCenter = new RoadNode(
                     tile.getGeometry().getCentroid().getY(),
                     tile.getGeometry().getCentroid().getX()
                 );
-                RoadNode anchor = roadSegmentAnchorService.anchorFor(tile, tileCenter);
-                double distanceKm = distanceKm(start, anchor);
+                double distanceKm = distanceKm(start, tileCenter);
                 double score = scoreTile(tile, preferences);
                 double selectionScore = tileSelectionScore(tile, vibeProfile, score, distanceKm, targetRadiusKm);
-                return new TileCandidate(tile, anchor, score, selectionScore, distanceKm);
+                return new PreAnchorTileCandidate(tile, tileCenter, score, selectionScore);
+            })
+            .sorted(Comparator.comparingDouble(PreAnchorTileCandidate::selectionScore).reversed())
+            .limit(anchoredLimit)
+            .toList();
+
+        return preselectedTiles.stream()
+            .map(candidate -> {
+                RoadNode anchor = roadSegmentAnchorService.anchorFor(candidate.tile(), candidate.center());
+                double distanceKm = distanceKm(start, anchor);
+                double selectionScore = tileSelectionScore(candidate.tile(), vibeProfile, candidate.scenicScore(), distanceKm, targetRadiusKm);
+                return new TileCandidate(candidate.tile(), anchor, candidate.scenicScore(), selectionScore, distanceKm);
             })
             .sorted(Comparator.comparingDouble(TileCandidate::selectionScore).reversed())
-            .limit(Math.max(20, config.getTileSelectionLimit()))
             .toList();
     }
 
@@ -690,7 +718,6 @@ public class RoutePlanner {
             vibeProfile,
             durationCalibration
         );
-        variants.addAll(intentVariants);
         List<List<RoadNode>> strategyVariants = buildStrategyWaypointRings(
             start,
             scoredTiles,
@@ -699,7 +726,7 @@ public class RoutePlanner {
             geometryStrategy,
             durationCalibration
         );
-        variants.addAll(strategyVariants);
+        addInterleavedVariants(variants, intentVariants, strategyVariants);
 
         if (!intentVariants.isEmpty()) {
             logger.info(
@@ -716,6 +743,20 @@ public class RoutePlanner {
         }
 
         return deduplicateRings(variants);
+    }
+
+    private void addInterleavedVariants(List<List<RoadNode>> target,
+                                        List<List<RoadNode>> first,
+                                        List<List<RoadNode>> second) {
+        int maxSize = Math.max(first.size(), second.size());
+        for (int i = 0; i < maxSize; i++) {
+            if (i < first.size()) {
+                target.add(first.get(i));
+            }
+            if (i < second.size()) {
+                target.add(second.get(i));
+            }
+        }
     }
 
     private List<List<RoadNode>> buildStrategyWaypointRings(RoadNode start,
@@ -2115,6 +2156,12 @@ public class RoutePlanner {
         QUIET_LOW_PRESSURE,
         CURVY_ELEVATION,
         BALANCED_VARIETY
+    }
+
+    private record PreAnchorTileCandidate(ScenicScoreTile tile,
+                                          RoadNode center,
+                                          double scenicScore,
+                                          double selectionScore) {
     }
 
     private record TileCandidate(ScenicScoreTile tile,

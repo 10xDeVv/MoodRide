@@ -13,6 +13,9 @@ public class ApplicationConfiguration {
     private int sectorCount = 8;
     private int corridorSampleMeters = 500;
     private double maxDurationOverrunRatio = 1.15;
+    private int anchoredTileSelectionLimit = 48;
+    private int maxOsrmRequestsPerJob = 48;
+
 
     public int getH3Resolution() {
         return h3Resolution;
@@ -61,6 +64,14 @@ public class ApplicationConfiguration {
     public void setCorridorSampleMeters(int corridorSampleMeters) {
         this.corridorSampleMeters = corridorSampleMeters;
     }
+    public int getAnchoredTileSelectionLimit() {
+        return anchoredTileSelectionLimit;
+    }
+
+    public void setAnchoredTileSelectionLimit(int anchoredTileSelectionLimit) {
+        this.anchoredTileSelectionLimit = anchoredTileSelectionLimit;
+    }
+
 
     public double getMaxDurationOverrunRatio() {
         return maxDurationOverrunRatio;
@@ -68,5 +79,13 @@ public class ApplicationConfiguration {
 
     public void setMaxDurationOverrunRatio(double maxDurationOverrunRatio) {
         this.maxDurationOverrunRatio = maxDurationOverrunRatio;
+    }
+
+    public int getMaxOsrmRequestsPerJob() {
+        return maxOsrmRequestsPerJob;
+    }
+
+    public void setMaxOsrmRequestsPerJob(int maxOsrmRequestsPerJob) {
+        this.maxOsrmRequestsPerJob = maxOsrmRequestsPerJob;
     }
 }

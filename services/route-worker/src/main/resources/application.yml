@@ -76,6 +76,8 @@ moodride:
     sector-count: 8
     corridor-sample-meters: 500
     max-duration-overrun-ratio: 1.15
+    anchored-tile-selection-limit: 48
+    max-osrm-requests-per-job: 48
   osrm:
     base-url: ${MOODRIDE_OSRM_BASE_URL:http://127.0.0.1:5002}
     request-timeout-ms: 7000
