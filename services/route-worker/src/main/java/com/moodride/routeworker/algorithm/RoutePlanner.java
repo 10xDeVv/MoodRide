@@ -34,6 +34,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -155,6 +156,7 @@ public class RoutePlanner {
 
         long stageStartedNanos = System.nanoTime();
         List<TileCandidate> scoredTiles = scoreNearbyTiles(
+            job.getId(),
             start,
             job.getTimeBudgetMinutes(),
             preferences,
@@ -652,7 +654,8 @@ public class RoutePlanner {
         return breakdown.get(key);
     }
 
-    private List<TileCandidate> scoreNearbyTiles(RoadNode start,
+    private List<TileCandidate> scoreNearbyTiles(UUID jobId,
+                                                 RoadNode start,
                                                  int timeBudgetMinutes,
                                                  PreferenceWeights preferences,
                                                  VibeCatalog.BlendedVibeProfile vibeProfile,
@@ -713,7 +716,8 @@ public class RoutePlanner {
             .sorted(Comparator.comparingDouble(PreAnchorTileCandidate::selectionScore).reversed())
             .limit(anchoredLimit)
             .toList();
-        routeGenerationMetricsService.recordStage("tile_scoring.pre_anchor_rank", elapsedMillis(substageStartedNanos), routeMode, geometryStrategy, "attempt");
+        long preAnchorRankMs = elapsedMillis(substageStartedNanos);
+        routeGenerationMetricsService.recordStage("tile_scoring.pre_anchor_rank", preAnchorRankMs, routeMode, geometryStrategy, "attempt");
 
         substageStartedNanos = System.nanoTime();
         List<TileCandidate> anchoredTiles = preselectedTiles.stream()
@@ -724,13 +728,28 @@ public class RoutePlanner {
                 return new TileCandidate(candidate.tile(), anchor, candidate.scenicScore(), selectionScore, distanceKm);
             })
             .toList();
-        routeGenerationMetricsService.recordStage("tile_scoring.road_anchor_lookup", elapsedMillis(substageStartedNanos), routeMode, geometryStrategy, "attempt");
+        long roadAnchorLookupMs = elapsedMillis(substageStartedNanos);
+        routeGenerationMetricsService.recordStage("tile_scoring.road_anchor_lookup", roadAnchorLookupMs, routeMode, geometryStrategy, "attempt");
 
         substageStartedNanos = System.nanoTime();
         List<TileCandidate> scoredTiles = anchoredTiles.stream()
             .sorted(Comparator.comparingDouble(TileCandidate::selectionScore).reversed())
             .toList();
-        routeGenerationMetricsService.recordStage("tile_scoring.final_rank", elapsedMillis(substageStartedNanos), routeMode, geometryStrategy, "attempt");
+        long finalRankMs = elapsedMillis(substageStartedNanos);
+        routeGenerationMetricsService.recordStage("tile_scoring.final_rank", finalRankMs, routeMode, geometryStrategy, "attempt");
+        logger.info(
+            "Route job {} tile scoring timings h3CellBuildMs={} scenicTileLookupMs={} preAnchorRankMs={} roadAnchorLookupMs={} finalRankMs={} nearbyTiles={} preselectedTiles={} scoredTiles={} strategy={}",
+            jobId,
+            h3CellBuildMs,
+            scenicTileLookupMs,
+            preAnchorRankMs,
+            roadAnchorLookupMs,
+            finalRankMs,
+            nearbyTiles.size(),
+            preselectedTiles.size(),
+            scoredTiles.size(),
+            geometryStrategy
+        );
         return scoredTiles;
     }
 
