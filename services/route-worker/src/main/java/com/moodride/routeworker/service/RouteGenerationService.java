@@ -33,6 +33,7 @@ import com.moodride.routeworker.repository.RouteWaypointRepository;
 @Transactional
 public class RouteGenerationService {
     private static final Logger logger = LoggerFactory.getLogger(RouteGenerationService.class);
+    private static final int MAX_PERSISTED_WAYPOINTS_PER_ROUTE = 80;
 
 
     private static final List<String> ROUTE_OPTION_PROFILES = List.of(
@@ -120,7 +121,7 @@ public class RouteGenerationService {
             calibrationMs += elapsedMillis(stageStartedNanos);
 
             stageStartedNanos = System.nanoTime();
-            List<RouteWaypoint> waypoints = persistWaypoints(route, candidate.getWaypoints());
+            List<RouteWaypoint> waypoints = persistWaypoints(route, persistedWaypointSamples(candidate.getWaypoints()));
             waypointPersistMs += elapsedMillis(stageStartedNanos);
             waypointCount += waypoints.size();
             if (i == 0) {
@@ -158,6 +159,28 @@ public class RouteGenerationService {
             waypointCount
         );
         return new RouteGenerationResult(primaryRoute, eventWaypoints);
+    }
+
+    private List<RoadNode> persistedWaypointSamples(List<RoadNode> nodes) {
+        if (nodes == null || nodes.size() <= MAX_PERSISTED_WAYPOINTS_PER_ROUTE) {
+            return nodes == null ? List.of() : nodes;
+        }
+
+        List<RoadNode> samples = new ArrayList<>(MAX_PERSISTED_WAYPOINTS_PER_ROUTE);
+        int lastIndex = -1;
+        double step = (double) (nodes.size() - 1) / (MAX_PERSISTED_WAYPOINTS_PER_ROUTE - 1);
+        for (int i = 0; i < MAX_PERSISTED_WAYPOINTS_PER_ROUTE; i++) {
+            int index = (int) Math.round(i * step);
+            if (index <= lastIndex) {
+                index = Math.min(nodes.size() - 1, lastIndex + 1);
+            }
+            samples.add(nodes.get(index));
+            lastIndex = index;
+        }
+        if (lastIndex != nodes.size() - 1) {
+            samples.set(samples.size() - 1, nodes.getLast());
+        }
+        return samples;
     }
 
     private List<RouteWaypoint> persistWaypoints(Route route, List<RoadNode> nodes) {

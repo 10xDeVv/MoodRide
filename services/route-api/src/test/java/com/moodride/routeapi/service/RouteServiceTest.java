@@ -367,6 +367,50 @@ class RouteServiceTest {
     }
 
     @Test
+    void getRoutePrefersStoredGeometryOverSparseWaypoints() {
+        UUID routeId = UUID.randomUUID();
+        UUID jobId = UUID.randomUUID();
+        UUID userId = UUID.randomUUID();
+
+        RouteJob job = new RouteJob(userId, 45.5152, -122.6784, 90, "coastal");
+        job.setId(jobId);
+
+        GeometryFactory geometryFactory = new GeometryFactory();
+        LineString fullGeometry = geometryFactory.createLineString(new Coordinate[] {
+            new Coordinate(-122.6784, 45.5152),
+            new Coordinate(-122.6801, 45.5189),
+            new Coordinate(-122.6900, 45.5240),
+            new Coordinate(-122.7000, 45.5300)
+        });
+
+        Route route = new Route();
+        route.setId(routeId);
+        route.setJobId(jobId);
+        route.setUserId(userId);
+        route.setGeometry(fullGeometry);
+        route.setTotalDistanceKm(62.3);
+        route.setEstimatedDurationMinutes(88);
+        route.setScenicScore(0.785);
+        route.setVibe("coastal");
+        route.setGeneratedAt(Instant.parse("2026-04-02T14:30:05Z"));
+        route.setWaypoints(List.of(
+            new RouteWaypoint(route, 0, 45.5152, -122.6784, "Start", 62.3),
+            new RouteWaypoint(route, 1, 45.5300, -122.7000, "Arrive", 0.0)
+        ));
+
+        lenient().when(routeRepository.findById(routeId)).thenReturn(Optional.of(route));
+        lenient().when(jobRepository.findById(jobId)).thenReturn(Optional.of(job));
+        lenient().when(routeRepository.findByJobIdOrderByGeneratedAtAsc(jobId)).thenReturn(List.of(route));
+
+        RouteDetailResponse response = routeService.getRoute(routeId);
+
+        Map<String, Object> geometry = castMap(response.geometry().get("geometry"));
+        assertThat((List<?>) geometry.get("coordinates")).hasSize(4);
+        assertThat(response.startLat()).isEqualTo(45.5152);
+        assertThat(response.startLng()).isEqualTo(-122.6784);
+    }
+
+    @Test
     void getRouteJobStatusIncludesUpToThreeRouteOptions() {
         UUID jobId = UUID.randomUUID();
         UUID userId = UUID.randomUUID();

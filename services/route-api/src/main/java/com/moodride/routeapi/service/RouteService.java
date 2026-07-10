@@ -338,8 +338,8 @@ public class RouteService {
             route.getEstimatedDurationMinutes(),
             routeJob == null ? null : routeJob.getTimeBudgetMinutes(),
             resolveRouteMode(routeJob, route).apiValue(),
-            waypoints.isEmpty() ? 0.0 : waypoints.getFirst().getLatitude(),
-            waypoints.isEmpty() ? 0.0 : waypoints.getFirst().getLongitude(),
+            coordinates.isEmpty() ? 0.0 : coordinates.getFirst().get(1),
+            coordinates.isEmpty() ? 0.0 : coordinates.getFirst().get(0),
             resolveRouteVibes(routeJob, route),
             feature,
             scenicHighlights,
@@ -539,19 +539,13 @@ public class RouteService {
     }
 
     private List<List<Double>> resolveCoordinates(Route route) {
-        List<RouteWaypoint> waypoints = sortedWaypoints(route);
-        if (waypoints.size() >= 2) {
-            return waypoints.stream()
-                    .map(this::toCoordinate)
-                    .toList();
-        }
-
         if (route.getGeometry() != null && !route.getGeometry().isEmpty() && route.getGeometry().getNumPoints() >= 2) {
             return Arrays.stream(route.getGeometry().getCoordinates())
                     .map(this::toCoordinate)
                     .toList();
         }
 
+        List<RouteWaypoint> waypoints = sortedWaypoints(route);
         if (!waypoints.isEmpty()) {
             return waypoints.stream()
                     .map(this::toCoordinate)
