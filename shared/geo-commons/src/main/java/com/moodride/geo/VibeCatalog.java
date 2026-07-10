@@ -147,9 +147,9 @@ public final class VibeCatalog {
             "Elevation-forward route with stronger terrain and winding segments."
         ));
         add(profiles, profile(
-            "countryside", "Countryside", VibeCategory.CORE_SCENERY,
+            "countryside", "Country", VibeCategory.CORE_SCENERY,
             weights(0.25, 0.75, 0.35, 0.90, 0.45, 0.20),
-            List.of("solitude", "greenery"),
+            List.of("solitude", "greenery", "open_space"),
             List.of("urban_penalty", "building_density", "road_stress"),
             true, true, 0.36, 0.29,
             "Quiet rural loop with open space and lighter urban density."
@@ -163,113 +163,23 @@ public final class VibeCatalog {
             "Water-following route with green edges and calmer scenery."
         ));
         add(profiles, profile(
-            "forest", "Forest", VibeCategory.CORE_SCENERY,
-            weights(0.20, 0.95, 0.35, 0.85, 0.35, 0.15),
+            "nature_escape", "Nature", VibeCategory.CORE_SCENERY,
+            weights(0.35, 0.95, 0.45, 0.92, 0.35, 0.10),
             List.of("tree_canopy", "greenery", "solitude"),
             List.of("urban_penalty", "building_density", "road_stress"),
             true, true, 0.36, 0.29,
-            "Green, tucked-away loop that favors tree cover and quieter surroundings."
+            "Nature-heavy loop that favors greenery, tree cover, and quieter edges."
         ));
         add(profiles, profile(
-            "open_roads", "Open Roads", VibeCategory.CORE_SCENERY,
+            "open_roads", "Open Road", VibeCategory.CORE_SCENERY,
             weights(0.15, 0.45, 0.25, 0.90, 0.25, 0.05),
             List.of("open_space", "solitude"),
             List.of("urban_penalty", "building_density", "poi", "road_density", "road_stress"),
             true, true, 0.35, 0.28,
             "Open-space drive with lower-density roads and room to cruise."
         ));
-
         add(profiles, profile(
-            "relaxing", "Relaxing", VibeCategory.DRIVING_FEEL,
-            weights(0.35, 0.65, 0.20, 0.90, 0.20, 0.15),
-            List.of("solitude", "greenery"),
-            List.of("urban_penalty", "building_density", "curves", "road_stress"),
-            true, false, 0.34, 0.27,
-            "Calmer loop with softer scenery and fewer intense road segments."
-        ));
-        add(profiles, profile(
-            "winding_roads", "Winding Roads", VibeCategory.DRIVING_FEEL,
-            weights(0.25, 0.40, 0.65, 0.45, 0.98, 0.10),
-            List.of("curves", "elevation"),
-            List.of(),
-            true, true, 0.34, 0.27,
-            "More engaging route with winding road segments and terrain changes."
-        ));
-        add(profiles, profile(
-            "smooth_cruise", "Smooth Cruise", VibeCategory.DRIVING_FEEL,
-            weights(0.35, 0.55, 0.20, 0.70, 0.15, 0.15),
-            List.of("solitude", "greenery"),
-            List.of("curves", "urban_penalty", "road_stress"),
-            false, false, 0.31, 0.25,
-            "Best for a smooth cruise with light curves and open space."
-        ));
-        add(profiles, profile(
-            "quiet", "Quiet", VibeCategory.DRIVING_FEEL,
-            weights(0.20, 0.65, 0.25, 0.98, 0.25, 0.05),
-            List.of("solitude", "greenery"),
-            List.of("urban_penalty", "building_density", "poi", "road_stress"),
-            true, true, 0.36, 0.29,
-            "Quiet loop that favors lower-density scenery and fewer busy-feeling corridors."
-        ));
-        add(profiles, profile(
-            "hidden_gems", "Hidden Gems", VibeCategory.DRIVING_FEEL,
-            weights(0.40, 0.70, 0.45, 0.80, 0.55, 0.45),
-            List.of("viewpoint", "scenic_poi", "solitude", "curves"),
-            List.of("urban_penalty"),
-            true, false, 0.32, 0.26,
-            "Less obvious route with scenic stops and more secluded segments."
-        ));
-        add(profiles, profile(
-            "minimal_traffic", "Minimal Traffic", VibeCategory.DRIVING_FEEL,
-            weights(0.15, 0.60, 0.25, 0.98, 0.25, 0.05),
-            List.of("solitude", "greenery"),
-            List.of("urban_penalty", "building_density", "poi", "road_stress"),
-            true, true, 0.36, 0.29,
-            "Lower-density route aimed at calmer roads and lighter urban pressure."
-        ));
-        add(profiles, profile(
-            "loop_variety", "Loop Variety", VibeCategory.DRIVING_FEEL,
-            weights(0.55, 0.60, 0.50, 0.55, 0.70, 0.30),
-            List.of("water", "greenery", "elevation", "solitude", "curves"),
-            List.of(),
-            false, false, 0.30, 0.24,
-            "Mixed loop that trades a single strong signal for varied scenery."
-        ));
-
-        add(profiles, profile(
-            "scenic", "Scenic", VibeCategory.TRIP_MOOD,
-            weights(0.65, 0.70, 0.55, 0.65, 0.50, 0.25),
-            List.of("water", "greenery", "elevation", "solitude", "curves"),
-            List.of(),
-            false, false, 0.30, 0.24,
-            "Balanced scenic loop with multiple landscape signals."
-        ));
-        add(profiles, profile(
-            "clear_my_head", "Clear My Head", VibeCategory.TRIP_MOOD,
-            weights(0.25, 0.75, 0.25, 0.98, 0.20, 0.05),
-            List.of("solitude", "greenery"),
-            List.of("urban_penalty", "building_density", "poi", "curves"),
-            true, true, 0.36, 0.29,
-            "Low-noise route built around quiet scenery and mental reset."
-        ));
-        add(profiles, profile(
-            "date_night", "Date Night", VibeCategory.TRIP_MOOD,
-            weights(0.80, 0.45, 0.50, 0.55, 0.25, 0.55),
-            List.of("water", "viewpoint", "elevation", "scenic_poi"),
-            List.of(),
-            false, false, 0.31, 0.25,
-            "View-led route with memorable stops and evening-friendly scenery."
-        ));
-        add(profiles, profile(
-            "sunday_cruise", "Sunday Cruise", VibeCategory.TRIP_MOOD,
-            weights(0.25, 0.70, 0.25, 0.82, 0.35, 0.15),
-            List.of("solitude", "greenery"),
-            List.of("urban_penalty", "building_density", "road_stress"),
-            true, false, 0.34, 0.27,
-            "Easy countryside-leaning loop for a relaxed weekend drive."
-        ));
-        add(profiles, profile(
-            "adventure", "Adventure", VibeCategory.TRIP_MOOD,
+            "adventure", "Adventure", VibeCategory.DRIVING_FEEL,
             weights(0.30, 0.55, 0.90, 0.65, 0.95, 0.20),
             List.of("curves", "elevation"),
             List.of(),
@@ -277,60 +187,20 @@ public final class VibeCatalog {
             "More adventurous route with stronger elevation and winding segments."
         ));
         add(profiles, profile(
-            "photo_run", "Photo Run", VibeCategory.TRIP_MOOD,
-            weights(0.80, 0.60, 0.75, 0.45, 0.55, 0.55),
-            List.of("water", "viewpoint", "elevation", "scenic_poi"),
-            List.of(),
-            false, false, 0.31, 0.25,
-            "Photo-friendly loop with viewpoints, water, terrain, or scenic stops."
-        ));
-        add(profiles, profile(
-            "photo_worthy", "Photo-Worthy", VibeCategory.TRIP_MOOD,
-            weights(0.80, 0.60, 0.75, 0.45, 0.55, 0.55),
-            List.of("water", "viewpoint", "elevation", "scenic_poi"),
-            List.of(),
-            false, false, 0.31, 0.25,
-            "Photo-friendly loop with viewpoints, water, terrain, or scenic stops."
-        ));
-        add(profiles, profile(
-            "nature_escape", "Nature Escape", VibeCategory.TRIP_MOOD,
-            weights(0.35, 0.95, 0.45, 0.92, 0.35, 0.10),
-            List.of("tree_canopy", "greenery", "solitude"),
-            List.of("urban_penalty", "building_density", "road_stress"),
+            "relaxing", "Relaxing", VibeCategory.DRIVING_FEEL,
+            weights(0.30, 0.70, 0.25, 0.96, 0.22, 0.10),
+            List.of("solitude", "greenery"),
+            List.of("urban_penalty", "building_density", "poi", "curves", "road_stress"),
             true, true, 0.36, 0.29,
-            "Nature-heavy loop that favors greenery, protected areas, and quieter edges."
+            "Calmer loop with quiet scenery, greenery, and fewer intense road segments."
         ));
         add(profiles, profile(
-            "scenic_reset", "Scenic Reset", VibeCategory.TRIP_MOOD,
-            weights(0.50, 0.75, 0.40, 0.85, 0.30, 0.15),
-            List.of("greenery", "solitude", "water"),
-            List.of("urban_penalty", "road_stress"),
-            true, false, 0.33, 0.26,
-            "Restorative scenic loop with calming natural signals."
-        ));
-        add(profiles, profile(
-            "golden_hour", "Golden Hour", VibeCategory.TRIP_MOOD,
-            weights(0.85, 0.45, 0.65, 0.45, 0.25, 0.35),
-            List.of("water", "bridge_coastal", "viewpoint", "elevation"),
+            "winding_roads", "Winding", VibeCategory.DRIVING_FEEL,
+            weights(0.25, 0.40, 0.65, 0.45, 0.98, 0.10),
+            List.of("curves", "elevation"),
             List.of(),
-            false, false, 0.31, 0.25,
-            "Open-view route tuned for water, ridgelines, and golden-hour scenery."
-        ));
-        add(profiles, profile(
-            "sunset", "Sunset", VibeCategory.TRIP_MOOD,
-            weights(0.85, 0.45, 0.65, 0.45, 0.25, 0.35),
-            List.of("water", "bridge_coastal", "viewpoint", "elevation"),
-            List.of(),
-            false, false, 0.31, 0.25,
-            "Open-view route tuned for water, ridgelines, and sunset scenery."
-        ));
-        add(profiles, profile(
-            "sunrise", "Sunrise", VibeCategory.TRIP_MOOD,
-            weights(0.75, 0.55, 0.60, 0.55, 0.25, 0.25),
-            List.of("water", "bridge_coastal", "viewpoint", "elevation"),
-            List.of(),
-            false, false, 0.31, 0.25,
-            "Open-view route tuned for early light, water, and elevation."
+            true, true, 0.34, 0.27,
+            "More engaging route with winding road segments and terrain changes."
         ));
 
         return Collections.unmodifiableMap(profiles);
@@ -340,10 +210,20 @@ public final class VibeCatalog {
         return Map.ofEntries(
             entry("country", "countryside"),
             entry("rural", "countryside"),
+            entry("countryside", "countryside"),
+            entry("sunday", "countryside"),
+            entry("sunday_drive", "countryside"),
+            entry("sunday_cruise", "countryside"),
+            entry("scenic", "countryside"),
+            entry("loop_with_variety", "countryside"),
+            entry("variety", "countryside"),
             entry("coast", "coastal"),
             entry("coastak", "coastal"),
             entry("river", "riverside"),
-            entry("woods", "forest"),
+            entry("forest", "nature_escape"),
+            entry("woods", "nature_escape"),
+            entry("nature", "nature_escape"),
+            entry("nature_escaped", "nature_escape"),
             entry("open_road", "open_roads"),
             entry("openroad", "open_roads"),
             entry("openroads", "open_roads"),
@@ -352,36 +232,40 @@ public final class VibeCatalog {
             entry("twisty", "winding_roads"),
             entry("twisties", "winding_roads"),
             entry("fun_drive", "winding_roads"),
-            entry("cruise", "smooth_cruise"),
-            entry("cruisek", "smooth_cruise"),
-            entry("smooth", "smooth_cruise"),
-            entry("peaceful", "quiet"),
+            entry("quiet", "relaxing"),
+            entry("peaceful", "relaxing"),
             entry("calm", "relaxing"),
-            entry("hide", "hidden_gems"),
-            entry("hidden", "hidden_gems"),
-            entry("hidden_gem", "hidden_gems"),
-            entry("minimaltraffic", "minimal_traffic"),
-            entry("low_traffic", "minimal_traffic"),
-            entry("lowtraffic", "minimal_traffic"),
-            entry("no_traffic", "minimal_traffic"),
-            entry("loop_with_variety", "loop_variety"),
-            entry("variety", "loop_variety"),
-            entry("photo", "photo_worthy"),
-            entry("photo_worthy", "photo_worthy"),
-            entry("photoworthy", "photo_worthy"),
-            entry("photo_op", "photo_worthy"),
-            entry("photo_ops", "photo_worthy"),
-            entry("photogenic", "photo_worthy"),
-            entry("golden", "golden_hour"),
-            entry("goldenhour", "golden_hour"),
-            entry("sunrise_sunset", "golden_hour"),
-            entry("sunrise_and_sunset", "golden_hour"),
-            entry("nature", "nature_escape"),
-            entry("nature_escaped", "nature_escape"),
-            entry("clear_head", "clear_my_head"),
-            entry("clear_my_mind", "clear_my_head"),
-            entry("sunday", "sunday_cruise"),
-            entry("sunday_drive", "sunday_cruise")
+            entry("clear_head", "relaxing"),
+            entry("clear_my_head", "relaxing"),
+            entry("clear_my_mind", "relaxing"),
+            entry("smooth", "relaxing"),
+            entry("smooth_cruise", "relaxing"),
+            entry("cruise", "relaxing"),
+            entry("cruisek", "relaxing"),
+            entry("minimaltraffic", "relaxing"),
+            entry("minimal_traffic", "relaxing"),
+            entry("low_traffic", "relaxing"),
+            entry("lowtraffic", "relaxing"),
+            entry("no_traffic", "relaxing"),
+            entry("hide", "adventure"),
+            entry("hidden", "adventure"),
+            entry("hidden_gem", "adventure"),
+            entry("hidden_gems", "adventure"),
+            entry("photo", "adventure"),
+            entry("photo_run", "adventure"),
+            entry("photo_worthy", "adventure"),
+            entry("photoworthy", "adventure"),
+            entry("photo_op", "adventure"),
+            entry("photo_ops", "adventure"),
+            entry("photogenic", "adventure"),
+            entry("date_night", "adventure"),
+            entry("golden", "adventure"),
+            entry("golden_hour", "adventure"),
+            entry("sunset", "adventure"),
+            entry("sunrise", "adventure"),
+            entry("sunrise_sunset", "adventure"),
+            entry("sunrise_and_sunset", "adventure"),
+            entry("scenic_reset", "relaxing")
         );
     }
 

@@ -132,10 +132,10 @@ class RouteServiceTest {
 
         ArgumentCaptor<RouteJob> saved = ArgumentCaptor.forClass(RouteJob.class);
         verify(jobRepository).save(saved.capture());
-        assertThat(saved.getValue().getVibe()).isEqualTo("date_night");
+        assertThat(saved.getValue().getVibe()).isEqualTo("adventure");
         List<String> storedVibes = new ObjectMapper().readValue(saved.getValue().getVibesJson(), new TypeReference<>() {
         });
-        assertThat(storedVibes).containsExactly("date_night", "winding_roads", "photo_worthy");
+        assertThat(storedVibes).containsExactly("adventure", "winding_roads");
     }
 
     @Test
@@ -179,7 +179,7 @@ class RouteServiceTest {
             45.5152,
             -122.6784,
             90,
-            List.of("coastal", "mountain", "forest", "riverside"),
+            List.of("coastal", "mountain", "nature", "riverside"),
             null,
             null
         );
@@ -497,7 +497,7 @@ class RouteServiceTest {
 
         RouteJob job = new RouteJob(userId, 51.0447, -114.0719, 60, "countryside");
         job.setId(jobId);
-        job.markFailed("No strong Countryside route found near this start within your 60-minute budget. Try a larger time budget, a less urban start point, or Scenic/Open Roads.");
+        job.markFailed("No strong Country route found near this start within your 60-minute budget. Try a larger time budget, a less urban start point, or Country/Open Road.");
 
         lenient().when(jobRepository.findById(jobId)).thenReturn(Optional.of(job));
         lenient().when(routeRepository.findByJobIdOrderByGeneratedAtAsc(jobId)).thenReturn(List.of());
@@ -506,9 +506,9 @@ class RouteServiceTest {
 
         assertThat(response.status()).isEqualTo("FAILED");
         assertThat(response.failureCode()).isEqualTo("vibe_unavailable");
-        assertThat(response.userMessage()).contains("No strong Countryside route found");
-        assertThat(response.suggestedVibes()).contains("scenic", "open_roads");
-        assertThat(response.suggestedActions()).contains("Try Scenic", "Try Open Roads", "Increase time budget to 90 minutes");
+        assertThat(response.userMessage()).contains("No strong Country route found");
+        assertThat(response.suggestedVibes()).contains("open_roads", "relaxing");
+        assertThat(response.suggestedActions()).contains("Try Country", "Try Open Road", "Increase time budget to 90 minutes");
     }
 
     @Test
@@ -685,7 +685,7 @@ class RouteServiceTest {
     }
 
     @Test
-    void routeOptionExplanationUsesScenicPoiForPhotoDiscoveryContract() {
+    void routeOptionExplanationTreatsPhotoAliasAsAdventureContract() {
         UUID jobId = UUID.randomUUID();
         UUID userId = UUID.randomUUID();
 
@@ -715,6 +715,7 @@ class RouteServiceTest {
               "scenic_moments_score":0.46,
               "scenic_poi_score":0.44,
               "corridor_urban_pressure":0.26,
+              "curve_elevation_corridor_share":0.35,
               "edge_urban_pressure":0.32
             }
             """);
@@ -735,10 +736,10 @@ class RouteServiceTest {
 
         var explanation = response.routeOptions().getFirst().explanation();
         assertThat(explanation).isNotNull();
-        assertThat(explanation.contractFlags()).containsEntry("photo_poi_signal_ok", true);
-        assertThat(explanation.contractWarnings()).doesNotContain("Photo/discovery vibe has weak photo or POI signal.");
+        assertThat(explanation.contractFlags()).containsEntry("elevation_curve_share_ok", true);
+        assertThat(explanation.contractWarnings()).doesNotContain("Mountain or winding vibe has weak elevation/curve share.");
         assertThat(explanation.humanReasons())
-            .anyMatch(reason -> reason.contains("scenic stops"));
+            .anyMatch(reason -> reason.contains("rolling") || reason.contains("curvy"));
     }
 
     @Test

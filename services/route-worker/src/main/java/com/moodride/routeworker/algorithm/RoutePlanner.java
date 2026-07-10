@@ -578,13 +578,7 @@ public class RoutePlanner {
             return containsAny(profileIds, "open_roads");
         }
         if (geometryStrategy == GeometryStrategy.QUIET_LOW_PRESSURE) {
-            return containsAny(profileIds,
-                "countryside",
-                "sunday_cruise",
-                "quiet",
-                "minimal_traffic",
-                "clear_my_head"
-            );
+            return containsAny(profileIds, "countryside", "relaxing", "nature_escape");
         }
         return false;
     }
@@ -644,7 +638,7 @@ public class RoutePlanner {
         return new NoFeasibleRouteException(
             "No strong " + VibeCatalog.displayList(requestVibes)
                 + " route found near this start within your " + job.getTimeBudgetMinutes()
-                + "-minute budget. Try a larger time budget, a less urban start point, or Scenic/Open Roads."
+                + "-minute budget. Try a larger time budget, a less urban start point, or Country/Open Road."
         );
     }
 
@@ -758,7 +752,7 @@ public class RoutePlanner {
             throw new NoFeasibleRouteException(
                 "No scenic data found near this start for " + VibeCatalog.displayList(vibes)
                     + " within your " + job.getTimeBudgetMinutes()
-                    + "-minute budget. Try a broader vibe like Scenic or Relaxing, or choose a nearby start point."
+                    + "-minute budget. Try Country or Relaxing, or choose a nearby start point."
             );
         }
 
@@ -779,7 +773,7 @@ public class RoutePlanner {
             throw new NoFeasibleRouteException(
                 "No strong " + VibeCatalog.displayList(vibes)
                     + " route found near this start within your " + job.getTimeBudgetMinutes()
-                    + "-minute budget. Try Scenic, Relaxing, Countryside, or increase the time budget."
+                    + "-minute budget. Try Country, Relaxing, or increase the time budget."
             );
         }
     }
@@ -1297,16 +1291,13 @@ public class RoutePlanner {
         Set<String> profileIds = vibeProfile.profiles().stream()
             .map(VibeCatalog.VibeProfile::id)
             .collect(Collectors.toSet());
-        if (containsAny(profileIds, "photo_worthy", "photo_run", "date_night", "hidden_gems")) {
-            return GeometryStrategy.PHOTO_PEAKS;
-        }
-        if (containsAny(profileIds, "coastal", "riverside", "golden_hour", "sunset", "sunrise")) {
+        if (containsAny(profileIds, "coastal", "riverside")) {
             return GeometryStrategy.WATER_FOLLOWING;
         }
         if (containsAny(profileIds, "open_roads")) {
             return GeometryStrategy.OPEN_SPACE_ESCAPE;
         }
-        if (containsAny(profileIds, "quiet", "minimal_traffic", "clear_my_head", "relaxing", "smooth_cruise", "countryside", "forest", "nature_escape", "scenic_reset", "sunday_cruise")) {
+        if (containsAny(profileIds, "relaxing", "countryside", "nature_escape")) {
             return GeometryStrategy.QUIET_LOW_PRESSURE;
         }
         if (containsAny(profileIds, "mountain", "winding_roads", "adventure")) {

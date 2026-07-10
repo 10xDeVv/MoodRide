@@ -401,7 +401,7 @@ class RoutePlannerTest {
 
         assertThatThrownBy(() -> routePlanner.generateRouteOptions(sampleJob(45, "countryside")))
             .isInstanceOf(NoFeasibleRouteException.class)
-            .hasMessageContaining("No strong Countryside route found");
+            .hasMessageContaining("No strong Country route found");
     }
 
     @Test
@@ -441,7 +441,7 @@ class RoutePlannerTest {
 
         assertThatThrownBy(() -> routePlanner.generateRouteOptions(sampleJob(60, "open_roads")))
             .isInstanceOf(NoFeasibleRouteException.class)
-            .hasMessageContaining("No strong Open Roads route found");
+            .hasMessageContaining("No strong Open Road route found");
     }
 
 

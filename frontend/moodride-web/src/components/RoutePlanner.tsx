@@ -5,8 +5,8 @@ import {
   MapPin, Navigation, Bike, Footprints, Car,
   Clock, ChevronDown, ChevronUp,
   Map as MapIcon, Loader2,
-  Waves, Trees, Mountain, Eye, Route,
-  Sunset, Camera, Compass, Wind, Coffee, Zap, Moon, Sun,
+  Waves, Trees, Mountain, Route,
+  Compass, Wind, Zap, Moon, Sun,
   type LucideIcon
 } from "lucide-react";
 import { RouteMap } from "./RouteMap";
@@ -35,45 +35,27 @@ import type {
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const VIBE_CONFIG: Array<{ vibe: Vibe; label: string; Icon: LucideIcon }> = [
-  { vibe: "coastal",         label: "Coastal",       Icon: Waves },
-  { vibe: "mountain",        label: "Mountain",      Icon: Mountain },
-  { vibe: "countryside",     label: "Country",       Icon: Trees },
-  { vibe: "riverside",       label: "Riverside",     Icon: Waves },
-  { vibe: "forest",          label: "Forest",        Icon: Trees },
-  { vibe: "open_roads",      label: "Open Roads",    Icon: Route },
-  { vibe: "relaxing",        label: "Relaxing",      Icon: Wind },
-  { vibe: "winding_roads",   label: "Winding",       Icon: Route },
-  { vibe: "smooth_cruise",   label: "Cruise",        Icon: Car },
-  { vibe: "quiet",           label: "Quiet",         Icon: Eye },
-  { vibe: "hidden_gems",     label: "Hidden",        Icon: Compass },
-  { vibe: "minimal_traffic", label: "Low Traffic",   Icon: Navigation },
-  { vibe: "scenic",          label: "Scenic",        Icon: Camera },
-  { vibe: "sunset",          label: "Sunset",        Icon: Sunset },
-  { vibe: "photo_worthy",    label: "Photo",         Icon: Camera },
-  { vibe: "nature_escape",   label: "Nature",        Icon: Trees },
-  { vibe: "sunday_cruise",   label: "Sunday",        Icon: Coffee },
-  { vibe: "adventure",       label: "Adventure",     Icon: Zap },
+  { vibe: "coastal",       label: "Coastal",    Icon: Waves },
+  { vibe: "mountain",      label: "Mountain",   Icon: Mountain },
+  { vibe: "countryside",   label: "Country",    Icon: Trees },
+  { vibe: "riverside",     label: "Riverside",  Icon: Waves },
+  { vibe: "nature_escape", label: "Nature",     Icon: Trees },
+  { vibe: "open_roads",    label: "Open Road",  Icon: Route },
+  { vibe: "adventure",     label: "Adventure",  Icon: Zap },
+  { vibe: "relaxing",      label: "Relaxing",   Icon: Wind },
+  { vibe: "winding_roads", label: "Winding",    Icon: Route },
 ];
 
 const VIBE_PREFERENCE_DEFAULTS: Record<string, Record<string, number>> = {
-  coastal:         { water: 0.9, greenery: 0.7, elevation: 0.3, solitude: 0.6, curves: 0.45, poi: 0.2 },
-  mountain:        { water: 0.2, greenery: 0.55, elevation: 0.9, solitude: 0.7, curves: 0.8, poi: 0.2 },
-  countryside:     { water: 0.4, greenery: 0.7, elevation: 0.45, solitude: 0.7, curves: 0.6, poi: 0.3 },
-  riverside:       { water: 0.85, greenery: 0.75, elevation: 0.35, solitude: 0.65, curves: 0.45, poi: 0.25 },
-  forest:          { water: 0.3, greenery: 0.9, elevation: 0.45, solitude: 0.8, curves: 0.45, poi: 0.2 },
-  open_roads:      { water: 0.25, greenery: 0.45, elevation: 0.35, solitude: 0.4, curves: 0.9, poi: 0.25 },
-  relaxing:        { water: 0.45, greenery: 0.65, elevation: 0.25, solitude: 0.85, curves: 0.3, poi: 0.25 },
-  winding_roads:   { water: 0.35, greenery: 0.45, elevation: 0.65, solitude: 0.55, curves: 0.95, poi: 0.15 },
-  smooth_cruise:   { water: 0.35, greenery: 0.5, elevation: 0.25, solitude: 0.6, curves: 0.25, poi: 0.2 },
-  quiet:           { water: 0.3, greenery: 0.7, elevation: 0.35, solitude: 0.95, curves: 0.35, poi: 0.1 },
-  hidden_gems:     { water: 0.45, greenery: 0.7, elevation: 0.55, solitude: 0.8, curves: 0.65, poi: 0.45 },
-  minimal_traffic: { water: 0.25, greenery: 0.6, elevation: 0.3, solitude: 0.95, curves: 0.4, poi: 0.1 },
-  scenic:          { water: 0.65, greenery: 0.7, elevation: 0.6, solitude: 0.65, curves: 0.55, poi: 0.3 },
-  sunset:          { water: 0.75, greenery: 0.5, elevation: 0.55, solitude: 0.55, curves: 0.35, poi: 0.35 },
-  photo_worthy:    { water: 0.75, greenery: 0.65, elevation: 0.75, solitude: 0.55, curves: 0.6, poi: 0.5 },
-  nature_escape:   { water: 0.45, greenery: 0.9, elevation: 0.55, solitude: 0.9, curves: 0.45, poi: 0.15 },
-  sunday_cruise:   { water: 0.35, greenery: 0.65, elevation: 0.3, solitude: 0.7, curves: 0.45, poi: 0.25 },
-  adventure:       { water: 0.4, greenery: 0.55, elevation: 0.9, solitude: 0.7, curves: 0.9, poi: 0.25 }
+  coastal:       { water: 0.9, greenery: 0.7, elevation: 0.3, solitude: 0.6, curves: 0.45, poi: 0.2 },
+  mountain:      { water: 0.2, greenery: 0.55, elevation: 0.9, solitude: 0.7, curves: 0.8, poi: 0.2 },
+  countryside:   { water: 0.4, greenery: 0.7, elevation: 0.45, solitude: 0.7, curves: 0.6, poi: 0.3 },
+  riverside:     { water: 0.85, greenery: 0.75, elevation: 0.35, solitude: 0.65, curves: 0.45, poi: 0.25 },
+  nature_escape: { water: 0.45, greenery: 0.9, elevation: 0.55, solitude: 0.9, curves: 0.45, poi: 0.15 },
+  open_roads:    { water: 0.25, greenery: 0.45, elevation: 0.35, solitude: 0.85, curves: 0.35, poi: 0.1 },
+  adventure:     { water: 0.4, greenery: 0.55, elevation: 0.9, solitude: 0.7, curves: 0.9, poi: 0.25 },
+  relaxing:      { water: 0.35, greenery: 0.7, elevation: 0.25, solitude: 0.95, curves: 0.25, poi: 0.1 },
+  winding_roads: { water: 0.35, greenery: 0.45, elevation: 0.65, solitude: 0.55, curves: 0.95, poi: 0.15 },
 };
 
 const TIME_BUDGET_OPTIONS = [30, 60, 90, 120] as const;

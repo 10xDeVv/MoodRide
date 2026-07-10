@@ -119,7 +119,6 @@ public class RouteService {
     private static final double CONTRACT_ROAD_STRESS_MAX = 0.48;
     private static final double CONTRACT_TREE_CANOPY_MIN = 0.26;
     private static final double CONTRACT_SCENIC_PEAK_MIN = 0.42;
-    private static final double CONTRACT_PHOTO_POI_SIGNAL_MIN = 0.30;
     private static final double CONTRACT_MAX_LOOP_CLOSURE_KM = 3.0;
     private static final double CONTRACT_MIN_UNIQUE_COORDINATE_RATIO = 0.72;
     private static final double CONTRACT_MAX_REPEATED_CORRIDOR_CELL_SHARE = 0.25;
@@ -1274,7 +1273,7 @@ public class RouteService {
         );
         flags.put("scenic_peak_ok", scenicPeak >= CONTRACT_SCENIC_PEAK_MIN || (route != null && route.getScenicScore() >= 0.65));
 
-        if (hasAnyVibe(routeVibes, "coastal", "riverside", "sunset", "golden_hour", "sunrise")) {
+        if (hasAnyVibe(routeVibes, "coastal", "riverside")) {
             double waterSignal = Math.max(
                 bestMetric(scoreBreakdown, componentAverages, "water_corridor_share", "water"),
                 getMetric(scoreBreakdown, "bridge_coastal_score")
@@ -1284,22 +1283,12 @@ public class RouteService {
         if (hasAnyVibe(routeVibes, "mountain", "winding_roads", "winding", "adventure")) {
             flags.put("elevation_curve_share_ok", bestMetric(scoreBreakdown, componentAverages, "curve_elevation_corridor_share", "elevation") >= CONTRACT_MOUNTAIN_CURVE_ELEVATION_MIN);
         }
-        if (hasAnyVibe(routeVibes, "countryside", "country", "sunday", "sunday_cruise", "quiet", "minimal_traffic", "low_traffic", "open_roads", "relaxing", "clear_my_head", "smooth_cruise")) {
+        if (hasAnyVibe(routeVibes, "countryside", "open_roads", "relaxing")) {
             flags.put("quiet_share_ok", bestMetric(scoreBreakdown, componentAverages, "quiet_corridor_share", "solitude") >= CONTRACT_QUIET_SHARE_MIN);
             flags.put("road_stress_ok", metricAtMost(scoreBreakdown, "road_stress_score", CONTRACT_ROAD_STRESS_MAX));
         }
-        if (hasAnyVibe(routeVibes, "forest", "nature_escape", "nature")) {
+        if (hasAnyVibe(routeVibes, "nature_escape")) {
             flags.put("tree_canopy_ok", metricAtLeast(scoreBreakdown, "tree_canopy_score", CONTRACT_TREE_CANOPY_MIN));
-        }
-        if (hasAnyVibe(routeVibes, "photo_worthy", "photo_run", "photo", "date_night", "hidden_gems")) {
-            double photoSignal = Math.max(
-                Math.max(
-                    Math.max(getMetric(scoreBreakdown, "photo_peak_score"), getMetric(scoreBreakdown, "scenic_poi_score")),
-                    getMetric(scoreBreakdown, "viewpoint_score")
-                ),
-                componentAverages == null ? 0.0 : componentAverages.getOrDefault("poi", 0.0)
-            );
-            flags.put("photo_poi_signal_ok", photoSignal >= CONTRACT_PHOTO_POI_SIGNAL_MIN);
         }
 
         return Map.copyOf(flags);
@@ -1320,21 +1309,18 @@ public class RouteService {
         addWarningIfFalse(warnings, contractFlags, "corridor_urban_pressure_ok", "Route corridor has more urban pressure than expected.");
         addWarningIfFalse(warnings, contractFlags, "edge_urban_pressure_ok", "Route starts or ends in a more urban area.");
         addWarningIfFalse(warnings, contractFlags, "scenic_peak_ok", "Route lacks a strong scenic stretch.");
-        if (hasAnyVibe(routeVibes, "coastal", "riverside", "sunset", "golden_hour", "sunrise")) {
+        if (hasAnyVibe(routeVibes, "coastal", "riverside")) {
             addWarningIfFalse(warnings, contractFlags, "water_share_ok", "Water-focused vibe has low water corridor share.");
         }
         if (hasAnyVibe(routeVibes, "mountain", "winding_roads", "winding", "adventure")) {
             addWarningIfFalse(warnings, contractFlags, "elevation_curve_share_ok", "Mountain or winding vibe has weak elevation/curve share.");
         }
-        if (hasAnyVibe(routeVibes, "countryside", "country", "sunday", "sunday_cruise", "quiet", "minimal_traffic", "low_traffic", "open_roads", "relaxing", "clear_my_head", "smooth_cruise")) {
+        if (hasAnyVibe(routeVibes, "countryside", "open_roads", "relaxing")) {
             addWarningIfFalse(warnings, contractFlags, "quiet_share_ok", "Quiet/rural vibe has weak quiet corridor share.");
             addWarningIfFalse(warnings, contractFlags, "road_stress_ok", "Quiet/rural vibe uses higher-stress road classes.");
         }
-        if (hasAnyVibe(routeVibes, "forest", "nature_escape", "nature")) {
-            addWarningIfFalse(warnings, contractFlags, "tree_canopy_ok", "Forest/nature vibe has weak tree-canopy signal.");
-        }
-        if (hasAnyVibe(routeVibes, "photo_worthy", "photo_run", "photo", "date_night", "hidden_gems")) {
-            addWarningIfFalse(warnings, contractFlags, "photo_poi_signal_ok", "Photo/discovery vibe has weak photo or POI signal.");
+        if (hasAnyVibe(routeVibes, "nature_escape")) {
+            addWarningIfFalse(warnings, contractFlags, "tree_canopy_ok", "Nature vibe has weak tree-canopy signal.");
         }
         return List.copyOf(warnings);
     }

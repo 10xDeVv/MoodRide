@@ -30,8 +30,8 @@ public class RouteFailureGuidanceService {
             return new RouteFailureGuidance(
                 "route_generation_failed",
                 "Route generation failed. Try a different starting point, more time, or another vibe.",
-                List.of("scenic", "open_roads"),
-                List.of("Try Scenic", "Try Open Roads", "Increase time budget")
+                List.of("countryside", "open_roads"),
+                List.of("Try Country", "Try Open Road", "Increase time budget")
             );
         }
 
@@ -48,24 +48,24 @@ public class RouteFailureGuidanceService {
         return new RouteFailureGuidance(
             "route_generation_failed",
             reason,
-            List.of("scenic", "open_roads"),
-            List.of("Try Scenic", "Try Open Roads", "Increase time budget")
+            List.of("countryside", "open_roads"),
+            List.of("Try Country", "Try Open Road", "Increase time budget")
         );
     }
 
     private List<String> suggestedFallbackVibes(RouteJob job) {
         List<String> routeVibes = resolveRouteVibes(job);
         Set<String> suggestions = new LinkedHashSet<>();
-        if (routeVibes.stream().anyMatch(vibe -> vibe.equals("countryside") || vibe.equals("sunday_cruise"))) {
-            suggestions.add("scenic");
+        if (routeVibes.contains("countryside")) {
             suggestions.add("open_roads");
             suggestions.add("relaxing");
+            suggestions.add("nature_escape");
         } else if (routeVibes.contains("mountain")) {
-            suggestions.add("scenic");
+            suggestions.add("adventure");
             suggestions.add("winding_roads");
             suggestions.add("open_roads");
         } else {
-            suggestions.add("scenic");
+            suggestions.add("countryside");
             suggestions.add("open_roads");
             suggestions.add("relaxing");
         }
@@ -77,8 +77,8 @@ public class RouteFailureGuidanceService {
         int currentBudget = job == null ? 60 : job.getTimeBudgetMinutes();
         int nextBudget = currentBudget < 60 ? 60 : currentBudget < 90 ? 90 : currentBudget < 120 ? 120 : currentBudget + 30;
         return List.of(
-            "Try Scenic",
-            "Try Open Roads",
+            "Try Country",
+            "Try Open Road",
             "Increase time budget to " + nextBudget + " minutes",
             "Move the start point farther from downtown"
         );

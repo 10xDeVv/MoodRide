@@ -26,20 +26,11 @@ const VIBE_LABELS: Record<string, string> = {
   mountain: "Mountain",
   countryside: "Country",
   riverside: "Riverside",
-  forest: "Forest",
-  open_roads: "Open Roads",
-  relaxing: "Relaxing",
-  winding_roads: "Winding",
-  smooth_cruise: "Cruise",
-  quiet: "Quiet",
-  hidden_gems: "Hidden",
-  minimal_traffic: "Low Traffic",
-  scenic: "Scenic",
-  sunset: "Sunset",
-  photo_worthy: "Photo",
   nature_escape: "Nature",
-  sunday_cruise: "Sunday",
-  adventure: "Adventure"
+  open_roads: "Open Road",
+  adventure: "Adventure",
+  relaxing: "Relaxing",
+  winding_roads: "Winding"
 };
 
 const GOOGLE_TRAVEL_MODES: Record<RouteMode, string> = { drive: "driving", walk: "walking", bike: "bicycling" };
