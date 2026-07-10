@@ -15,6 +15,8 @@ import com.moodride.routeworker.repository.RouteDurationCalibrationRepository;
 import com.moodride.routeworker.service.RoadSegmentAnchorService;
 import com.moodride.routeworker.service.ScenicTileLookupService;
 import com.moodride.routeworker.service.OsrmTripClient;
+import com.moodride.routeworker.service.RouteGenerationMetricsService;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -64,9 +66,12 @@ class RoutePlannerTest {
     private RouteDurationCalibrationRepository routeDurationCalibrationRepository;
 
     private RoutePlanner routePlanner;
+    private SimpleMeterRegistry meterRegistry;
+
 
     @BeforeEach
     void setUp() {
+        meterRegistry = new SimpleMeterRegistry();
         routePlanner = routePlanner(testConfiguration());
         lenient().when(routeWeightCalibrationRepository.findByVibeIn(anyCollection())).thenReturn(List.of());
         lenient().when(routeDurationCalibrationRepository.findById(org.mockito.ArgumentMatchers.anyString())).thenReturn(Optional.empty());
@@ -97,7 +102,8 @@ class RoutePlannerTest {
             osrmTripClient,
             config,
             new ObjectMapper(),
-            new ScenicScoreCalculator()
+            new ScenicScoreCalculator(),
+            new RouteGenerationMetricsService(meterRegistry)
         );
     }
 
@@ -211,6 +217,41 @@ class RoutePlannerTest {
             .max()
             .orElse(0.0);
         assertThat(options.getFirst().getTotalScenicScore()).isEqualTo(maxScenicScore);
+    }
+
+    @Test
+    void generateRouteOptionsRecordsTimingHistograms() {
+        when(scenicTileLookupService.findByH3Indexes(anyCollection())).thenReturn(highScenicTilesAroundStart());
+        when(osrmTripClient.requestRoundTrip(anyList(), eq(RouteMode.DRIVE))).thenAnswer(invocation -> {
+            @SuppressWarnings("unchecked")
+            List<RoadNode> variant = invocation.getArgument(0);
+            int durationMinutes = variant.size() * 8;
+            double distanceKm = variant.size() * 2.5;
+            return Optional.of(new OsrmTripClient.TripResult(variant, distanceKm, durationMinutes));
+        });
+
+        List<RouteCandidate> options = routePlanner.generateRouteOptions(sampleJob(45));
+
+        assertThat(options).hasSize(3);
+        assertThat(meterRegistry.find("moodride.route.worker.generation.stage.duration")
+            .tag("stage", "total")
+            .tag("outcome", "success")
+            .tag("route_mode", "drive")
+            .timer())
+            .isNotNull()
+            .satisfies(timer -> assertThat(timer.count()).isEqualTo(1));
+        assertThat(meterRegistry.find("moodride.route.worker.generation.stage.duration")
+            .tag("stage", "primary_osrm")
+            .tag("outcome", "success")
+            .timer())
+            .isNotNull()
+            .satisfies(timer -> assertThat(timer.count()).isEqualTo(1));
+        assertThat(meterRegistry.find("moodride.route.worker.generation.count")
+            .tag("count", "candidates")
+            .tag("outcome", "success")
+            .summary())
+            .isNotNull()
+            .satisfies(summary -> assertThat(summary.count()).isEqualTo(1));
     }
 
     @Test

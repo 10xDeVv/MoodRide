@@ -16,6 +16,7 @@ import com.moodride.routeworker.graph.RoadNode;
 import com.moodride.routeworker.repository.RouteDurationCalibrationRepository;
 import com.moodride.routeworker.repository.RouteWeightCalibrationRepository;
 import com.moodride.routeworker.service.OsrmTripClient;
+import com.moodride.routeworker.service.RouteGenerationMetricsService;
 import com.moodride.routeworker.service.RoadSegmentAnchorService;
 import com.moodride.routeworker.service.ScenicTileLookupService;
 import org.slf4j.Logger;
@@ -114,6 +115,7 @@ public class RoutePlanner {
     private final ScenicScoreCalculator scenicScoreCalculator;
     private final RouteOptionSelector routeOptionSelector;
     private final RouteCraftAnalyzer routeCraftAnalyzer;
+    private final RouteGenerationMetricsService routeGenerationMetricsService;
 
     public RoutePlanner(ScenicTileLookupService scenicTileLookupService,
                         RoadSegmentAnchorService roadSegmentAnchorService,
@@ -122,7 +124,8 @@ public class RoutePlanner {
                         OsrmTripClient osrmTripClient,
                         ApplicationConfiguration config,
                         ObjectMapper objectMapper,
-                        ScenicScoreCalculator scenicScoreCalculator) {
+                        ScenicScoreCalculator scenicScoreCalculator,
+                        RouteGenerationMetricsService routeGenerationMetricsService) {
         this.scenicTileLookupService = scenicTileLookupService;
         this.roadSegmentAnchorService = roadSegmentAnchorService;
         this.routeWeightCalibrationRepository = routeWeightCalibrationRepository;
@@ -133,6 +136,7 @@ public class RoutePlanner {
         this.scenicScoreCalculator = scenicScoreCalculator;
         this.routeOptionSelector = new RouteOptionSelector(config.getMaxDurationOverrunRatio());
         this.routeCraftAnalyzer = new RouteCraftAnalyzer();
+        this.routeGenerationMetricsService = routeGenerationMetricsService;
     }
 
     public RouteCandidate generateRoute(RouteJob job) {
@@ -225,10 +229,29 @@ public class RoutePlanner {
                 }
             }
             long selectionMs = elapsedMillis(stageStartedNanos);
+            long totalMs = elapsedMillis(generationStartedNanos);
+            String outcome = requiresStrictContractOptions(vibeProfile, geometryStrategy) && selected.size() < ROUTE_OPTION_COUNT
+                ? "no_feasible_route"
+                : "success";
+            routeGenerationMetricsService.record(new RouteGenerationMetricsService.RouteGenerationMetrics(
+                job.getRouteMode(),
+                geometryStrategy,
+                outcome,
+                totalMs,
+                tileScoringMs,
+                variantBuildMs,
+                primaryOsrmMs,
+                rescueMs,
+                selectionMs,
+                scoredTiles.size(),
+                waypointVariants.size(),
+                hybridCandidates.size(),
+                selected.size()
+            ));
             logger.info(
                 "Route job {} generation timings totalMs={} tileScoringMs={} variantBuildMs={} primaryOsrmMs={} rescueMs={} selectionMs={} scoredTiles={} waypointVariants={} candidates={} selected={} strategy={}",
                 job.getId(),
-                elapsedMillis(generationStartedNanos),
+                totalMs,
                 tileScoringMs,
                 variantBuildMs,
                 primaryOsrmMs,
@@ -240,12 +263,28 @@ public class RoutePlanner {
                 selected.size(),
                 geometryStrategy
             );
-            if (requiresStrictContractOptions(vibeProfile, geometryStrategy) && selected.size() < ROUTE_OPTION_COUNT) {
+            if ("no_feasible_route".equals(outcome)) {
                 throw noStrongStrategyRoute(requestVibes, job);
             }
             return selected;
         }
 
+        long totalMs = elapsedMillis(generationStartedNanos);
+        routeGenerationMetricsService.record(new RouteGenerationMetricsService.RouteGenerationMetrics(
+            job.getRouteMode(),
+            geometryStrategy,
+            "no_feasible_route",
+            totalMs,
+            tileScoringMs,
+            variantBuildMs,
+            primaryOsrmMs,
+            rescueMs,
+            0L,
+            scoredTiles.size(),
+            waypointVariants.size(),
+            0,
+            0
+        ));
         logger.info(
             "Route job {} generation timings totalMs={} tileScoringMs={} variantBuildMs={} primaryOsrmMs={} rescueMs={} selectionMs=0 scoredTiles={} waypointVariants={} candidates=0 selected=0 strategy={}",
             job.getId(),
