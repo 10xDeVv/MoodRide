@@ -4,7 +4,7 @@ import { useEffect, useRef, type MutableRefObject } from "react";
 import mapboxgl, { type GeoJSONSource, type Map as MapboxMap, type MapLayerMouseEvent } from "mapbox-gl";
 import "mapbox-gl/dist/mapbox-gl.css";
 import { Minus, Plus } from "lucide-react";
-import type { FeatureCollection, LineString } from "geojson";
+import type { FeatureCollection, LineString, Point } from "geojson";
 import type { RouteDetailResponse } from "@/lib/types";
 
 interface RouteMapProps {
@@ -18,6 +18,7 @@ interface RouteMapProps {
 
 const MAPBOX_TOKEN = process.env.NEXT_PUBLIC_MAPBOX_ACCESS_TOKEN;
 const ALL_ROUTES_SOURCE_ID = "all-routes";
+const ROUTE_WAYPOINTS_SOURCE_ID = "route-waypoints";
 
 const ROUTE_BLUE = "#2563eb";
 const ROUTE_LIME = "#e8f04a";
@@ -39,6 +40,12 @@ type RouteLineProperties = {
   lightColor: string;
   selected: boolean;
   offset: number;
+  order: number;
+};
+
+type RouteWaypointProperties = {
+  kind: "start" | "via" | "finish";
+  label: string;
   order: number;
 };
 
@@ -182,6 +189,42 @@ function routesToGeoJson(route: RouteDetailResponse, selectedRouteId: string | u
   };
 }
 
+function routeWaypointsToGeoJson(route: RouteDetailResponse): FeatureCollection<Point, RouteWaypointProperties> {
+  const coordinates = route.geometry?.geometry?.coordinates ?? [];
+  if (coordinates.length < 2) {
+    return { type: "FeatureCollection", features: [] };
+  }
+
+  const waypointIndexes = [
+    0,
+    Math.round((coordinates.length - 1) * 0.25),
+    Math.round((coordinates.length - 1) * 0.5),
+    Math.round((coordinates.length - 1) * 0.75),
+    coordinates.length - 1
+  ].filter((index, position, indexes) => index >= 0 && index < coordinates.length && indexes.indexOf(index) === position);
+
+  return {
+    type: "FeatureCollection",
+    features: waypointIndexes.map((index, position) => {
+      const isStart = position === 0;
+      const isFinish = index === coordinates.length - 1;
+      return {
+        type: "Feature",
+        id: `${route.routeId}-${position}`,
+        properties: {
+          kind: isStart ? "start" : isFinish ? "finish" : "via",
+          label: isStart ? "Start" : isFinish ? "Finish" : `${position}`,
+          order: position
+        },
+        geometry: {
+          type: "Point",
+          coordinates: coordinates[index]
+        }
+      };
+    })
+  };
+}
+
 function getRouteFitPadding() {
   if (typeof window === "undefined") return 70;
 
@@ -255,6 +298,57 @@ function ensureRouteLayers(map: MapboxMap) {
   }
 }
 
+function ensureWaypointLayers(map: MapboxMap) {
+  if (!map.getLayer("route-waypoint-halo")) {
+    map.addLayer({
+      id: "route-waypoint-halo",
+      type: "circle",
+      source: ROUTE_WAYPOINTS_SOURCE_ID,
+      paint: {
+        "circle-radius": ["case", ["==", ["get", "kind"], "via"], 6, 9],
+        "circle-color": "#ffffff",
+        "circle-opacity": 0.95,
+        "circle-stroke-color": "#1a3020",
+        "circle-stroke-width": 2
+      }
+    });
+  }
+
+  if (!map.getLayer("route-waypoint-core")) {
+    map.addLayer({
+      id: "route-waypoint-core",
+      type: "circle",
+      source: ROUTE_WAYPOINTS_SOURCE_ID,
+      paint: {
+        "circle-radius": ["case", ["==", ["get", "kind"], "via"], 3.5, 5],
+        "circle-color": ["case", ["==", ["get", "kind"], "start"], ROUTE_LIME, ["==", ["get", "kind"], "finish"], "#ef4444", ROUTE_BLUE],
+        "circle-opacity": 1
+      }
+    });
+  }
+
+  if (!map.getLayer("route-waypoint-label")) {
+    map.addLayer({
+      id: "route-waypoint-label",
+      type: "symbol",
+      source: ROUTE_WAYPOINTS_SOURCE_ID,
+      filter: ["!=", ["get", "kind"], "via"],
+      layout: {
+        "text-field": ["get", "label"],
+        "text-size": 11,
+        "text-font": ["Open Sans Bold", "Arial Unicode MS Bold"],
+        "text-offset": [0, 1.25],
+        "text-anchor": "top"
+      },
+      paint: {
+        "text-color": "#1a3020",
+        "text-halo-color": "#ffffff",
+        "text-halo-width": 1.4
+      }
+    });
+  }
+}
+
 function routeIdFromMapEvent(event: MapLayerMouseEvent): string | undefined {
   const routeId = event.features?.[0]?.properties?.routeId;
   return typeof routeId === "string" ? routeId : undefined;
@@ -276,6 +370,7 @@ function ensureRouteInteractions(map: MapboxMap, onSelectRef: MutableRefObject<(
 
 function renderAllRoutes(map: MapboxMap, route: RouteDetailResponse, selectedRouteId: string | undefined, theme: "day" | "night", fitRoute: boolean) {
   const geojson = routesToGeoJson(route, selectedRouteId, theme);
+  const waypointGeojson = routeWaypointsToGeoJson(route);
 
   if (!map.getSource(ALL_ROUTES_SOURCE_ID)) {
     map.addSource(ALL_ROUTES_SOURCE_ID, { type: "geojson", data: geojson });
@@ -284,6 +379,15 @@ function renderAllRoutes(map: MapboxMap, route: RouteDetailResponse, selectedRou
     const source = map.getSource(ALL_ROUTES_SOURCE_ID) as GeoJSONSource | undefined;
     source?.setData(geojson);
     ensureRouteLayers(map);
+  }
+
+  if (!map.getSource(ROUTE_WAYPOINTS_SOURCE_ID)) {
+    map.addSource(ROUTE_WAYPOINTS_SOURCE_ID, { type: "geojson", data: waypointGeojson });
+    ensureWaypointLayers(map);
+  } else {
+    const source = map.getSource(ROUTE_WAYPOINTS_SOURCE_ID) as GeoJSONSource | undefined;
+    source?.setData(waypointGeojson);
+    ensureWaypointLayers(map);
   }
 
   if (!fitRoute) return;
@@ -376,6 +480,29 @@ export function RouteMap({ route, selectedRouteId, centerLat = 49.28, centerLng 
       });
     }
   }, [route, selectedRouteId, theme, hasToken]);
+
+  useEffect(() => {
+    if (!hasToken || !mapContainerRef.current) return;
+
+    let resizeFrame = 0;
+    const resizeMap = () => {
+      window.cancelAnimationFrame(resizeFrame);
+      resizeFrame = window.requestAnimationFrame(() => mapRef.current?.resize());
+    };
+
+    const observer = new ResizeObserver(resizeMap);
+    observer.observe(mapContainerRef.current);
+    window.addEventListener("resize", resizeMap);
+    window.visualViewport?.addEventListener("resize", resizeMap);
+    resizeMap();
+
+    return () => {
+      window.cancelAnimationFrame(resizeFrame);
+      observer.disconnect();
+      window.removeEventListener("resize", resizeMap);
+      window.visualViewport?.removeEventListener("resize", resizeMap);
+    };
+  }, [hasToken]);
 
   if (!hasToken) {
     return <SchematicMap route={route} theme={theme} />;
