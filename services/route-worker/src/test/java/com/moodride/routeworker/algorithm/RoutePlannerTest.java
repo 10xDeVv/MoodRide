@@ -246,6 +246,12 @@ class RoutePlannerTest {
             .timer())
             .isNotNull()
             .satisfies(timer -> assertThat(timer.count()).isEqualTo(1));
+        assertThat(meterRegistry.find("moodride.route.worker.generation.stage.duration")
+            .tag("stage", "tile_scoring.scenic_tile_lookup")
+            .tag("outcome", "attempt")
+            .timer())
+            .isNotNull()
+            .satisfies(timer -> assertThat(timer.count()).isEqualTo(1));
         assertThat(meterRegistry.find("moodride.route.worker.generation.count")
             .tag("count", "candidates")
             .tag("outcome", "success")

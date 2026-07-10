@@ -28,12 +28,12 @@ public class RouteGenerationMetricsService {
         String strategy = strategyTag(metrics.strategy());
         String outcome = outcomeTag(metrics.outcome());
 
-        recordStage("total", metrics.totalMs(), routeMode, strategy, outcome);
-        recordStage("tile_scoring", metrics.tileScoringMs(), routeMode, strategy, outcome);
-        recordStage("variant_build", metrics.variantBuildMs(), routeMode, strategy, outcome);
-        recordStage("primary_osrm", metrics.primaryOsrmMs(), routeMode, strategy, outcome);
-        recordStage("rescue", metrics.rescueMs(), routeMode, strategy, outcome);
-        recordStage("selection", metrics.selectionMs(), routeMode, strategy, outcome);
+        recordStageDuration("total", metrics.totalMs(), routeMode, strategy, outcome);
+        recordStageDuration("tile_scoring", metrics.tileScoringMs(), routeMode, strategy, outcome);
+        recordStageDuration("variant_build", metrics.variantBuildMs(), routeMode, strategy, outcome);
+        recordStageDuration("primary_osrm", metrics.primaryOsrmMs(), routeMode, strategy, outcome);
+        recordStageDuration("rescue", metrics.rescueMs(), routeMode, strategy, outcome);
+        recordStageDuration("selection", metrics.selectionMs(), routeMode, strategy, outcome);
 
         recordCount("scored_tiles", metrics.scoredTiles(), routeMode, strategy, outcome);
         recordCount("waypoint_variants", metrics.waypointVariants(), routeMode, strategy, outcome);
@@ -41,7 +41,23 @@ public class RouteGenerationMetricsService {
         recordCount("selected", metrics.selected(), routeMode, strategy, outcome);
     }
 
-    private void recordStage(String stage, long durationMs, String routeMode, String strategy, String outcome) {
+    public void recordStage(String stage, long durationMs, RouteMode routeMode, Object strategy, String outcome) {
+        recordStageDuration(stage, durationMs, routeModeTag(routeMode), strategyTag(strategy), outcomeTag(outcome));
+    }
+
+    public void recordRoadAnchorLookup(String source, long durationMs) {
+        Timer.builder("moodride.route.worker.road_anchor.lookup.duration")
+            .description("Road anchor lookup duration")
+            .tag("service", SERVICE_TAG_VALUE)
+            .tag("source", source == null || source.isBlank() ? "unknown" : source.toLowerCase(Locale.ROOT))
+            .publishPercentileHistogram()
+            .minimumExpectedValue(MIN_EXPECTED_STAGE_DURATION)
+            .maximumExpectedValue(Duration.ofSeconds(10))
+            .register(meterRegistry)
+            .record(Math.max(0L, durationMs), TimeUnit.MILLISECONDS);
+    }
+
+    private void recordStageDuration(String stage, long durationMs, String routeMode, String strategy, String outcome) {
         Timer.builder("moodride.route.worker.generation.stage.duration")
             .description("Route generation stage duration")
             .tag("service", SERVICE_TAG_VALUE)

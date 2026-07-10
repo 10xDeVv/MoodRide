@@ -31,23 +31,29 @@ public class RoadSegmentAnchorService {
 
     private final RoadSegmentRepository roadSegmentRepository;
     private final CacheManager cacheManager;
+    private final RouteGenerationMetricsService routeGenerationMetricsService;
     private final Map<String, RoadAnchor> localAnchors = new LinkedHashMap<>(1024, 0.75f, true);
 
     public RoadSegmentAnchorService(RoadSegmentRepository roadSegmentRepository,
-                                    CacheManager cacheManager) {
+                                    CacheManager cacheManager,
+                                    RouteGenerationMetricsService routeGenerationMetricsService) {
         this.roadSegmentRepository = roadSegmentRepository;
         this.cacheManager = cacheManager;
+        this.routeGenerationMetricsService = routeGenerationMetricsService;
     }
 
     @Transactional(readOnly = true)
     public RoadNode anchorFor(ScenicScoreTile tile, RoadNode fallbackCenter) {
+        long startedNanos = System.nanoTime();
         if (tile == null || tile.getH3Index() == null || fallbackCenter == null) {
+            recordLookup("fallback_invalid", startedNanos);
             return fallbackCenter;
         }
 
         String h3Index = tile.getH3Index();
         RoadAnchor localAnchor = getLocal(h3Index);
         if (localAnchor != null) {
+            recordLookup("local", startedNanos);
             return localAnchor.toRoadNode();
         }
 
@@ -55,13 +61,15 @@ public class RoadSegmentAnchorService {
         RoadAnchor cachedAnchor = getRedis(redisCache, h3Index);
         if (cachedAnchor != null) {
             putLocal(h3Index, cachedAnchor);
+            recordLookup("redis", startedNanos);
             return cachedAnchor.toRoadNode();
         }
 
-        RoadAnchor computedAnchor = findBestAnchor(tile, fallbackCenter);
-        putLocal(h3Index, computedAnchor);
-        putRedis(redisCache, h3Index, computedAnchor);
-        return computedAnchor.toRoadNode();
+        RoadAnchorResolution resolution = findBestAnchor(tile, fallbackCenter);
+        putLocal(h3Index, resolution.anchor());
+        putRedis(redisCache, h3Index, resolution.anchor());
+        recordLookup(resolution.source(), startedNanos);
+        return resolution.anchor().toRoadNode();
     }
 
     public void evict(List<String> h3Indexes) {
@@ -92,7 +100,7 @@ public class RoadSegmentAnchorService {
         }
     }
 
-    private RoadAnchor findBestAnchor(ScenicScoreTile tile, RoadNode fallbackCenter) {
+    private RoadAnchorResolution findBestAnchor(ScenicScoreTile tile, RoadNode fallbackCenter) {
         List<RoadSegment> candidates;
         try {
             candidates = roadSegmentRepository.findAnchorCandidatesNear(
@@ -103,14 +111,15 @@ public class RoadSegmentAnchorService {
             );
         } catch (RuntimeException ex) {
             logger.debug("Failed to fetch road anchor candidates for scenic tile {}", tile.getH3Index(), ex);
-            return RoadAnchor.from(fallbackCenter);
+            return new RoadAnchorResolution(RoadAnchor.from(fallbackCenter), "fallback_error");
         }
 
         return candidates.stream()
             .filter(segment -> segment.getGeometry() != null && !segment.getGeometry().isEmpty())
             .max((left, right) -> Double.compare(anchorScore(left, tile), anchorScore(right, tile)))
             .map(this::midpointAnchor)
-            .orElseGet(() -> RoadAnchor.from(fallbackCenter));
+            .map(anchor -> new RoadAnchorResolution(anchor, "postgres"))
+            .orElseGet(() -> new RoadAnchorResolution(RoadAnchor.from(fallbackCenter), "fallback_empty"));
     }
 
     private double anchorScore(RoadSegment segment, ScenicScoreTile tile) {
@@ -218,11 +227,22 @@ public class RoadSegmentAnchorService {
         }
     }
 
+    private void recordLookup(String source, long startedNanos) {
+        routeGenerationMetricsService.recordRoadAnchorLookup(source, elapsedMillis(startedNanos));
+    }
+
+    private long elapsedMillis(long startedNanos) {
+        return Math.max(0L, (System.nanoTime() - startedNanos) / 1_000_000L);
+    }
+
     private double clamp01(double value) {
         if (Double.isNaN(value) || Double.isInfinite(value)) {
             return 0.0;
         }
         return Math.max(0.0, Math.min(1.0, value));
+    }
+
+    private record RoadAnchorResolution(RoadAnchor anchor, String source) {
     }
 
     public record RoadAnchor(double latitude, double longitude) implements Serializable {

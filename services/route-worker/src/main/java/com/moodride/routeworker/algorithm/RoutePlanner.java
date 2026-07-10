@@ -3,6 +3,7 @@ package com.moodride.routeworker.algorithm;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.moodride.datamodels.RouteJob;
+import com.moodride.datamodels.RouteMode;
 import com.moodride.datamodels.RouteDurationCalibration;
 import com.moodride.datamodels.ScenicScoreTile;
 import com.moodride.datamodels.RouteWeightCalibration;
@@ -158,7 +159,9 @@ public class RoutePlanner {
             job.getTimeBudgetMinutes(),
             preferences,
             vibeProfile,
-            durationCalibration
+            durationCalibration,
+            job.getRouteMode(),
+            geometryStrategy
         );
         long tileScoringMs = elapsedMillis(stageStartedNanos);
         validateVibeAvailability(job, requestVibes, vibeProfile, scoredTiles);
@@ -653,13 +656,21 @@ public class RoutePlanner {
                                                  int timeBudgetMinutes,
                                                  PreferenceWeights preferences,
                                                  VibeCatalog.BlendedVibeProfile vibeProfile,
-                                                 DurationCalibrationHint durationCalibration) {
+                                                 DurationCalibrationHint durationCalibration,
+                                                 RouteMode routeMode,
+                                                 GeometryStrategy geometryStrategy) {
         int ringSize = determineRingSize(timeBudgetMinutes, vibeProfile, durationCalibration);
         int configuredResolution = Math.max(0, config.getH3Resolution());
-        List<ScenicScoreTile> nearbyTiles = findTilesNearStart(start, ringSize, configuredResolution);
+        TileLookupResult tileLookup = findTilesNearStartTimed(start, ringSize, configuredResolution);
+        List<ScenicScoreTile> nearbyTiles = tileLookup.tiles();
+        long h3CellBuildMs = tileLookup.h3CellBuildMs();
+        long scenicTileLookupMs = tileLookup.lookupMs();
 
         if (nearbyTiles.isEmpty() && configuredResolution != DEFAULT_H3_RESOLUTION) {
-            nearbyTiles = findTilesNearStart(start, ringSize, DEFAULT_H3_RESOLUTION);
+            TileLookupResult fallbackLookup = findTilesNearStartTimed(start, ringSize, DEFAULT_H3_RESOLUTION);
+            nearbyTiles = fallbackLookup.tiles();
+            h3CellBuildMs += fallbackLookup.h3CellBuildMs();
+            scenicTileLookupMs += fallbackLookup.lookupMs();
             if (!nearbyTiles.isEmpty()) {
                 logger.info(
                     "No scenic tiles found at configured H3 resolution {} for start ({}, {}); falling back to resolution {}",
@@ -671,7 +682,13 @@ public class RoutePlanner {
             }
         }
 
+        routeGenerationMetricsService.recordStage("tile_scoring.h3_cell_build", h3CellBuildMs, routeMode, geometryStrategy, "attempt");
+        routeGenerationMetricsService.recordStage("tile_scoring.scenic_tile_lookup", scenicTileLookupMs, routeMode, geometryStrategy, "attempt");
+
         if (nearbyTiles.isEmpty()) {
+            routeGenerationMetricsService.recordStage("tile_scoring.pre_anchor_rank", 0L, routeMode, geometryStrategy, "attempt");
+            routeGenerationMetricsService.recordStage("tile_scoring.road_anchor_lookup", 0L, routeMode, geometryStrategy, "attempt");
+            routeGenerationMetricsService.recordStage("tile_scoring.final_rank", 0L, routeMode, geometryStrategy, "attempt");
             return List.of();
         }
 
@@ -680,6 +697,7 @@ public class RoutePlanner {
             20,
             Math.min(config.getTileSelectionLimit(), Math.max(1, config.getAnchoredTileSelectionLimit()))
         );
+        long substageStartedNanos = System.nanoTime();
         List<PreAnchorTileCandidate> preselectedTiles = nearbyTiles.stream()
             .filter(tile -> tile.getGeometry() != null && !tile.getGeometry().isEmpty())
             .map(tile -> {
@@ -695,16 +713,25 @@ public class RoutePlanner {
             .sorted(Comparator.comparingDouble(PreAnchorTileCandidate::selectionScore).reversed())
             .limit(anchoredLimit)
             .toList();
+        routeGenerationMetricsService.recordStage("tile_scoring.pre_anchor_rank", elapsedMillis(substageStartedNanos), routeMode, geometryStrategy, "attempt");
 
-        return preselectedTiles.stream()
+        substageStartedNanos = System.nanoTime();
+        List<TileCandidate> anchoredTiles = preselectedTiles.stream()
             .map(candidate -> {
                 RoadNode anchor = roadSegmentAnchorService.anchorFor(candidate.tile(), candidate.center());
                 double distanceKm = distanceKm(start, anchor);
                 double selectionScore = tileSelectionScore(candidate.tile(), vibeProfile, candidate.scenicScore(), distanceKm, targetRadiusKm);
                 return new TileCandidate(candidate.tile(), anchor, candidate.scenicScore(), selectionScore, distanceKm);
             })
+            .toList();
+        routeGenerationMetricsService.recordStage("tile_scoring.road_anchor_lookup", elapsedMillis(substageStartedNanos), routeMode, geometryStrategy, "attempt");
+
+        substageStartedNanos = System.nanoTime();
+        List<TileCandidate> scoredTiles = anchoredTiles.stream()
             .sorted(Comparator.comparingDouble(TileCandidate::selectionScore).reversed())
             .toList();
+        routeGenerationMetricsService.recordStage("tile_scoring.final_rank", elapsedMillis(substageStartedNanos), routeMode, geometryStrategy, "attempt");
+        return scoredTiles;
     }
 
     private void validateVibeAvailability(RouteJob job,
@@ -891,12 +918,20 @@ public class RoutePlanner {
     }
 
     private List<ScenicScoreTile> findTilesNearStart(RoadNode start, int ringSize, int resolution) {
+        return findTilesNearStartTimed(start, ringSize, resolution).tiles();
+    }
+
+    private TileLookupResult findTilesNearStartTimed(RoadNode start, int ringSize, int resolution) {
+        long h3StartedNanos = System.nanoTime();
         String centerCell = H3Utils.getH3Index(start.getLatitude(), start.getLongitude(), resolution);
         List<String> nearbyCells = H3Utils.getKRing(centerCell, ringSize);
+        long h3CellBuildMs = elapsedMillis(h3StartedNanos);
         if (nearbyCells.isEmpty()) {
-            return List.of();
+            return new TileLookupResult(List.of(), h3CellBuildMs, 0L, 0);
         }
-        return scenicTileLookupService.findByH3Indexes(nearbyCells);
+        long lookupStartedNanos = System.nanoTime();
+        List<ScenicScoreTile> tiles = scenicTileLookupService.findByH3Indexes(nearbyCells);
+        return new TileLookupResult(tiles, h3CellBuildMs, elapsedMillis(lookupStartedNanos), nearbyCells.size());
     }
 
     private int determineRingSize(int timeBudgetMinutes) {
@@ -2386,6 +2421,12 @@ public class RoutePlanner {
         QUIET_LOW_PRESSURE,
         CURVY_ELEVATION,
         BALANCED_VARIETY
+    }
+
+    private record TileLookupResult(List<ScenicScoreTile> tiles,
+                                    long h3CellBuildMs,
+                                    long lookupMs,
+                                    int cellCount) {
     }
 
     private record PreAnchorTileCandidate(ScenicScoreTile tile,
