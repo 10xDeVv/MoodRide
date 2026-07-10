@@ -12,6 +12,8 @@ import com.moodride.geo.H3Utils;
 import org.locationtech.jts.geom.Coordinate;
 import org.locationtech.jts.geom.GeometryFactory;
 import org.locationtech.jts.geom.LineString;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -30,6 +32,8 @@ import com.moodride.routeworker.repository.RouteWaypointRepository;
 @Service
 @Transactional
 public class RouteGenerationService {
+    private static final Logger logger = LoggerFactory.getLogger(RouteGenerationService.class);
+
 
     private static final List<String> ROUTE_OPTION_PROFILES = List.of(
         "most_scenic",
@@ -70,19 +74,28 @@ public class RouteGenerationService {
     }
     
     public RouteGenerationResult processRoute(RouteJob job) {
+        long processStartedNanos = System.nanoTime();
+        long stageStartedNanos = System.nanoTime();
         List<RouteCandidate> candidates = routePlanner.generateRouteOptions(job);
+        long planningMs = elapsedMillis(stageStartedNanos);
         if (candidates.isEmpty()) {
             throw new IllegalStateException("No route candidates generated for job " + job.getId());
         }
 
+        stageStartedNanos = System.nanoTime();
         RouteCandidate primaryCandidate = candidates.getFirst();
         job.setAlgorithmVersion(primaryCandidate.getAlgorithmVersion());
         job.setBeamCandidates(primaryCandidate.getBeamCandidates());
         jobRepository.save(job);
+        long jobMetadataMs = elapsedMillis(stageStartedNanos);
 
         Instant generatedAtBase = Instant.now();
         Route primaryRoute = null;
         List<RouteWaypoint> primaryWaypoints = List.of();
+        long routePersistMs = 0L;
+        long calibrationMs = 0L;
+        long waypointPersistMs = 0L;
+        int waypointCount = 0;
         for (int i = 0; i < candidates.size(); i++) {
             RouteCandidate candidate = candidates.get(i);
             Route route = new Route(job.getId(), job.getUserId(),
@@ -98,16 +111,25 @@ public class RouteGenerationService {
             route.setGeneratedAt(generatedAtBase.plusMillis(i));
             route.setExpiresAt(route.getGeneratedAt().plusSeconds(24 * 60 * 60));
 
+            stageStartedNanos = System.nanoTime();
             routeRepository.save(route);
-            recordDurationCalibration(job, candidate);
+            routePersistMs += elapsedMillis(stageStartedNanos);
 
+            stageStartedNanos = System.nanoTime();
+            recordDurationCalibration(job, candidate);
+            calibrationMs += elapsedMillis(stageStartedNanos);
+
+            stageStartedNanos = System.nanoTime();
             List<RouteWaypoint> waypoints = persistWaypoints(route, candidate.getWaypoints());
+            waypointPersistMs += elapsedMillis(stageStartedNanos);
+            waypointCount += waypoints.size();
             if (i == 0) {
                 primaryRoute = route;
                 primaryWaypoints = waypoints;
             }
         }
 
+        stageStartedNanos = System.nanoTime();
         List<RouteCompletionEvent.RouteWaypoint> eventWaypoints = primaryWaypoints.stream()
             .map(wp -> new RouteCompletionEvent.RouteWaypoint(
                 wp.getLatitude(),
@@ -116,11 +138,25 @@ public class RouteGenerationService {
                 wp.getDistanceToNext()
             ))
             .toList();
+        long eventMappingMs = elapsedMillis(stageStartedNanos);
 
         if (primaryRoute == null) {
             throw new IllegalStateException("No primary route persisted for job " + job.getId());
         }
 
+        logger.info(
+            "Route job {} persistence timings totalMs={} planningMs={} jobMetadataMs={} routePersistMs={} calibrationMs={} waypointPersistMs={} eventMappingMs={} candidates={} waypoints={}",
+            job.getId(),
+            elapsedMillis(processStartedNanos),
+            planningMs,
+            jobMetadataMs,
+            routePersistMs,
+            calibrationMs,
+            waypointPersistMs,
+            eventMappingMs,
+            candidates.size(),
+            waypointCount
+        );
         return new RouteGenerationResult(primaryRoute, eventWaypoints);
     }
 
@@ -139,10 +175,9 @@ public class RouteGenerationService {
                 instruction,
                 distanceToNext
             );
-            waypointRepository.save(wp);
             waypoints.add(wp);
         }
-        return waypoints;
+        return waypointRepository.saveAll(waypoints);
     }
 
     private String serializeScoreBreakdown(Map<String, Double> scoreBreakdown) {
@@ -217,6 +252,10 @@ public class RouteGenerationService {
         return GEOMETRY_STRATEGY_NAMES[index];
     }
     
+    private long elapsedMillis(long startedNanos) {
+        return Math.max(0L, (System.nanoTime() - startedNanos) / 1_000_000L);
+    }
+
     private LineString buildLineString(List<RoadNode> nodes) {
         if (nodes == null || nodes.isEmpty()) {
             return geometryFactory.createLineString();
