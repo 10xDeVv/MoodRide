@@ -3,20 +3,25 @@ package com.moodride.routeworker.service;
 import com.moodride.datamodels.ScenicScoreTile;
 import com.moodride.routeworker.cache.CacheKeySchema;
 import com.moodride.routeworker.cache.CacheNames;
-import com.moodride.routeworker.repository.ScenicScoreTileRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.cache.Cache;
 import org.springframework.cache.CacheManager;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.core.RowMapper;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Timestamp;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
 
 @Service
 public class ScenicTileLookupService {
@@ -24,13 +29,15 @@ public class ScenicTileLookupService {
     private static final Logger logger = LoggerFactory.getLogger(ScenicTileLookupService.class);
     private static final int MAX_LOCAL_TILES = 25_000;
 
-    private final ScenicScoreTileRepository scenicScoreTileRepository;
+    private static final RowMapper<ScenicScoreTile> SCENIC_TILE_ROW_MAPPER = ScenicTileLookupService::mapScenicTile;
+
+    private final JdbcTemplate jdbcTemplate;
     private final CacheManager cacheManager;
     private final Map<String, ScenicScoreTile> localTiles = new LinkedHashMap<>(1024, 0.75f, true);
 
-    public ScenicTileLookupService(ScenicScoreTileRepository scenicScoreTileRepository,
+    public ScenicTileLookupService(JdbcTemplate jdbcTemplate,
                                    CacheManager cacheManager) {
-        this.scenicScoreTileRepository = scenicScoreTileRepository;
+        this.jdbcTemplate = jdbcTemplate;
         this.cacheManager = cacheManager;
     }
 
@@ -68,7 +75,7 @@ public class ScenicTileLookupService {
         }
 
         if (!cacheMisses.isEmpty()) {
-            List<ScenicScoreTile> fetchedTiles = scenicScoreTileRepository.findByH3IndexIn(cacheMisses);
+            List<ScenicScoreTile> fetchedTiles = fetchTiles(cacheMisses);
             for (ScenicScoreTile tile : fetchedTiles) {
                 if (tile == null || tile.getH3Index() == null) {
                     continue;
@@ -164,6 +171,86 @@ public class ScenicTileLookupService {
         synchronized (localTiles) {
             localTiles.remove(h3Index);
         }
+    }
+
+    private List<ScenicScoreTile> fetchTiles(List<String> h3Indexes) {
+        String placeholders = h3Indexes.stream()
+            .map(ignored -> "?")
+            .collect(Collectors.joining(","));
+        String sql = """
+            SELECT
+                h3_index,
+                scenic_score,
+                water_proximity,
+                elevation_variance,
+                natural_land_use,
+                road_density,
+                traffic_signal_score,
+                poi_density,
+                visual_complexity,
+                water_score,
+                green_score,
+                elevation_score,
+                solitude_score,
+                curve_score,
+                poi_score,
+                park_score,
+                overture_poi_score,
+                building_density_score,
+                darkness_score,
+                urban_penalty_score,
+                road_stress_score,
+                water_visibility_score,
+                water_crossing_score,
+                coastal_road_score,
+                tree_canopy_score,
+                scenic_poi_score,
+                viewpoint_score,
+                bridge_coastal_score,
+                last_scored,
+                scoring_version
+            FROM scenic_score_tiles
+            WHERE h3_index IN (%s)
+            """.formatted(placeholders);
+        return jdbcTemplate.query(sql, SCENIC_TILE_ROW_MAPPER, h3Indexes.toArray());
+    }
+
+    private static ScenicScoreTile mapScenicTile(ResultSet rs, int rowNum) throws SQLException {
+        ScenicScoreTile tile = new ScenicScoreTile();
+        tile.setH3Index(rs.getString("h3_index"));
+        tile.setScenicScore(rs.getDouble("scenic_score"));
+        tile.setWaterProximity(rs.getDouble("water_proximity"));
+        tile.setElevationVariance(rs.getDouble("elevation_variance"));
+        tile.setNaturalLandUse(rs.getDouble("natural_land_use"));
+        tile.setRoadDensity(rs.getDouble("road_density"));
+        tile.setTrafficSignalScore(rs.getDouble("traffic_signal_score"));
+        tile.setPoiDensity(rs.getDouble("poi_density"));
+        tile.setVisualComplexity(rs.getDouble("visual_complexity"));
+        tile.setWaterScore(rs.getDouble("water_score"));
+        tile.setGreenScore(rs.getDouble("green_score"));
+        tile.setElevationScore(rs.getDouble("elevation_score"));
+        tile.setSolitudeScore(rs.getDouble("solitude_score"));
+        tile.setCurveScore(rs.getDouble("curve_score"));
+        tile.setPoiScore(rs.getDouble("poi_score"));
+        tile.setParkScore(rs.getDouble("park_score"));
+        tile.setOverturePoiScore(rs.getDouble("overture_poi_score"));
+        tile.setBuildingDensityScore(rs.getDouble("building_density_score"));
+        tile.setDarknessScore(rs.getDouble("darkness_score"));
+        tile.setUrbanPenaltyScore(rs.getDouble("urban_penalty_score"));
+        tile.setRoadStressScore(rs.getDouble("road_stress_score"));
+        tile.setWaterVisibilityScore(rs.getDouble("water_visibility_score"));
+        tile.setWaterCrossingScore(rs.getDouble("water_crossing_score"));
+        tile.setCoastalRoadScore(rs.getDouble("coastal_road_score"));
+        tile.setTreeCanopyScore(rs.getDouble("tree_canopy_score"));
+        tile.setScenicPoiScore(rs.getDouble("scenic_poi_score"));
+        tile.setViewpointScore(rs.getDouble("viewpoint_score"));
+        tile.setBridgeCoastalScore(rs.getDouble("bridge_coastal_score"));
+        Timestamp lastScored = rs.getTimestamp("last_scored");
+        if (lastScored != null) {
+            tile.setLastScored(lastScored.toInstant());
+        }
+        tile.setScoringVersion(rs.getString("scoring_version"));
+        return tile;
     }
 
     private List<String> normalizeIndexes(Collection<String> h3Indexes) {
