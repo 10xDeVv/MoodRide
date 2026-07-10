@@ -180,7 +180,7 @@ public final class VibeCatalog {
         ));
         add(profiles, profile(
             "adventure", "Adventure", VibeCategory.DRIVING_FEEL,
-            weights(0.30, 0.55, 0.90, 0.65, 0.95, 0.20),
+            weights(0.30, 0.55, 0.90, 0.40, 0.95, 0.20),
             List.of("curves", "elevation"),
             List.of(),
             true, true, 0.34, 0.27,

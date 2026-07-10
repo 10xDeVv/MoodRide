@@ -53,7 +53,7 @@ const VIBE_PREFERENCE_DEFAULTS: Record<string, Record<string, number>> = {
   riverside:     { water: 0.85, greenery: 0.75, elevation: 0.35, solitude: 0.65, curves: 0.45, poi: 0.25 },
   nature_escape: { water: 0.45, greenery: 0.9, elevation: 0.55, solitude: 0.9, curves: 0.45, poi: 0.15 },
   open_roads:    { water: 0.25, greenery: 0.45, elevation: 0.35, solitude: 0.85, curves: 0.35, poi: 0.1 },
-  adventure:     { water: 0.4, greenery: 0.55, elevation: 0.9, solitude: 0.7, curves: 0.9, poi: 0.25 },
+  adventure:     { water: 0.4, greenery: 0.55, elevation: 0.9, solitude: 0.4, curves: 0.9, poi: 0.25 },
   relaxing:      { water: 0.35, greenery: 0.7, elevation: 0.25, solitude: 0.95, curves: 0.25, poi: 0.1 },
   winding_roads: { water: 0.35, greenery: 0.45, elevation: 0.65, solitude: 0.55, curves: 0.95, poi: 0.15 },
 };
