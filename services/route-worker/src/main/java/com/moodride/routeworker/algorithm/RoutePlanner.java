@@ -1,6 +1,7 @@
 package com.moodride.routeworker.algorithm;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.uber.h3core.util.LatLng;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.moodride.datamodels.RouteJob;
 import com.moodride.datamodels.RouteMode;
@@ -702,12 +703,8 @@ public class RoutePlanner {
         );
         long substageStartedNanos = System.nanoTime();
         List<PreAnchorTileCandidate> preselectedTiles = nearbyTiles.stream()
-            .filter(tile -> tile.getGeometry() != null && !tile.getGeometry().isEmpty())
             .map(tile -> {
-                RoadNode tileCenter = new RoadNode(
-                    tile.getGeometry().getCentroid().getY(),
-                    tile.getGeometry().getCentroid().getX()
-                );
+                RoadNode tileCenter = tileCenter(tile, start);
                 double distanceKm = distanceKm(start, tileCenter);
                 double score = scoreTile(tile, preferences);
                 double selectionScore = tileSelectionScore(tile, vibeProfile, score, distanceKm, targetRadiusKm);
@@ -2388,6 +2385,38 @@ public class RoutePlanner {
         }
 
         return null;
+    }
+
+    private RoadNode tileCenter(ScenicScoreTile tile, RoadNode fallback) {
+        if (tile == null) {
+            return fallback;
+        }
+        if (isValidH3Index(tile.getH3Index())) {
+            try {
+                LatLng center = H3Utils.getCellCenter(tile.getH3Index());
+                return new RoadNode(center.lat, center.lng);
+            } catch (RuntimeException ex) {
+                logger.debug("Failed to resolve H3 center for scenic tile {}", tile.getH3Index(), ex);
+            }
+        }
+        if (tile.getGeometry() != null && !tile.getGeometry().isEmpty()) {
+            return new RoadNode(
+                tile.getGeometry().getCentroid().getY(),
+                tile.getGeometry().getCentroid().getX()
+            );
+        }
+        return fallback;
+    }
+
+    private boolean isValidH3Index(String h3Index) {
+        if (h3Index == null || h3Index.isBlank()) {
+            return false;
+        }
+        try {
+            return H3Utils.isValidH3Index(h3Index);
+        } catch (RuntimeException ex) {
+            return false;
+        }
     }
 
     private String normalizeVibe(String vibe) {
