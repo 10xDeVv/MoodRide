@@ -411,6 +411,38 @@ class RouteServiceTest {
     }
 
     @Test
+    void getRouteJobStatusExposesPrimaryRouteBeforeCompletion() {
+        UUID jobId = UUID.randomUUID();
+        UUID userId = UUID.randomUUID();
+        UUID routeId = UUID.randomUUID();
+
+        RouteJob job = new RouteJob(userId, 45.5152, -122.6784, 90, "coastal");
+        job.setId(jobId);
+        job.markStarted();
+        job.markPrimaryReady(routeId);
+
+        Route route = new Route();
+        route.setId(routeId);
+        route.setJobId(jobId);
+        route.setRouteProfile("most_scenic");
+        route.setScenicScore(0.82);
+        route.setTotalDistanceKm(52.0);
+        route.setEstimatedDurationMinutes(89);
+        route.setGeneratedAt(Instant.parse("2026-04-02T14:30:05Z"));
+
+        lenient().when(jobRepository.findById(jobId)).thenReturn(Optional.of(job));
+        lenient().when(routeRepository.findByJobIdOrderByGeneratedAtAsc(jobId)).thenReturn(List.of(route));
+
+        RouteJobStatusResponse response = routeService.getRouteJobStatus(jobId);
+
+        assertThat(response.status()).isEqualTo("PRIMARY_READY");
+        assertThat(response.routeId()).isEqualTo(routeId);
+        assertThat(response.routeOptions()).hasSize(1);
+        assertThat(response.completedAt()).isNull();
+        assertThat(response.estimatedRemainingSeconds()).isEqualTo(3);
+    }
+
+    @Test
     void getRouteJobStatusIncludesUpToThreeRouteOptions() {
         UUID jobId = UUID.randomUUID();
         UUID userId = UUID.randomUUID();

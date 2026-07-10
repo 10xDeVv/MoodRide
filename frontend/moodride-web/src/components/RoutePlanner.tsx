@@ -644,8 +644,8 @@ export function RoutePlanner() {
     );
   }, []);
 
-  const resolveRouteDetail = useCallback(async (routeId: string): Promise<RouteDetailResponse> => {
-    if (routeDetailsRef.current[routeId]) return routeDetailsRef.current[routeId];
+  const resolveRouteDetail = useCallback(async (routeId: string, forceRefresh = false): Promise<RouteDetailResponse> => {
+    if (!forceRefresh && routeDetailsRef.current[routeId]) return routeDetailsRef.current[routeId];
     const detail = await getRoute(routeId);
     routeDetailsRef.current[routeId] = detail;
     return detail;
@@ -711,6 +711,7 @@ export function RoutePlanner() {
       setPhase("tracking");
 
       let resolved = false;
+      let primaryRendered = false;
 
       const stopWs = connectJobChannel(
         submission.jobId,
@@ -718,20 +719,25 @@ export function RoutePlanner() {
         async (event) => {
           if (resolved) return;
           if (event.routeId) {
-            resolved = true;
-            stopWs();
-            clearInterval(stepTimer);
-            clearInterval(pollTimerRef.current!);
-            setProgressStep(LOADING_STEPS.length);
+            const normalizedEventStatus = event.status?.toLowerCase();
+            const isPrimaryReady = normalizedEventStatus === "primary_ready";
+            if (!isPrimaryReady) {
+              resolved = true;
+              stopWs();
+              clearInterval(stepTimer);
+              clearInterval(pollTimerRef.current!);
+              setProgressStep(LOADING_STEPS.length);
+            }
             try {
-              const detail = await resolveRouteDetail(event.routeId);
+              const detail = await resolveRouteDetail(event.routeId, !isPrimaryReady);
               setRoute(detail);
               prefetchRouteDetails(detail);
+              if (isPrimaryReady) primaryRendered = true;
               setSelectedOptionId(event.routeId);
               setPhase("completed");
               const selectedOption = getSelectedRouteOption(detail, event.routeId);
               trackAnalyticsEvent({
-                eventName: "route_generation_completed",
+                eventName: isPrimaryReady ? "route_generation_primary_ready" : "route_generation_completed",
                 jobId: submission.jobId,
                 routeId: event.routeId,
                 routeProfile: selectedOption?.profile,
@@ -740,14 +746,14 @@ export function RoutePlanner() {
                 timeBudgetMinutes: timeBudget,
                 regionKey: coarseAnalyticsRegionKey(lat, lng),
                 routeCount: detail.routeOptions?.length ?? 1,
-                status: "completed",
+                status: isPrimaryReady ? "primary_ready" : "completed",
                 durationMs: generationStartedAtRef.current ? Date.now() - generationStartedAtRef.current : null,
                 scenicScore: selectedOption?.scenicScore ?? detail.scenicScore
               });
             } catch (e) {
               const msg = e instanceof Error ? e.message : "Failed to load route detail.";
               setStatusMessage(msg);
-              setPhase("failed");
+              if (!isPrimaryReady) setPhase("failed");
             }
           }
         },
@@ -763,32 +769,39 @@ export function RoutePlanner() {
         try {
           const status = await getJobStatus(submission.jobId);
           const normalizedStatus = status.status?.toLowerCase();
-          if (normalizedStatus === "completed") {
-            clearInterval(pollTimer);
-            if (!resolved) {
-              resolved = true;
-              stopWs();
-              clearInterval(stepTimer);
-              setProgressStep(LOADING_STEPS.length);
-              const routeId = status.routeId ?? status.routeOptions?.[0]?.routeId;
-              if (routeId) {
-                const detail = await resolveRouteDetail(routeId);
+          const polledRouteId = status.routeId ?? status.routeOptions?.[0]?.routeId;
+          const hasPrimaryRoute = Boolean(polledRouteId);
+          if (normalizedStatus === "completed" || normalizedStatus === "primary_ready" || (normalizedStatus === "processing" && hasPrimaryRoute)) {
+            const isPrimaryReady = normalizedStatus !== "completed";
+            if (!isPrimaryReady) {
+              clearInterval(pollTimer);
+            }
+            if ((!resolved || isPrimaryReady) && (!isPrimaryReady || !primaryRendered)) {
+              if (!isPrimaryReady) {
+                resolved = true;
+                stopWs();
+                clearInterval(stepTimer);
+                setProgressStep(LOADING_STEPS.length);
+              }
+              if (polledRouteId) {
+                const detail = await resolveRouteDetail(polledRouteId, !isPrimaryReady);
                 setRoute(detail);
-                setSelectedOptionId(routeId);
+                setSelectedOptionId(polledRouteId);
                 prefetchRouteDetails(detail);
                 setPhase("completed");
-                const selectedOption = getSelectedRouteOption(detail, routeId);
+                if (isPrimaryReady) primaryRendered = true;
+                const selectedOption = getSelectedRouteOption(detail, polledRouteId);
                 trackAnalyticsEvent({
-                  eventName: "route_generation_completed",
+                  eventName: isPrimaryReady ? "route_generation_primary_ready" : "route_generation_completed",
                   jobId: submission.jobId,
-                  routeId,
+                  routeId: polledRouteId,
                   routeProfile: selectedOption?.profile,
                   routeMode,
                   vibes: detail.vibes?.length ? detail.vibes : vibes,
                   timeBudgetMinutes: timeBudget,
                   regionKey: coarseAnalyticsRegionKey(lat, lng),
                   routeCount: detail.routeOptions?.length ?? 1,
-                  status: "completed",
+                  status: isPrimaryReady ? "primary_ready" : "completed",
                   durationMs: generationStartedAtRef.current ? Date.now() - generationStartedAtRef.current : null,
                   scenicScore: selectedOption?.scenicScore ?? detail.scenicScore
                 });

@@ -13,7 +13,7 @@ public record RouteCompletionEvent(
     UUID jobId,
     UUID routeId,
     UUID userId,
-    String status,  // "COMPLETED", "SUCCESS", "FAILED", "TIMEOUT"
+    String status,  // "PRIMARY_READY", "COMPLETED", "SUCCESS", "FAILED", "TIMEOUT"
     List<RouteWaypoint> waypoints,
     double totalDistanceKm,
     int estimatedDurationMinutes,
@@ -29,7 +29,9 @@ public record RouteCompletionEvent(
         }
 
         String normalizedStatus = status.trim().toUpperCase(Locale.ROOT);
-        return "COMPLETED".equals(normalizedStatus) || "SUCCESS".equals(normalizedStatus);
+        return "PRIMARY_READY".equals(normalizedStatus)
+            || "COMPLETED".equals(normalizedStatus)
+            || "SUCCESS".equals(normalizedStatus);
     }
 
     /**

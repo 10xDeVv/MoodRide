@@ -24,16 +24,31 @@ public class RouteCompletionProducer {
         this.objectMapper = objectMapper;
     }
     
+    public void publishPrimaryReady(UUID jobId, UUID userId, double distanceKm,
+                                    UUID routeId,
+                                    int durationMinutes, double scenicScore,
+                                    List<RouteCompletionEvent.RouteWaypoint> waypoints) {
+        publishRouteEvent(jobId, userId, distanceKm, routeId, durationMinutes, scenicScore, waypoints, "PRIMARY_READY");
+    }
+
     public void publishCompletion(UUID jobId, UUID userId, double distanceKm, 
                                    UUID routeId,
                                    int durationMinutes, double scenicScore,
                                    List<RouteCompletionEvent.RouteWaypoint> waypoints) {
+        publishRouteEvent(jobId, userId, distanceKm, routeId, durationMinutes, scenicScore, waypoints, "COMPLETED");
+    }
+
+    private void publishRouteEvent(UUID jobId, UUID userId, double distanceKm,
+                                   UUID routeId,
+                                   int durationMinutes, double scenicScore,
+                                   List<RouteCompletionEvent.RouteWaypoint> waypoints,
+                                   String status) {
         try {
             RouteCompletionEvent event = new RouteCompletionEvent(
                 jobId,
                 routeId,
                 userId,
-                "COMPLETED",
+                status,
                 waypoints,
                 distanceKm,
                 durationMinutes,
@@ -41,10 +56,10 @@ public class RouteCompletionProducer {
                 null,
                 Instant.now()
             );
-            
+
             String json = objectMapper.writeValueAsString(event);
             kafkaTemplate.send(RouteCompletionEvent.TOPIC, jobId.toString(), json);
-            logger.info("Published route completion event for job {}", jobId);
+            logger.info("Published route {} event for job {}", status.toLowerCase(), jobId);
         } catch (Exception e) {
             logger.error("Error publishing route completion for job {}: {}", jobId, e.getMessage(), e);
         }

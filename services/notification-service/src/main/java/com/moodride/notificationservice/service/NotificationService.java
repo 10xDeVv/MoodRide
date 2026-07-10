@@ -34,6 +34,7 @@ public class NotificationService {
             RouteReadyNotification payload = new RouteReadyNotification(
                 event.jobId(),
                 event.routeId(),
+                event.status(),
                 event.scenicScore(),
                 Instant.now().toString()
             );
@@ -80,6 +81,7 @@ public class NotificationService {
     public record RouteReadyNotification(
         UUID jobId,
         UUID routeId,
+        String status,
         double scenicScore,
         String timestamp
     ) {}

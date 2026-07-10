@@ -19,6 +19,13 @@ class RouteCompletionEventTest {
     }
 
     @Test
+    void successReturnsTrueForPrimaryReadyStatus() {
+        RouteCompletionEvent event = eventWithStatus("PRIMARY_READY");
+
+        assertTrue(event.success());
+    }
+
+    @Test
     void successReturnsTrueForSuccessAliasIgnoringCaseAndWhitespace() {
         RouteCompletionEvent event = eventWithStatus(" success ");
 

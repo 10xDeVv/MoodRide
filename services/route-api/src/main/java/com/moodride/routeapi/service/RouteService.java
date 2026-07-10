@@ -228,7 +228,9 @@ public class RouteService {
         }
 
         String routeUrl = routeId == null ? null : "/routes/route/" + routeId;
-        Integer estimatedRemaining = job.getStatus() == RouteJob.JobStatus.QUEUED || job.getStatus() == RouteJob.JobStatus.PROCESSING
+        Integer estimatedRemaining = job.getStatus() == RouteJob.JobStatus.QUEUED
+                || job.getStatus() == RouteJob.JobStatus.PROCESSING
+                || job.getStatus() == RouteJob.JobStatus.PRIMARY_READY
                 ? 3
                 : null;
         RouteFailureGuidance failureGuidance = routeFailureGuidanceService.buildFailureGuidance(job);

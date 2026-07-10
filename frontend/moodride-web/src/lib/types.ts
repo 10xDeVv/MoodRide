@@ -153,6 +153,7 @@ export interface ScenicRegionsResponse {
 export interface JobSocketEvent {
   jobId: string;
   routeId?: string;
+  status?: string;
   scenicScore?: number;
   reason?: string;
   retryable?: boolean;

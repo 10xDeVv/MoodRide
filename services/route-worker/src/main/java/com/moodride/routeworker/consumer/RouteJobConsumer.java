@@ -16,6 +16,7 @@ import org.springframework.stereotype.Service;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicReference;
 
 @Service
 public class RouteJobConsumer {
@@ -83,9 +84,29 @@ public class RouteJobConsumer {
             logger.info("Route job {} started queueMs={} retryCount={}", jobId, queueMs, retryCount);
             jobRepository.save(job);
             
-            // Process and persist route before publishing completion
+            AtomicReference<RouteGenerationService.RouteGenerationResult> primaryReadyResult = new AtomicReference<>();
             long processingStartedNanos = System.nanoTime();
-            RouteGenerationService.RouteGenerationResult result = routeGenerationService.processRoute(job);
+            RouteGenerationService.RouteGenerationResult result = routeGenerationService.processRoute(job, primary -> {
+                primaryReadyResult.set(primary);
+                job.markPrimaryReady(primary.route().getId());
+                jobRepository.save(job);
+                logger.info(
+                    "Route job {} primary ready routeId={} optionsPrimaryDistanceKm={} optionsPrimaryDurationMin={}",
+                    jobId,
+                    primary.route().getId(),
+                    primary.route().getTotalDistanceKm(),
+                    primary.route().getEstimatedDurationMinutes()
+                );
+                completionProducer.publishPrimaryReady(
+                    job.getId(),
+                    job.getUserId(),
+                    primary.route().getTotalDistanceKm(),
+                    primary.route().getId(),
+                    primary.route().getEstimatedDurationMinutes(),
+                    primary.route().getScenicScore(),
+                    primary.waypoints()
+                );
+            });
             long processingMs = Duration.ofNanos(System.nanoTime() - processingStartedNanos).toMillis();
             job.markCompleted(result.route().getId());
             jobRepository.save(job);

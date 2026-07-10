@@ -99,6 +99,16 @@ public class RouteJob {
     }
 
     /**
+     * Marks the job as having a primary route ready while alternatives continue.
+     */
+    public void markPrimaryReady(UUID routeId) {
+        this.status = JobStatus.PRIMARY_READY;
+        this.routeId = routeId;
+        this.failureReason = null;
+    }
+
+
+    /**
      * Marks the job as completed successfully.
      */
     public void markCompleted(UUID routeId) {
@@ -138,11 +148,12 @@ public class RouteJob {
 
     // Job status enumeration
     public enum JobStatus {
-        QUEUED,      // Job received but not started
-        PROCESSING,  // Route generation in progress
-        COMPLETED,   // Route generated successfully
-        FAILED,      // Route generation failed
-        TIMEOUT      // Job exceeded time limit
+        QUEUED,        // Job received but not started
+        PROCESSING,    // Route generation in progress
+        PRIMARY_READY, // Primary route is visible while alternatives continue
+        COMPLETED,     // Route options generated successfully
+        FAILED,        // Route generation failed
+        TIMEOUT        // Job exceeded time limit
     }
 
     // Getters and setters

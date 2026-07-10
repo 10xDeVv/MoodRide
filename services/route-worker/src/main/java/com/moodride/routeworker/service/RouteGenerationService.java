@@ -4,6 +4,7 @@ import java.util.ArrayList;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Consumer;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -15,7 +16,6 @@ import org.locationtech.jts.geom.LineString;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
 
 import com.moodride.datamodels.Route;
 import com.moodride.datamodels.RouteJob;
@@ -30,7 +30,6 @@ import com.moodride.routeworker.repository.RouteRepository;
 import com.moodride.routeworker.repository.RouteWaypointRepository;
 
 @Service
-@Transactional
 public class RouteGenerationService {
     private static final Logger logger = LoggerFactory.getLogger(RouteGenerationService.class);
     private static final int MAX_PERSISTED_WAYPOINTS_PER_ROUTE = 80;
@@ -75,6 +74,10 @@ public class RouteGenerationService {
     }
     
     public RouteGenerationResult processRoute(RouteJob job) {
+        return processRoute(job, null);
+    }
+
+    public RouteGenerationResult processRoute(RouteJob job, Consumer<RouteGenerationResult> primaryReadyConsumer) {
         long processStartedNanos = System.nanoTime();
         long stageStartedNanos = System.nanoTime();
         List<RouteCandidate> candidates = routePlanner.generateRouteOptions(job);
@@ -91,58 +94,30 @@ public class RouteGenerationService {
         long jobMetadataMs = elapsedMillis(stageStartedNanos);
 
         Instant generatedAtBase = Instant.now();
-        Route primaryRoute = null;
-        List<RouteWaypoint> primaryWaypoints = List.of();
         long routePersistMs = 0L;
         long calibrationMs = 0L;
         long waypointPersistMs = 0L;
         int waypointCount = 0;
-        for (int i = 0; i < candidates.size(); i++) {
-            RouteCandidate candidate = candidates.get(i);
-            Route route = new Route(job.getId(), job.getUserId(),
-                buildLineString(candidate.getWaypoints()), job.getVibe());
-            route.setRouteMode(job.getRouteMode());
-            if (i < ROUTE_OPTION_PROFILES.size()) {
-                route.setRouteProfile(ROUTE_OPTION_PROFILES.get(i));
-            }
-            route.setTotalDistanceKm(candidate.getTotalDistanceKm());
-            route.setEstimatedDurationMinutes(candidate.getEstimatedMinutes());
-            route.setScenicScore(candidate.getTotalScenicScore());
-            route.setScoreBreakdownJson(serializeScoreBreakdown(candidate.getScoreBreakdown()));
-            route.setGeneratedAt(generatedAtBase.plusMillis(i));
-            route.setExpiresAt(route.getGeneratedAt().plusSeconds(24 * 60 * 60));
-
-            stageStartedNanos = System.nanoTime();
-            routeRepository.save(route);
-            routePersistMs += elapsedMillis(stageStartedNanos);
-
-            stageStartedNanos = System.nanoTime();
-            recordDurationCalibration(job, candidate);
-            calibrationMs += elapsedMillis(stageStartedNanos);
-
-            stageStartedNanos = System.nanoTime();
-            List<RouteWaypoint> waypoints = persistWaypoints(route, persistedWaypointSamples(candidate.getWaypoints()));
-            waypointPersistMs += elapsedMillis(stageStartedNanos);
-            waypointCount += waypoints.size();
-            if (i == 0) {
-                primaryRoute = route;
-                primaryWaypoints = waypoints;
-            }
-        }
 
         stageStartedNanos = System.nanoTime();
-        List<RouteCompletionEvent.RouteWaypoint> eventWaypoints = primaryWaypoints.stream()
-            .map(wp -> new RouteCompletionEvent.RouteWaypoint(
-                wp.getLatitude(),
-                wp.getLongitude(),
-                wp.getInstruction(),
-                wp.getDistanceToNext()
-            ))
-            .toList();
-        long eventMappingMs = elapsedMillis(stageStartedNanos);
+        PersistedRoute primary = persistRouteCandidate(job, primaryCandidate, ROUTE_OPTION_PROFILES.getFirst(), generatedAtBase);
+        routePersistMs += primary.routePersistMs();
+        calibrationMs += primary.calibrationMs();
+        waypointPersistMs += primary.waypointPersistMs();
+        waypointCount += primary.waypoints().size();
+        RouteGenerationResult primaryResult = new RouteGenerationResult(primary.route(), eventWaypoints(primary.waypoints()));
+        if (primaryReadyConsumer != null) {
+            primaryReadyConsumer.accept(primaryResult);
+        }
 
-        if (primaryRoute == null) {
-            throw new IllegalStateException("No primary route persisted for job " + job.getId());
+        for (int i = 1; i < candidates.size(); i++) {
+            RouteCandidate candidate = candidates.get(i);
+            String profile = i < ROUTE_OPTION_PROFILES.size() ? ROUTE_OPTION_PROFILES.get(i) : null;
+            PersistedRoute persisted = persistRouteCandidate(job, candidate, profile, generatedAtBase.plusMillis(i));
+            routePersistMs += persisted.routePersistMs();
+            calibrationMs += persisted.calibrationMs();
+            waypointPersistMs += persisted.waypointPersistMs();
+            waypointCount += persisted.waypoints().size();
         }
 
         logger.info(
@@ -154,11 +129,49 @@ public class RouteGenerationService {
             routePersistMs,
             calibrationMs,
             waypointPersistMs,
-            eventMappingMs,
+            0L,
             candidates.size(),
             waypointCount
         );
-        return new RouteGenerationResult(primaryRoute, eventWaypoints);
+        return primaryResult;
+    }
+
+    private PersistedRoute persistRouteCandidate(RouteJob job, RouteCandidate candidate, String profile, Instant generatedAt) {
+        Route route = new Route(job.getId(), job.getUserId(),
+            buildLineString(candidate.getWaypoints()), job.getVibe());
+        route.setRouteMode(job.getRouteMode());
+        route.setRouteProfile(profile);
+        route.setTotalDistanceKm(candidate.getTotalDistanceKm());
+        route.setEstimatedDurationMinutes(candidate.getEstimatedMinutes());
+        route.setScenicScore(candidate.getTotalScenicScore());
+        route.setScoreBreakdownJson(serializeScoreBreakdown(candidate.getScoreBreakdown()));
+        route.setGeneratedAt(generatedAt);
+        route.setExpiresAt(route.getGeneratedAt().plusSeconds(24 * 60 * 60));
+
+        long stageStartedNanos = System.nanoTime();
+        route = routeRepository.save(route);
+        long routePersistMs = elapsedMillis(stageStartedNanos);
+
+        stageStartedNanos = System.nanoTime();
+        recordDurationCalibration(job, candidate);
+        long calibrationMs = elapsedMillis(stageStartedNanos);
+
+        stageStartedNanos = System.nanoTime();
+        List<RouteWaypoint> waypoints = persistWaypoints(route, persistedWaypointSamples(candidate.getWaypoints()));
+        long waypointPersistMs = elapsedMillis(stageStartedNanos);
+
+        return new PersistedRoute(route, waypoints, routePersistMs, calibrationMs, waypointPersistMs);
+    }
+
+    private List<RouteCompletionEvent.RouteWaypoint> eventWaypoints(List<RouteWaypoint> waypoints) {
+        return waypoints.stream()
+            .map(wp -> new RouteCompletionEvent.RouteWaypoint(
+                wp.getLatitude(),
+                wp.getLongitude(),
+                wp.getInstruction(),
+                wp.getDistanceToNext()
+            ))
+            .toList();
     }
 
     private List<RoadNode> persistedWaypointSamples(List<RoadNode> nodes) {
@@ -306,6 +319,13 @@ public class RouteGenerationService {
                 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
         double c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
         return earthRadiusKm * c;
+    }
+
+    private record PersistedRoute(Route route,
+                                  List<RouteWaypoint> waypoints,
+                                  long routePersistMs,
+                                  long calibrationMs,
+                                  long waypointPersistMs) {
     }
 
     public record RouteGenerationResult(Route route, List<RouteCompletionEvent.RouteWaypoint> waypoints) {
