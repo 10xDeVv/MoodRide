@@ -31,11 +31,11 @@ public class CacheWarmupScheduler {
             return;
         }
         CacheWarmupService.WarmupReport report = warmupService.warmAll(limit);
-        logger.info("Cache warmup complete scenicTiles={} segmentMetadata={} regionalPopularity={} routeResults={}",
+        logger.info("Cache warmup complete scenicTiles={} segmentMetadata={} regionalPopularity={} routeDetailsV2={}",
                 report.scenicTiles(),
                 report.segmentMetadata(),
                 report.regionalPopularity(),
-                report.routeResults());
+                report.routeDetailsV2());
     }
 }
 

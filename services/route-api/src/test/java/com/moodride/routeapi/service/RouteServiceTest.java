@@ -1,6 +1,8 @@
 package com.moodride.routeapi.service;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.moodride.routeapi.cache.CacheKeySchema;
+import com.moodride.routeapi.cache.CacheNames;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.moodride.datamodels.Route;
 import com.moodride.datamodels.RouteJob;
@@ -19,21 +21,46 @@ import com.moodride.routeapi.repository.RouteRepository;
 import com.moodride.routeapi.repository.RouteWeightCalibrationRepository;
 import com.moodride.routeapi.repository.ScenicScoreTileRepository;
 import org.junit.jupiter.api.BeforeEach;
+import org.springframework.aop.framework.ProxyFactory;
+import org.springframework.cache.Cache;
+import org.springframework.cache.annotation.AnnotationCacheOperationSource;
+import org.springframework.cache.concurrent.ConcurrentMapCacheManager;
+import org.springframework.cache.interceptor.CacheInterceptor;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.kafka.core.KafkaTemplate;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
+import org.springframework.transaction.TransactionStatus;
+import org.springframework.transaction.annotation.AnnotationTransactionAttributeSource;
+import org.springframework.transaction.interceptor.TransactionInterceptor;
+import org.springframework.transaction.support.SimpleTransactionStatus;
+import org.springframework.transaction.support.AbstractPlatformTransactionManager;
+import org.springframework.transaction.support.DefaultTransactionStatus;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.locationtech.jts.geom.Coordinate;
 import org.locationtech.jts.geom.GeometryFactory;
 import org.locationtech.jts.geom.LineString;
 
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -41,8 +68,15 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyCollection;
 import static org.mockito.ArgumentMatchers.anyDouble;
 import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.lenient;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.when;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 
 @ExtendWith(MockitoExtension.class)
 class RouteServiceTest {
@@ -62,19 +96,15 @@ class RouteServiceTest {
     @Mock
     private ScenicScoreTileRepository scenicScoreTileRepository;
 
+    @Mock
+    private RouteJobDispatchService dispatchService;
+
+
     private RouteService routeService;
 
     @BeforeEach
     void setUp() {
-        routeService = new RouteService(
-            jobRepository,
-            routeRepository,
-            calibrationRepository,
-            scenicScoreTileRepository,
-            new RouteFailureGuidanceService(new ObjectMapper()),
-            kafkaTemplate,
-            new ObjectMapper()
-        );
+        routeService = newRouteService();
 
         lenient().when(jobRepository.save(any(RouteJob.class))).thenAnswer(invocation -> {
             RouteJob job = invocation.getArgument(0);
@@ -88,6 +118,8 @@ class RouteServiceTest {
         lenient().when(scenicScoreTileRepository.findByH3IndexIn(anyCollection())).thenReturn(List.of());
         lenient().when(scenicScoreTileRepository.findScenicTilesNearPoint(anyDouble(), anyDouble(), anyDouble(), anyInt()))
             .thenReturn(List.of());
+        lenient().when(kafkaTemplate.send(anyString(), anyString(), anyString()))
+            .thenReturn(CompletableFuture.completedFuture(null));
     }
 
     @Test
@@ -114,6 +146,77 @@ class RouteServiceTest {
         List<String> storedVibes = new ObjectMapper().readValue(saved.getValue().getVibesJson(), new TypeReference<>() {
         });
         assertThat(storedVibes).containsExactly("coastal", "mountain");
+
+        verify(dispatchService).enqueue(
+            response.jobId(),
+            saved.getValue().getSubmittedAt()
+        );
+        verify(dispatchService).publishCommitted(response.jobId());
+    }
+
+    @Test
+    void submitRouteCreatesDispatchBeforePublishingOnlyAfterTransactionCommit() {
+        TransactionSynchronizationManager.setActualTransactionActive(true);
+        TransactionSynchronizationManager.initSynchronization();
+        try {
+            RouteSubmissionResponse response = routeService.submitRoute(routeRequest());
+
+            verify(dispatchService).enqueue(
+                response.jobId(),
+                response.queuedAt()
+            );
+            verify(dispatchService, never()).publishCommitted(any(UUID.class));
+            assertThat(TransactionSynchronizationManager.getSynchronizations()).hasSize(1);
+
+            TransactionSynchronizationManager.getSynchronizations()
+                .forEach(TransactionSynchronization::afterCommit);
+
+            verify(dispatchService).publishCommitted(response.jobId());
+        } finally {
+            TransactionSynchronizationManager.clearSynchronization();
+            TransactionSynchronizationManager.setActualTransactionActive(false);
+        }
+    }
+
+    @Test
+    void postCommitPublicationFailureReturnsOriginalAcceptedJob() {
+        RecordingCommitTransactionManager transactionManager =
+            new RecordingCommitTransactionManager();
+        doAnswer(invocation -> {
+            assertThat(transactionManager.commitCompleted()).isTrue();
+            throw new IllegalStateException("broker unavailable");
+        }).when(dispatchService).publishCommitted(any(UUID.class));
+        RouteService transactionalService = transactionalService(transactionManager);
+
+        RouteSubmissionResponse response = transactionalService.submitRoute(routeRequest());
+
+        ArgumentCaptor<RouteJob> saved = ArgumentCaptor.forClass(RouteJob.class);
+        verify(jobRepository, times(1)).save(saved.capture());
+        assertThat(response.jobId()).isEqualTo(saved.getValue().getId());
+        assertThat(response.status()).isEqualTo("QUEUED");
+        verify(dispatchService, times(1)).enqueue(
+            response.jobId(),
+            response.queuedAt()
+        );
+        verify(dispatchService, times(1)).publishCommitted(response.jobId());
+    }
+
+    @Test
+    void immediatePublicationFailureReturnsOriginalAcceptedJob() {
+        doThrow(new IllegalStateException("broker unavailable"))
+            .when(dispatchService).publishCommitted(any(UUID.class));
+
+        RouteSubmissionResponse response = routeService.submitRoute(routeRequest());
+
+        ArgumentCaptor<RouteJob> saved = ArgumentCaptor.forClass(RouteJob.class);
+        verify(jobRepository, times(1)).save(saved.capture());
+        assertThat(response.jobId()).isEqualTo(saved.getValue().getId());
+        assertThat(response.status()).isEqualTo("QUEUED");
+        verify(dispatchService, times(1)).enqueue(
+            response.jobId(),
+            response.queuedAt()
+        );
+        verify(dispatchService, times(1)).publishCommitted(response.jobId());
     }
 
     @Test
@@ -314,6 +417,9 @@ class RouteServiceTest {
         job.setStartedAt(Instant.parse("2026-04-02T14:30:01Z"));
         job.setCompletedAt(Instant.parse("2026-04-02T14:30:05Z"));
         job.setTimeBudgetMinutes(90);
+        job.setOptionRevision(1);
+        job.setOptionCount(1);
+        job.setOptionsComplete(true);
 
         GeometryFactory geometryFactory = new GeometryFactory();
         LineString lineString = geometryFactory.createLineString(new Coordinate[] {
@@ -326,6 +432,7 @@ class RouteServiceTest {
         route.setId(routeId);
         route.setJobId(jobId);
         route.setUserId(userId);
+        route.setRouteProfile("most_scenic");
         route.setGeometry(lineString);
         route.setTotalDistanceKm(62.3);
         route.setEstimatedDurationMinutes(88);
@@ -344,7 +451,7 @@ class RouteServiceTest {
 
         lenient().when(routeRepository.findById(routeId)).thenReturn(Optional.of(route));
         lenient().when(jobRepository.findById(jobId)).thenReturn(Optional.of(job));
-        lenient().when(routeRepository.findByJobIdOrderByGeneratedAtAsc(jobId)).thenReturn(List.of(route));
+        lenient().when(routeRepository.findByJobIdAndRouteProfileIsNotNullOrderByGeneratedAtAsc(jobId)).thenReturn(List.of(route));
 
         RouteDetailResponse response = routeService.getRoute(routeId);
 
@@ -358,6 +465,9 @@ class RouteServiceTest {
         assertThat(response.scenicHighlights()).isNotEmpty();
         assertThat(response.routeOptions()).hasSize(1);
         assertThat(response.routeOptions().getFirst().profile()).isEqualTo("most_scenic");
+        assertThat(response.optionRevision()).isEqualTo(1);
+        assertThat(response.optionCount()).isEqualTo(1);
+        assertThat(response.optionsComplete()).isTrue();
         assertThat(response.scoreBreakdown())
             .containsEntry("final_score", 0.785)
             .containsEntry("urban_penalty", 0.08);
@@ -400,7 +510,7 @@ class RouteServiceTest {
 
         lenient().when(routeRepository.findById(routeId)).thenReturn(Optional.of(route));
         lenient().when(jobRepository.findById(jobId)).thenReturn(Optional.of(job));
-        lenient().when(routeRepository.findByJobIdOrderByGeneratedAtAsc(jobId)).thenReturn(List.of(route));
+        lenient().when(routeRepository.findByJobIdAndRouteProfileIsNotNullOrderByGeneratedAtAsc(jobId)).thenReturn(List.of(route));
 
         RouteDetailResponse response = routeService.getRoute(routeId);
 
@@ -411,83 +521,347 @@ class RouteServiceTest {
     }
 
     @Test
-    void getRouteJobStatusExposesPrimaryRouteBeforeCompletion() {
+    void getRouteExcludesLegacyNullProfileRowsFromRouteOptions() {
+        UUID jobId = UUID.randomUUID();
+        UUID userId = UUID.randomUUID();
+        GeometryFactory geometryFactory = new GeometryFactory();
+
+        RouteJob job = new RouteJob(userId, 45.5152, -122.6784, 60, "coastal");
+        job.setId(jobId);
+        job.setStatus(RouteJob.JobStatus.COMPLETED);
+        job.setOptionRevision(1);
+        job.setOptionCount(1);
+        job.setOptionsComplete(true);
+
+        Route primary = route(
+            jobId, "most_scenic", geometryFactory, -122.6784, 45.5152, -122.7000, 45.5300, 0.78, 58, 24.0
+        );
+        Route legacyUnprofiled = route(
+            jobId, null, geometryFactory, -122.6784, 45.5152, -122.6900, 45.5200, 0.69, 52, 21.0
+        );
+
+        when(routeRepository.findById(primary.getId())).thenReturn(Optional.of(primary));
+        when(jobRepository.findById(jobId)).thenReturn(Optional.of(job));
+        when(routeRepository.findByJobIdAndRouteProfileIsNotNullOrderByGeneratedAtAsc(jobId))
+            .thenReturn(List.of(primary, legacyUnprofiled));
+
+        RouteDetailResponse response = routeService.getRoute(primary.getId());
+
+        assertThat(response.routeOptions())
+            .extracting(option -> option.profile())
+            .containsExactly("most_scenic");
+        assertThat(response.routeOptions())
+            .noneMatch(option -> option.routeId().equals(legacyUnprofiled.getId()));
+        assertThat(response.routeOptions()).hasSize(response.optionCount());
+        verify(routeRepository).findByJobIdAndRouteProfileIsNotNullOrderByGeneratedAtAsc(jobId);
+    }
+
+    @Test
+    void getRouteRepeatableReadPinsLifecycleAndRichOptionsAcrossAlternativeCommit() throws Exception {
+        UUID jobId = UUID.randomUUID();
+        UUID userId = UUID.randomUUID();
+        GeometryFactory geometryFactory = new GeometryFactory();
+        Route primary = route(
+            jobId, "most_scenic", geometryFactory, -79.3832, 43.6532, -79.3300, 43.6600, 0.78, 58, 24.0
+        );
+        Route balanced = route(
+            jobId, "balanced", geometryFactory, -79.3832, 43.6532, -79.3400, 43.6650, 0.76, 55, 22.0
+        );
+        Route shorter = route(
+            jobId, "shorter", geometryFactory, -79.3832, 43.6532, -79.3500, 43.6500, 0.74, 48, 18.0
+        );
+
+        RouteJob primaryReadyJob = new RouteJob(userId, 43.6532, -79.3832, 60, "coastal");
+        primaryReadyJob.setId(jobId);
+        primaryReadyJob.setStatus(RouteJob.JobStatus.PRIMARY_READY);
+        primaryReadyJob.setOptionRevision(1);
+        primaryReadyJob.setOptionCount(1);
+        primaryReadyJob.setOptionsComplete(false);
+
+        RouteJob completedJob = new RouteJob(userId, 43.6532, -79.3832, 60, "coastal");
+        completedJob.setId(jobId);
+        completedJob.setStatus(RouteJob.JobStatus.COMPLETED);
+        completedJob.setOptionRevision(3);
+        completedJob.setOptionCount(3);
+        completedJob.setOptionsComplete(true);
+
+        RichRouteSnapshot beforeAlternativeCommit = new RichRouteSnapshot(
+            primary, primaryReadyJob, List.of(primary)
+        );
+        RichRouteSnapshot afterAlternativeCommit = new RichRouteSnapshot(
+            primary, completedJob, List.of(primary, balanced, shorter)
+        );
+        RichSnapshotTransactionManager transactionManager =
+            new RichSnapshotTransactionManager(beforeAlternativeCommit);
+        CountDownLatch jobRead = new CountDownLatch(1);
+        CountDownLatch alternativeCommitted = new CountDownLatch(1);
+
+        when(routeRepository.findById(primary.getId()))
+            .thenAnswer(ignored -> Optional.of(transactionManager.currentSnapshot().route()));
+        when(jobRepository.findById(jobId)).thenAnswer(ignored -> {
+            RouteJob jobAtSnapshot = transactionManager.currentSnapshot().job();
+            jobRead.countDown();
+            assertThat(alternativeCommitted.await(5, TimeUnit.SECONDS)).isTrue();
+            return Optional.of(jobAtSnapshot);
+        });
+        when(routeRepository.findByJobIdAndRouteProfileIsNotNullOrderByGeneratedAtAsc(jobId))
+            .thenAnswer(ignored -> transactionManager.currentSnapshot().options());
+
+        TransactionInterceptor transactionInterceptor = new TransactionInterceptor(
+            transactionManager,
+            new AnnotationTransactionAttributeSource()
+        );
+        ProxyFactory proxyFactory = new ProxyFactory(routeService);
+        proxyFactory.setProxyTargetClass(true);
+        proxyFactory.addAdvice(transactionInterceptor);
+        RouteService transactionalService = (RouteService) proxyFactory.getProxy();
+
+        ExecutorService alternativeExecutor = Executors.newSingleThreadExecutor();
+        try {
+            Future<?> alternativeCommit = alternativeExecutor.submit(() -> {
+                if (!jobRead.await(5, TimeUnit.SECONDS)) {
+                    throw new IllegalStateException("Rich route read did not reach the job snapshot");
+                }
+                transactionManager.commitAlternative(afterAlternativeCommit);
+                alternativeCommitted.countDown();
+                return null;
+            });
+
+            RouteDetailResponse duringCommit = transactionalService.getRoute(primary.getId());
+            alternativeCommit.get(5, TimeUnit.SECONDS);
+
+            assertThat(transactionManager.observedIsolation())
+                .isEqualTo(TransactionDefinition.ISOLATION_REPEATABLE_READ);
+            assertThat(transactionManager.observedReadOnly()).isTrue();
+            assertThat(duringCommit.optionRevision()).isEqualTo(1);
+            assertThat(duringCommit.optionCount()).isEqualTo(1);
+            assertThat(duringCommit.optionsComplete()).isFalse();
+            assertThat(duringCommit.routeOptions())
+                .extracting(option -> option.profile())
+                .containsExactly("most_scenic");
+            assertThat(duringCommit.routeOptions()).hasSize(duringCommit.optionCount());
+
+            RouteDetailResponse afterCommit = transactionalService.getRoute(primary.getId());
+
+            assertThat(afterCommit.optionRevision()).isEqualTo(3);
+            assertThat(afterCommit.optionCount()).isEqualTo(3);
+            assertThat(afterCommit.optionsComplete()).isTrue();
+            assertThat(afterCommit.routeOptions())
+                .extracting(option -> option.profile())
+                .containsExactly("most_scenic", "balanced", "shorter");
+            assertThat(afterCommit.routeOptions()).hasSize(afterCommit.optionCount());
+        } finally {
+            alternativeExecutor.shutdownNow();
+        }
+    }
+
+    @Test
+    void getRouteJobStatusProjectsCommittedPrimaryLifecycleWithoutRouteLookups() {
         UUID jobId = UUID.randomUUID();
         UUID userId = UUID.randomUUID();
         UUID routeId = UUID.randomUUID();
+        Instant queuedAt = Instant.parse("2026-04-02T14:30:00Z");
+        Instant startedAt = Instant.parse("2026-04-02T14:30:01Z");
+        Instant primaryReadyAt = Instant.parse("2026-04-02T14:30:05Z");
 
         RouteJob job = new RouteJob(userId, 45.5152, -122.6784, 90, "coastal");
         job.setId(jobId);
-        job.markStarted();
-        job.markPrimaryReady(routeId);
-
-        Route route = new Route();
-        route.setId(routeId);
-        route.setJobId(jobId);
-        route.setRouteProfile("most_scenic");
-        route.setScenicScore(0.82);
-        route.setTotalDistanceKm(52.0);
-        route.setEstimatedDurationMinutes(89);
-        route.setGeneratedAt(Instant.parse("2026-04-02T14:30:05Z"));
+        job.setStatus(RouteJob.JobStatus.PRIMARY_READY);
+        job.setRouteId(routeId);
+        job.setSubmittedAt(queuedAt);
+        job.setStartedAt(startedAt);
+        job.setPrimaryReadyAt(primaryReadyAt);
+        job.setStateRevision(2);
+        job.setOptionRevision(1);
+        job.setOptionCount(1);
+        job.setOptionsComplete(false);
+        job.setRetryCount(1);
 
         lenient().when(jobRepository.findById(jobId)).thenReturn(Optional.of(job));
-        lenient().when(routeRepository.findByJobIdOrderByGeneratedAtAsc(jobId)).thenReturn(List.of(route));
 
         RouteJobStatusResponse response = routeService.getRouteJobStatus(jobId);
 
         assertThat(response.status()).isEqualTo("PRIMARY_READY");
         assertThat(response.routeId()).isEqualTo(routeId);
-        assertThat(response.routeOptions()).hasSize(1);
+        assertThat(response.routeUrl()).isEqualTo("/routes/route/" + routeId);
+        assertThat(response.primaryReadyAt()).isEqualTo(primaryReadyAt);
+        assertThat(response.stateRevision()).isEqualTo(2);
+        assertThat(response.optionRevision()).isEqualTo(1);
+        assertThat(response.optionCount()).isEqualTo(1);
+        assertThat(response.optionsComplete()).isFalse();
+        assertThat(response.queuedAt()).isEqualTo(queuedAt);
+        assertThat(response.startedAt()).isEqualTo(startedAt);
         assertThat(response.completedAt()).isNull();
+        assertThat(response.failedAt()).isNull();
         assertThat(response.estimatedRemainingSeconds()).isEqualTo(3);
+        assertThat(response.retryCount()).isEqualTo(1);
+        assertThat(response.maxRetries()).isEqualTo(2);
+        assertThat(response.routeMode()).isEqualTo("drive");
+        verifyNoInteractions(routeRepository, scenicScoreTileRepository);
     }
 
     @Test
-    void getRouteJobStatusIncludesUpToThreeRouteOptions() {
+    void getRouteJobStatusProjectsCompletedOptionSetLifecycle() {
         UUID jobId = UUID.randomUUID();
         UUID userId = UUID.randomUUID();
+        UUID routeId = UUID.randomUUID();
+        Instant primaryReadyAt = Instant.parse("2026-04-02T14:30:05Z");
+        Instant completedAt = Instant.parse("2026-04-02T14:30:08Z");
 
         RouteJob job = new RouteJob(userId, 45.5152, -122.6784, 90, "coastal");
         job.setId(jobId);
         job.setStatus(RouteJob.JobStatus.COMPLETED);
-
-        Route option1 = new Route();
-        option1.setId(UUID.randomUUID());
-        option1.setJobId(jobId);
-        option1.setRouteProfile("most_scenic");
-        option1.setScenicScore(0.82);
-        option1.setTotalDistanceKm(52.0);
-        option1.setEstimatedDurationMinutes(89);
-        option1.setGeneratedAt(Instant.parse("2026-04-02T14:30:05Z"));
-
-        Route option2 = new Route();
-        option2.setId(UUID.randomUUID());
-        option2.setJobId(jobId);
-        option2.setRouteProfile("balanced");
-        option2.setScenicScore(0.75);
-        option2.setTotalDistanceKm(47.5);
-        option2.setEstimatedDurationMinutes(82);
-        option2.setGeneratedAt(Instant.parse("2026-04-02T14:30:06Z"));
-
-        Route option3 = new Route();
-        option3.setId(UUID.randomUUID());
-        option3.setJobId(jobId);
-        option3.setRouteProfile("shorter");
-        option3.setScenicScore(0.69);
-        option3.setTotalDistanceKm(40.2);
-        option3.setEstimatedDurationMinutes(70);
-        option3.setGeneratedAt(Instant.parse("2026-04-02T14:30:07Z"));
+        job.setRouteId(routeId);
+        job.setPrimaryReadyAt(primaryReadyAt);
+        job.setCompletedAt(completedAt);
+        job.setStateRevision(4);
+        job.setOptionRevision(3);
+        job.setOptionCount(3);
+        job.setOptionsComplete(true);
 
         lenient().when(jobRepository.findById(jobId)).thenReturn(Optional.of(job));
-        lenient().when(routeRepository.findByJobIdOrderByGeneratedAtAsc(jobId)).thenReturn(List.of(option1, option2, option3));
 
         RouteJobStatusResponse response = routeService.getRouteJobStatus(jobId);
 
-        assertThat(response.routeOptions()).hasSize(3);
-        assertThat(response.routeOptions().get(0).profile()).isEqualTo("most_scenic");
-        assertThat(response.routeOptions().get(1).profile()).isEqualTo("balanced");
-        assertThat(response.routeOptions().get(2).profile()).isEqualTo("shorter");
-        assertThat(response.routeId()).isEqualTo(option1.getId());
+        assertThat(response.status()).isEqualTo("COMPLETED");
+        assertThat(response.routeId()).isEqualTo(routeId);
+        assertThat(response.routeUrl()).isEqualTo("/routes/route/" + routeId);
+        assertThat(response.primaryReadyAt()).isEqualTo(primaryReadyAt);
+        assertThat(response.stateRevision()).isEqualTo(4);
+        assertThat(response.optionRevision()).isEqualTo(3);
+        assertThat(response.optionCount()).isEqualTo(3);
+        assertThat(response.optionsComplete()).isTrue();
+        assertThat(response.completedAt()).isEqualTo(completedAt);
+        assertThat(response.estimatedRemainingSeconds()).isNull();
+        verifyNoInteractions(routeRepository, scenicScoreTileRepository);
+    }
+
+    @Test
+    void getRouteJobStatusFallsBackToLegacyPersistedRouteForCompletedJobWithoutRouteId() {
+        UUID jobId = UUID.randomUUID();
+        UUID legacyRouteId = UUID.randomUUID();
+        Instant completedAt = Instant.parse("2026-04-02T14:30:08Z");
+
+        RouteJob job = new RouteJob(UUID.randomUUID(), 45.5152, -122.6784, 90, "coastal");
+        job.setId(jobId);
+        job.setStatus(RouteJob.JobStatus.COMPLETED);
+        job.setCompletedAt(completedAt);
+        job.setStateRevision(3);
+        job.setOptionRevision(1);
+        job.setOptionCount(1);
+        job.setOptionsComplete(true);
+
+        Route legacyRoute = new Route();
+        legacyRoute.setId(legacyRouteId);
+        legacyRoute.setJobId(jobId);
+        legacyRoute.setGeneratedAt(Instant.parse("2026-04-02T14:30:05Z"));
+
+        when(jobRepository.findById(jobId)).thenReturn(Optional.of(job));
+        when(routeRepository.findByJobIdAndRouteProfileIsNotNullOrderByGeneratedAtAsc(jobId))
+            .thenReturn(List.of());
+        when(routeRepository.findTopByJobIdOrderByGeneratedAtAsc(jobId))
+            .thenReturn(Optional.of(legacyRoute));
+
+        RouteJobStatusResponse response = routeService.getRouteJobStatus(jobId);
+
+        assertThat(response.status()).isEqualTo("COMPLETED");
+        assertThat(response.routeId()).isEqualTo(legacyRouteId);
+        assertThat(response.routeUrl()).isEqualTo("/routes/route/" + legacyRouteId);
+        assertThat(response.stateRevision()).isEqualTo(3);
+        assertThat(response.optionRevision()).isEqualTo(1);
+        assertThat(response.optionCount()).isEqualTo(1);
+        assertThat(response.optionsComplete()).isTrue();
+        assertThat(response.completedAt()).isEqualTo(completedAt);
+        verify(routeRepository).findByJobIdAndRouteProfileIsNotNullOrderByGeneratedAtAsc(jobId);
+        verify(routeRepository).findTopByJobIdOrderByGeneratedAtAsc(jobId);
+    }
+
+    @Test
+    void getRouteJobStatusPrefersProfiledPrimaryForPrimaryReadyJobWithoutRouteId() {
+        UUID jobId = UUID.randomUUID();
+        UUID balancedRouteId = UUID.randomUUID();
+        UUID primaryRouteId = UUID.randomUUID();
+        Instant primaryReadyAt = Instant.parse("2026-04-02T14:30:05Z");
+
+        RouteJob job = new RouteJob(UUID.randomUUID(), 45.5152, -122.6784, 90, "coastal");
+        job.setId(jobId);
+        job.setStatus(RouteJob.JobStatus.PRIMARY_READY);
+        job.setPrimaryReadyAt(primaryReadyAt);
+        job.setStateRevision(2);
+        job.setOptionRevision(1);
+        job.setOptionCount(1);
+
+        Route balanced = new Route();
+        balanced.setId(balancedRouteId);
+        balanced.setJobId(jobId);
+        balanced.setRouteProfile("balanced");
+        balanced.setGeneratedAt(Instant.parse("2026-04-02T14:30:03Z"));
+        Route primary = new Route();
+        primary.setId(primaryRouteId);
+        primary.setJobId(jobId);
+        primary.setRouteProfile("most_scenic");
+        primary.setGeneratedAt(primaryReadyAt);
+
+        when(jobRepository.findById(jobId)).thenReturn(Optional.of(job));
+        when(routeRepository.findByJobIdAndRouteProfileIsNotNullOrderByGeneratedAtAsc(jobId))
+            .thenReturn(List.of(balanced, primary));
+
+        RouteJobStatusResponse response = routeService.getRouteJobStatus(jobId);
+
+        assertThat(response.status()).isEqualTo("PRIMARY_READY");
+        assertThat(response.routeId()).isEqualTo(primaryRouteId);
+        assertThat(response.routeUrl()).isEqualTo("/routes/route/" + primaryRouteId);
+        assertThat(response.primaryReadyAt()).isEqualTo(primaryReadyAt);
+        assertThat(response.stateRevision()).isEqualTo(2);
+        assertThat(response.optionRevision()).isEqualTo(1);
+        assertThat(response.optionCount()).isEqualTo(1);
+        assertThat(response.optionsComplete()).isFalse();
+        verify(routeRepository).findByJobIdAndRouteProfileIsNotNullOrderByGeneratedAtAsc(jobId);
+        verify(routeRepository, never()).findTopByJobIdOrderByGeneratedAtAsc(jobId);
+    }
+
+    @Test
+    void getRouteJobStatusUsesChronologicalFallbackWhenProfilesHaveNoPrimary() {
+        UUID jobId = UUID.randomUUID();
+        UUID legacyRouteId = UUID.randomUUID();
+        Instant primaryReadyAt = Instant.parse("2026-04-02T14:30:05Z");
+
+        RouteJob job = new RouteJob(UUID.randomUUID(), 45.5152, -122.6784, 90, "coastal");
+        job.setId(jobId);
+        job.setStatus(RouteJob.JobStatus.PRIMARY_READY);
+        job.setPrimaryReadyAt(primaryReadyAt);
+        job.setStateRevision(2);
+        job.setOptionRevision(1);
+        job.setOptionCount(1);
+
+        Route balanced = new Route();
+        balanced.setId(UUID.randomUUID());
+        balanced.setJobId(jobId);
+        balanced.setRouteProfile("balanced");
+        balanced.setGeneratedAt(primaryReadyAt);
+        Route legacyRoute = new Route();
+        legacyRoute.setId(legacyRouteId);
+        legacyRoute.setJobId(jobId);
+        legacyRoute.setGeneratedAt(primaryReadyAt.minusSeconds(1));
+
+        when(jobRepository.findById(jobId)).thenReturn(Optional.of(job));
+        when(routeRepository.findByJobIdAndRouteProfileIsNotNullOrderByGeneratedAtAsc(jobId))
+            .thenReturn(List.of(balanced));
+        when(routeRepository.findTopByJobIdOrderByGeneratedAtAsc(jobId))
+            .thenReturn(Optional.of(legacyRoute));
+
+        RouteJobStatusResponse response = routeService.getRouteJobStatus(jobId);
+
+        assertThat(response.status()).isEqualTo("PRIMARY_READY");
+        assertThat(response.routeId()).isEqualTo(legacyRouteId);
+        assertThat(response.routeUrl()).isEqualTo("/routes/route/" + legacyRouteId);
+        assertThat(response.stateRevision()).isEqualTo(2);
+        assertThat(response.optionRevision()).isEqualTo(1);
+        assertThat(response.optionCount()).isEqualTo(1);
+        assertThat(response.optionsComplete()).isFalse();
+        assertThat(response.estimatedRemainingSeconds()).isEqualTo(3);
+        verify(routeRepository).findByJobIdAndRouteProfileIsNotNullOrderByGeneratedAtAsc(jobId);
+        verify(routeRepository).findTopByJobIdOrderByGeneratedAtAsc(jobId);
     }
 
     @Test
@@ -500,15 +874,19 @@ class RouteServiceTest {
         job.markFailed("No strong Country route found near this start within your 60-minute budget. Try a larger time budget, a less urban start point, or Country/Open Road.");
 
         lenient().when(jobRepository.findById(jobId)).thenReturn(Optional.of(job));
-        lenient().when(routeRepository.findByJobIdOrderByGeneratedAtAsc(jobId)).thenReturn(List.of());
 
         RouteJobStatusResponse response = routeService.getRouteJobStatus(jobId);
 
         assertThat(response.status()).isEqualTo("FAILED");
+        assertThat(response.reason()).isEqualTo(job.getFailureReason());
+        assertThat(response.failedAt()).isEqualTo(job.getFailedAt());
+        assertThat(response.completedAt()).isEqualTo(job.getCompletedAt());
+        assertThat(response.estimatedRemainingSeconds()).isNull();
         assertThat(response.failureCode()).isEqualTo("vibe_unavailable");
         assertThat(response.userMessage()).contains("No strong Country route found");
         assertThat(response.suggestedVibes()).contains("open_roads", "relaxing");
         assertThat(response.suggestedActions()).contains("Try Country", "Try Open Road", "Increase time budget to 90 minutes");
+        verifyNoInteractions(routeRepository, scenicScoreTileRepository);
     }
 
     @Test
@@ -520,6 +898,9 @@ class RouteServiceTest {
         job.setId(jobId);
         job.setStatus(RouteJob.JobStatus.COMPLETED);
 
+        job.setOptionRevision(1);
+        job.setOptionCount(1);
+        job.setOptionsComplete(true);
         GeometryFactory geometryFactory = new GeometryFactory();
         LineString lineString = geometryFactory.createLineString(new Coordinate[] {
             new Coordinate(-115.5708, 51.1784),
@@ -546,12 +927,13 @@ class RouteServiceTest {
         );
 
         lenient().when(jobRepository.findById(jobId)).thenReturn(Optional.of(job));
-        lenient().when(routeRepository.findByJobIdOrderByGeneratedAtAsc(jobId)).thenReturn(List.of(route));
+        lenient().when(routeRepository.findById(route.getId())).thenReturn(Optional.of(route));
+        lenient().when(routeRepository.findByJobIdAndRouteProfileIsNotNullOrderByGeneratedAtAsc(jobId)).thenReturn(List.of(route));
         lenient().when(scenicScoreTileRepository.findByH3IndexIn(anyCollection())).thenReturn(routeTiles);
         lenient().when(scenicScoreTileRepository.findScenicTilesNearPoint(anyDouble(), anyDouble(), anyDouble(), anyInt()))
             .thenReturn(baselineTiles);
 
-        RouteJobStatusResponse response = routeService.getRouteJobStatus(jobId);
+        RouteDetailResponse response = routeService.getRoute(route.getId());
 
         var explanation = response.routeOptions().getFirst().explanation();
         assertThat(explanation).isNotNull();
@@ -577,6 +959,9 @@ class RouteServiceTest {
         job.setId(jobId);
         job.setStatus(RouteJob.JobStatus.COMPLETED);
 
+        job.setOptionRevision(1);
+        job.setOptionCount(1);
+        job.setOptionsComplete(true);
         GeometryFactory geometryFactory = new GeometryFactory();
         LineString lineString = geometryFactory.createLineString(new Coordinate[] {
             new Coordinate(-123.1207, 49.2827),
@@ -610,12 +995,13 @@ class RouteServiceTest {
         );
 
         lenient().when(jobRepository.findById(jobId)).thenReturn(Optional.of(job));
-        lenient().when(routeRepository.findByJobIdOrderByGeneratedAtAsc(jobId)).thenReturn(List.of(route));
+        lenient().when(routeRepository.findById(route.getId())).thenReturn(Optional.of(route));
+        lenient().when(routeRepository.findByJobIdAndRouteProfileIsNotNullOrderByGeneratedAtAsc(jobId)).thenReturn(List.of(route));
         lenient().when(scenicScoreTileRepository.findByH3IndexIn(anyCollection())).thenReturn(routeTiles);
         lenient().when(scenicScoreTileRepository.findScenicTilesNearPoint(anyDouble(), anyDouble(), anyDouble(), anyInt()))
             .thenReturn(routeTiles);
 
-        RouteJobStatusResponse response = routeService.getRouteJobStatus(jobId);
+        RouteDetailResponse response = routeService.getRoute(route.getId());
 
         var explanation = response.routeOptions().getFirst().explanation();
         assertThat(explanation).isNotNull();
@@ -637,6 +1023,9 @@ class RouteServiceTest {
         job.setId(jobId);
         job.setStatus(RouteJob.JobStatus.COMPLETED);
 
+        job.setOptionRevision(1);
+        job.setOptionCount(1);
+        job.setOptionsComplete(true);
         GeometryFactory geometryFactory = new GeometryFactory();
         LineString lineString = geometryFactory.createLineString(new Coordinate[] {
             new Coordinate(-123.1207, 49.2827),
@@ -669,12 +1058,13 @@ class RouteServiceTest {
         );
 
         lenient().when(jobRepository.findById(jobId)).thenReturn(Optional.of(job));
-        lenient().when(routeRepository.findByJobIdOrderByGeneratedAtAsc(jobId)).thenReturn(List.of(route));
+        lenient().when(routeRepository.findById(route.getId())).thenReturn(Optional.of(route));
+        lenient().when(routeRepository.findByJobIdAndRouteProfileIsNotNullOrderByGeneratedAtAsc(jobId)).thenReturn(List.of(route));
         lenient().when(scenicScoreTileRepository.findByH3IndexIn(anyCollection())).thenReturn(routeTiles);
         lenient().when(scenicScoreTileRepository.findScenicTilesNearPoint(anyDouble(), anyDouble(), anyDouble(), anyInt()))
             .thenReturn(routeTiles);
 
-        RouteJobStatusResponse response = routeService.getRouteJobStatus(jobId);
+        RouteDetailResponse response = routeService.getRoute(route.getId());
 
         var explanation = response.routeOptions().getFirst().explanation();
         assertThat(explanation).isNotNull();
@@ -693,6 +1083,9 @@ class RouteServiceTest {
         job.setId(jobId);
         job.setStatus(RouteJob.JobStatus.COMPLETED);
 
+        job.setOptionRevision(1);
+        job.setOptionCount(1);
+        job.setOptionsComplete(true);
         GeometryFactory geometryFactory = new GeometryFactory();
         LineString lineString = geometryFactory.createLineString(new Coordinate[] {
             new Coordinate(-71.2080, 46.8139),
@@ -727,12 +1120,13 @@ class RouteServiceTest {
         List<ScenicScoreTile> routeTiles = List.of(firstTile, secondTile);
 
         lenient().when(jobRepository.findById(jobId)).thenReturn(Optional.of(job));
-        lenient().when(routeRepository.findByJobIdOrderByGeneratedAtAsc(jobId)).thenReturn(List.of(route));
+        lenient().when(routeRepository.findById(route.getId())).thenReturn(Optional.of(route));
+        lenient().when(routeRepository.findByJobIdAndRouteProfileIsNotNullOrderByGeneratedAtAsc(jobId)).thenReturn(List.of(route));
         lenient().when(scenicScoreTileRepository.findByH3IndexIn(anyCollection())).thenReturn(routeTiles);
         lenient().when(scenicScoreTileRepository.findScenicTilesNearPoint(anyDouble(), anyDouble(), anyDouble(), anyInt()))
             .thenReturn(routeTiles);
 
-        RouteJobStatusResponse response = routeService.getRouteJobStatus(jobId);
+        RouteDetailResponse response = routeService.getRoute(route.getId());
 
         var explanation = response.routeOptions().getFirst().explanation();
         assertThat(explanation).isNotNull();
@@ -751,6 +1145,9 @@ class RouteServiceTest {
         job.setId(jobId);
         job.setStatus(RouteJob.JobStatus.COMPLETED);
 
+        job.setOptionRevision(1);
+        job.setOptionCount(1);
+        job.setOptionsComplete(true);
         GeometryFactory geometryFactory = new GeometryFactory();
         LineString lineString = geometryFactory.createLineString(new Coordinate[] {
             new Coordinate(-79.3832, 43.6532),
@@ -777,12 +1174,13 @@ class RouteServiceTest {
         );
 
         lenient().when(jobRepository.findById(jobId)).thenReturn(Optional.of(job));
-        lenient().when(routeRepository.findByJobIdOrderByGeneratedAtAsc(jobId)).thenReturn(List.of(route));
+        lenient().when(routeRepository.findById(route.getId())).thenReturn(Optional.of(route));
+        lenient().when(routeRepository.findByJobIdAndRouteProfileIsNotNullOrderByGeneratedAtAsc(jobId)).thenReturn(List.of(route));
         lenient().when(scenicScoreTileRepository.findByH3IndexIn(anyCollection())).thenReturn(routeTiles);
         lenient().when(scenicScoreTileRepository.findScenicTilesNearPoint(anyDouble(), anyDouble(), anyDouble(), anyInt()))
             .thenReturn(baselineTiles);
 
-        RouteJobStatusResponse response = routeService.getRouteJobStatus(jobId);
+        RouteDetailResponse response = routeService.getRoute(route.getId());
 
         var explanation = response.routeOptions().getFirst().explanation();
         assertThat(explanation).isNotNull();
@@ -800,6 +1198,9 @@ class RouteServiceTest {
         job.setId(jobId);
         job.setStatus(RouteJob.JobStatus.COMPLETED);
 
+        job.setOptionRevision(3);
+        job.setOptionCount(3);
+        job.setOptionsComplete(true);
         GeometryFactory geometryFactory = new GeometryFactory();
         List<Route> routes = List.of(
             route(jobId, "most_scenic", geometryFactory, -79.3832, 43.6532, -79.3300, 43.6600, 0.78, 58, 24.0),
@@ -816,12 +1217,13 @@ class RouteServiceTest {
         );
 
         lenient().when(jobRepository.findById(jobId)).thenReturn(Optional.of(job));
-        lenient().when(routeRepository.findByJobIdOrderByGeneratedAtAsc(jobId)).thenReturn(routes);
+        lenient().when(routeRepository.findById(routes.getFirst().getId())).thenReturn(Optional.of(routes.getFirst()));
+        lenient().when(routeRepository.findByJobIdAndRouteProfileIsNotNullOrderByGeneratedAtAsc(jobId)).thenReturn(routes);
         lenient().when(scenicScoreTileRepository.findByH3IndexIn(anyCollection())).thenReturn(routeTiles);
         lenient().when(scenicScoreTileRepository.findScenicTilesNearPoint(anyDouble(), anyDouble(), anyDouble(), anyInt()))
             .thenReturn(baselineTiles);
 
-        RouteJobStatusResponse response = routeService.getRouteJobStatus(jobId);
+        RouteDetailResponse response = routeService.getRoute(routes.getFirst().getId());
 
         assertThat(response.routeOptions()).hasSize(3);
         assertThat(response.routeOptions().stream()
@@ -838,53 +1240,234 @@ class RouteServiceTest {
             );
     }
 
+    @SuppressWarnings("unchecked")
     @Test
-    void getRouteJobStatusUsesPersistedProfilesOverGeneratedOrder() {
+    void incompleteRichReadDoesNotFreezeFinalOptionSetInCache() {
+        UUID jobId = UUID.randomUUID();
+        UUID userId = UUID.randomUUID();
+        GeometryFactory geometryFactory = new GeometryFactory();
+
+        RouteJob job = new RouteJob(userId, 43.6532, -79.3832, 60, "coastal");
+        job.setId(jobId);
+        job.setStatus(RouteJob.JobStatus.PRIMARY_READY);
+        job.setOptionRevision(1);
+        job.setOptionCount(1);
+        job.setOptionsComplete(false);
+
+        Route primary = route(
+            jobId, "most_scenic", geometryFactory, -79.3832, 43.6532, -79.3300, 43.6600, 0.78, 58, 24.0
+        );
+        List<Route> visibleRoutes = new ArrayList<>(List.of(primary));
+        when(routeRepository.findById(primary.getId())).thenReturn(Optional.of(primary));
+        when(jobRepository.findById(jobId)).thenReturn(Optional.of(job));
+        when(routeRepository.findByJobIdAndRouteProfileIsNotNullOrderByGeneratedAtAsc(jobId)).thenAnswer(ignored -> List.copyOf(visibleRoutes));
+
+        ConcurrentMapCacheManager cacheManager = new ConcurrentMapCacheManager(CacheNames.ROUTE_DETAILS_V2);
+        CacheInterceptor cacheInterceptor = new CacheInterceptor();
+        cacheInterceptor.setCacheManager(cacheManager);
+        cacheInterceptor.setCacheOperationSource(new AnnotationCacheOperationSource());
+        cacheInterceptor.afterPropertiesSet();
+        cacheInterceptor.afterSingletonsInstantiated();
+        ProxyFactory proxyFactory = new ProxyFactory(routeService);
+        proxyFactory.addAdvice(cacheInterceptor);
+        RouteService cachedRouteService = (RouteService) proxyFactory.getProxy();
+        Cache richDetailCache = cacheManager.getCache(CacheNames.ROUTE_DETAILS_V2);
+        String cacheKey = CacheKeySchema.routeDetailV2(primary.getId());
+
+        RouteDetailResponse primaryStage = cachedRouteService.getRoute(primary.getId());
+
+        assertThat(primaryStage.routeOptions()).hasSize(1);
+        assertThat(primaryStage.optionRevision()).isEqualTo(1);
+        assertThat(primaryStage.optionCount()).isEqualTo(1);
+        assertThat(primaryStage.optionsComplete()).isFalse();
+        assertThat(richDetailCache).isNotNull();
+        assertThat(richDetailCache.get(cacheKey)).isNull();
+
+        visibleRoutes.add(route(
+            jobId, "balanced", geometryFactory, -79.3832, 43.6532, -79.3400, 43.6650, 0.76, 55, 22.0
+        ));
+        visibleRoutes.add(route(
+            jobId, "shorter", geometryFactory, -79.3832, 43.6532, -79.3500, 43.6500, 0.74, 48, 18.0
+        ));
+        job.setStatus(RouteJob.JobStatus.COMPLETED);
+        job.setOptionRevision(3);
+        job.setOptionCount(3);
+        job.setOptionsComplete(true);
+
+        RouteDetailResponse completed = cachedRouteService.getRoute(primary.getId());
+
+        assertThat(completed.optionRevision()).isEqualTo(3);
+        assertThat(completed.optionCount()).isEqualTo(3);
+        assertThat(completed.optionsComplete()).isTrue();
+        assertThat(completed.routeOptions())
+            .extracting(option -> option.profile())
+            .containsExactly("most_scenic", "balanced", "shorter");
+        Map<Object, Object> nativeCache = (Map<Object, Object>) richDetailCache.getNativeCache();
+        assertThat(nativeCache).containsEntry(cacheKey, completed);
+
+        assertThat(cachedRouteService.getRoute(primary.getId())).isSameAs(completed);
+        verify(routeRepository, times(2)).findById(primary.getId());
+        verify(routeRepository, times(2)).findByJobIdAndRouteProfileIsNotNullOrderByGeneratedAtAsc(jobId);
+    }
+
+    @Test
+    void getRouteJobStatusDoesNotInferPrimaryFromUncommittedRouteRows() {
         UUID jobId = UUID.randomUUID();
         UUID userId = UUID.randomUUID();
 
         RouteJob job = new RouteJob(userId, 45.5152, -122.6784, 90, "coastal");
         job.setId(jobId);
-        job.setStatus(RouteJob.JobStatus.COMPLETED);
+        job.setStatus(RouteJob.JobStatus.PROCESSING);
 
-        Route balanced = new Route();
-        balanced.setId(UUID.randomUUID());
-        balanced.setJobId(jobId);
-        balanced.setRouteProfile("balanced");
-        balanced.setScenicScore(0.75);
-        balanced.setTotalDistanceKm(47.5);
-        balanced.setEstimatedDurationMinutes(82);
-        balanced.setGeneratedAt(Instant.parse("2026-04-02T14:30:05Z"));
-
-        Route mostScenic = new Route();
-        mostScenic.setId(UUID.randomUUID());
-        mostScenic.setJobId(jobId);
-        mostScenic.setRouteProfile("most_scenic");
-        mostScenic.setScenicScore(0.82);
-        mostScenic.setTotalDistanceKm(52.0);
-        mostScenic.setEstimatedDurationMinutes(89);
-        mostScenic.setGeneratedAt(Instant.parse("2026-04-02T14:30:06Z"));
-
-        Route shorter = new Route();
-        shorter.setId(UUID.randomUUID());
-        shorter.setJobId(jobId);
-        shorter.setRouteProfile("shorter");
-        shorter.setScenicScore(0.69);
-        shorter.setTotalDistanceKm(40.2);
-        shorter.setEstimatedDurationMinutes(70);
-        shorter.setGeneratedAt(Instant.parse("2026-04-02T14:30:07Z"));
-
+        Route uncommittedRoute = new Route();
+        uncommittedRoute.setId(UUID.randomUUID());
+        uncommittedRoute.setJobId(jobId);
+        uncommittedRoute.setRouteProfile("most_scenic");
         lenient().when(jobRepository.findById(jobId)).thenReturn(Optional.of(job));
-        lenient().when(routeRepository.findByJobIdOrderByGeneratedAtAsc(jobId)).thenReturn(List.of(balanced, mostScenic, shorter));
+        lenient().when(routeRepository.findByJobIdAndRouteProfileIsNotNullOrderByGeneratedAtAsc(jobId))
+            .thenReturn(List.of(uncommittedRoute));
 
         RouteJobStatusResponse response = routeService.getRouteJobStatus(jobId);
 
-        assertThat(response.routeId()).isEqualTo(mostScenic.getId());
-        assertThat(response.routeOptions()).hasSize(3);
-        assertThat(response.routeOptions().get(0).profile()).isEqualTo("most_scenic");
-        assertThat(response.routeOptions().get(0).routeId()).isEqualTo(mostScenic.getId());
-        assertThat(response.routeOptions().get(1).profile()).isEqualTo("balanced");
-        assertThat(response.routeOptions().get(2).profile()).isEqualTo("shorter");
+        assertThat(response.status()).isEqualTo("PROCESSING");
+        assertThat(response.routeId()).isNull();
+        assertThat(response.routeUrl()).isNull();
+        assertThat(response.primaryReadyAt()).isNull();
+        assertThat(response.stateRevision()).isZero();
+        assertThat(response.optionRevision()).isZero();
+        assertThat(response.optionCount()).isZero();
+        assertThat(response.optionsComplete()).isFalse();
+        assertThat(response.estimatedRemainingSeconds()).isEqualTo(3);
+        verifyNoInteractions(routeRepository, scenicScoreTileRepository);
+    }
+
+    private RouteService newRouteService() {
+        return new RouteService(
+            jobRepository,
+            routeRepository,
+            calibrationRepository,
+            scenicScoreTileRepository,
+            new RouteFailureGuidanceService(new ObjectMapper()),
+            kafkaTemplate,
+            dispatchService,
+            new ObjectMapper()
+        );
+    }
+
+    private RouteRequest routeRequest() {
+        return new RouteRequest(
+            UUID.randomUUID(),
+            45.5152,
+            -122.6784,
+            90,
+            List.of("coastal"),
+            null,
+            null
+        );
+    }
+
+    private RouteService transactionalService(PlatformTransactionManager transactionManager) {
+        TransactionInterceptor transactionInterceptor = new TransactionInterceptor(
+            transactionManager,
+            new AnnotationTransactionAttributeSource()
+        );
+        ProxyFactory proxyFactory = new ProxyFactory(routeService);
+        proxyFactory.setProxyTargetClass(true);
+        proxyFactory.addAdvice(transactionInterceptor);
+        return (RouteService) proxyFactory.getProxy();
+    }
+
+    private static final class RecordingCommitTransactionManager
+        extends AbstractPlatformTransactionManager {
+        private final AtomicBoolean commitCompleted = new AtomicBoolean();
+
+        @Override
+        protected Object doGetTransaction() {
+            return new Object();
+        }
+
+        @Override
+        protected void doBegin(Object transaction, TransactionDefinition definition) {
+        }
+
+        @Override
+        protected void doCommit(DefaultTransactionStatus status) {
+            commitCompleted.set(true);
+        }
+
+        @Override
+        protected void doRollback(DefaultTransactionStatus status) {
+        }
+
+        private boolean commitCompleted() {
+            return commitCompleted.get();
+        }
+    }
+
+    private record RichRouteSnapshot(
+        Route route,
+        RouteJob job,
+        List<Route> options
+    ) {}
+
+    private static final class RichSnapshotTransactionManager implements PlatformTransactionManager {
+        private final AtomicReference<RichRouteSnapshot> committedSnapshot;
+        private final ThreadLocal<RichRouteSnapshot> transactionSnapshot = new ThreadLocal<>();
+        private final ThreadLocal<Boolean> repeatableRead = new ThreadLocal<>();
+        private final AtomicInteger observedIsolation =
+            new AtomicInteger(TransactionDefinition.ISOLATION_DEFAULT);
+        private final AtomicBoolean observedReadOnly = new AtomicBoolean();
+
+        private RichSnapshotTransactionManager(RichRouteSnapshot initialSnapshot) {
+            this.committedSnapshot = new AtomicReference<>(initialSnapshot);
+        }
+
+        @Override
+        public TransactionStatus getTransaction(TransactionDefinition definition) {
+            observedIsolation.set(definition.getIsolationLevel());
+            observedReadOnly.set(definition.isReadOnly());
+            boolean pinsSnapshot =
+                definition.getIsolationLevel() == TransactionDefinition.ISOLATION_REPEATABLE_READ;
+            repeatableRead.set(pinsSnapshot);
+            if (pinsSnapshot) {
+                transactionSnapshot.set(committedSnapshot.get());
+            }
+            return new SimpleTransactionStatus();
+        }
+
+        @Override
+        public void commit(TransactionStatus status) {
+            clearTransaction();
+        }
+
+        @Override
+        public void rollback(TransactionStatus status) {
+            clearTransaction();
+        }
+
+        private RichRouteSnapshot currentSnapshot() {
+            if (Boolean.TRUE.equals(repeatableRead.get())) {
+                return transactionSnapshot.get();
+            }
+            return committedSnapshot.get();
+        }
+
+        private void commitAlternative(RichRouteSnapshot alternativeSnapshot) {
+            committedSnapshot.set(alternativeSnapshot);
+        }
+
+        private int observedIsolation() {
+            return observedIsolation.get();
+        }
+
+        private boolean observedReadOnly() {
+            return observedReadOnly.get();
+        }
+
+        private void clearTransaction() {
+            transactionSnapshot.remove();
+            repeatableRead.remove();
+        }
     }
 
     @SuppressWarnings("unchecked")

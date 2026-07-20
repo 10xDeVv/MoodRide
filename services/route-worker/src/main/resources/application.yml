@@ -43,15 +43,17 @@ spring:
         bootstrap.servers: localhost:9092
   
   # Redis Configuration  
-  redis:
-    host: localhost
-    port: 6379
-    password: redis_password
-    timeout: 2000ms
-    lettuce:
-      pool:
-        max-active: 20
-        max-idle: 10
+  data:
+    redis:
+      host: localhost
+      port: 6379
+      password: redis_password
+      connect-timeout: 2000ms
+      timeout: 2000ms
+      lettuce:
+        pool:
+          max-active: 20
+          max-idle: 10
 
 # Server Configuration
 server:
@@ -71,6 +73,8 @@ management:
 # Route Generation Configuration
 moodride:
   algorithm:
+    profile: ${MOODRIDE_ALGORITHM_PROFILE:hybrid_osrm_v2}
+    mode: ${MOODRIDE_ALGORITHM_MODE:drive}
     h3-resolution: 7
     tile-selection-ring-min: 4
     tile-selection-ring-max: 22
@@ -100,7 +104,22 @@ moodride:
         initial-interval-ms: 500
         multiplier: 2.0
         max-interval-ms: 5000
+    producer:
+      ack-timeout: ${MOODRIDE_KAFKA_PRODUCER_ACK_TIMEOUT:10s}
+  route-terminal-events:
+    recovery-enabled: true
+    lease-duration: 30s
+    batch-size: 25
+    retry-base-delay: 10s
+    retry-max-delay: 5m
+    interval-ms: 10000
+    initial-delay-ms: 10000
+  scheduling:
+    shutdown-await: ${MOODRIDE_SCHEDULER_SHUTDOWN_AWAIT:15s}
   cache:
+    scenic-scoring-version: ${MOODRIDE_SCENIC_SCORING_VERSION:3.7-bridge-coastal-calibration}
+    road-dataset-revision: ${MOODRIDE_ROAD_DATASET_REVISION:local-dev}
+    road-anchor-cache-schema: ${MOODRIDE_ROAD_ANCHOR_CACHE_SCHEMA:v1}
     graph-warmup:
       enabled: false
       interval-ms: 900000

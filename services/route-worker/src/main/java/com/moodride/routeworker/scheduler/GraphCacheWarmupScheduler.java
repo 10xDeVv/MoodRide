@@ -1,6 +1,7 @@
 package com.moodride.routeworker.scheduler;
 
 import com.moodride.routeworker.service.GraphService;
+import com.moodride.routeworker.config.RouteWorkerSchedulingConfiguration;
 import com.moodride.routeworker.service.WorkerCacheMetricsService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -27,7 +28,11 @@ public class GraphCacheWarmupScheduler {
         this.enabled = enabled;
     }
 
-    @Scheduled(fixedDelayString = "${moodride.cache.graph-warmup.interval-ms:900000}", initialDelayString = "${moodride.cache.graph-warmup.initial-delay-ms:20000}")
+    @Scheduled(
+        fixedDelayString = "${moodride.cache.graph-warmup.interval-ms:900000}",
+        initialDelayString = "${moodride.cache.graph-warmup.initial-delay-ms:20000}",
+        scheduler = RouteWorkerSchedulingConfiguration.CACHE_WARMUP_TASK_SCHEDULER
+    )
     public void warmGraphCache() {
         if (!enabled) {
             return;

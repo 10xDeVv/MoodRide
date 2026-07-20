@@ -8,20 +8,28 @@ public final class CacheKeySchema {
     private CacheKeySchema() {
     }
 
-    public static String routeResult(UUID routeId) {
-        return "route:result:" + routeId;
+    public static String routeDetailV2(UUID routeId) {
+        return "route:detail:v2:" + routeId;
     }
 
-    public static String scenicTile(String h3Index) {
-        return "scenic:tile:" + h3Index;
+    public static String scenicTile(String scoringVersion, String h3Index) {
+        return "scenic:tile:" + scoringVersion + ":" + h3Index;
     }
 
     public static String segmentMeta(String h3Index) {
         return "segment:meta:" + h3Index;
     }
 
-    public static String roadAnchor(String h3Index) {
-        return "segment:anchor:" + h3Index;
+    public static String roadAnchor(
+        String scenicScoringVersion,
+        String roadDatasetRevision,
+        String anchorCacheSchema,
+        String h3Index
+    ) {
+        return "segment:anchor:scenic=" + scenicScoringVersion
+            + ":road=" + roadDatasetRevision
+            + ":schema=" + anchorCacheSchema
+            + ":h3=" + h3Index;
     }
 
     public static String regionalPopularity(String regionKey) {

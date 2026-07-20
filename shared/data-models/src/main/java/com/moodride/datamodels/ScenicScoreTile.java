@@ -125,6 +125,46 @@ public class ScenicScoreTile implements Serializable {
     }
 
     /**
+     * Creates the geometry-free value stored in the cross-service scenic tile cache.
+     * The copy remains JDK-serialization compatible with {@code ScenicScoreTile} readers
+     * while the managed source entity and its PostGIS geometry stay untouched.
+     */
+    public ScenicScoreTile detachedCacheValue() {
+        ScenicScoreTile copy = new ScenicScoreTile();
+        copy.h3Index = h3Index;
+        copy.scenicScore = scenicScore;
+        copy.waterProximity = waterProximity;
+        copy.elevationVariance = elevationVariance;
+        copy.naturalLandUse = naturalLandUse;
+        copy.roadDensity = roadDensity;
+        copy.trafficSignalScore = trafficSignalScore;
+        copy.poiDensity = poiDensity;
+        copy.visualComplexity = visualComplexity;
+        copy.waterScore = waterScore;
+        copy.greenScore = greenScore;
+        copy.elevationScore = elevationScore;
+        copy.solitudeScore = solitudeScore;
+        copy.curveScore = curveScore;
+        copy.poiScore = poiScore;
+        copy.parkScore = parkScore;
+        copy.overturePoiScore = overturePoiScore;
+        copy.buildingDensityScore = buildingDensityScore;
+        copy.darknessScore = darknessScore;
+        copy.urbanPenaltyScore = urbanPenaltyScore;
+        copy.roadStressScore = roadStressScore;
+        copy.waterVisibilityScore = waterVisibilityScore;
+        copy.waterCrossingScore = waterCrossingScore;
+        copy.coastalRoadScore = coastalRoadScore;
+        copy.treeCanopyScore = treeCanopyScore;
+        copy.scenicPoiScore = scenicPoiScore;
+        copy.viewpointScore = viewpointScore;
+        copy.bridgeCoastalScore = bridgeCoastalScore;
+        copy.lastScored = lastScored;
+        copy.scoringVersion = scoringVersion;
+        return copy;
+    }
+
+    /**
      * Calculates the combined scenic score from individual components.
      * Weights are based on user preference research and can be tuned.
      */

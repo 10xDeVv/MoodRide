@@ -3,9 +3,9 @@ services:
     image: postgis/postgis:15-3.3
     restart: unless-stopped
     environment:
-      POSTGRES_DB: ${POSTGRES_DB}
-      POSTGRES_USER: ${POSTGRES_USER}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB is required}
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     command:
@@ -57,45 +57,53 @@ services:
       redis-server
       --maxmemory 256mb
       --maxmemory-policy allkeys-lru
-      --requirepass ${REDIS_PASSWORD}
+      --requirepass ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
     volumes:
       - redis_data:/data
     networks:
       - internal
 
   osrm:
-    image: ghcr.io/project-osrm/osrm-backend:v5.27.1
+    image: ${OSRM_IMAGE_REF:?OSRM_IMAGE_REF digest is required}
     restart: unless-stopped
-    command: osrm-routed --algorithm mld /data/${OSRM_DATASET_BASENAME}.osrm
+    command: osrm-routed --algorithm mld /data/${OSRM_DATASET_BASENAME:?OSRM_DATASET_BASENAME is required}.osrm
     volumes:
       - ./data/osrm:/data:ro
     networks:
       - internal
 
   route-api:
-    image: ghcr.io/${GHCR_NAMESPACE}/moodride-route-api:${IMAGE_TAG}
+    image: ${ROUTE_API_IMAGE_REF:?ROUTE_API_IMAGE_REF digest is required}
     restart: unless-stopped
     depends_on:
       - postgres
       - kafka
       - redis
     environment:
-      SPRING_PROFILES_ACTIVE: prod
-      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB}
-      SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER}
-      SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD}
+      SPRING_PROFILES_ACTIVE: ${SPRING_PROFILES_ACTIVE:?SPRING_PROFILES_ACTIVE is required}
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:?POSTGRES_DB is required}
+      SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER:?POSTGRES_USER is required}
+      SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
       SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
       SPRING_KAFKA_CONSUMER_BOOTSTRAP_SERVERS: kafka:29092
       SPRING_KAFKA_PRODUCER_BOOTSTRAP_SERVERS: kafka:29092
       SPRING_KAFKA_ADMIN_PROPERTIES_BOOTSTRAP_SERVERS: kafka:29092
       SPRING_DATA_REDIS_HOST: redis
-      SPRING_DATA_REDIS_PASSWORD: ${REDIS_PASSWORD}
+      SPRING_DATA_REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
       MOODRIDE_CORS_ALLOWED_ORIGINS: ${MOODRIDE_CORS_ALLOWED_ORIGINS:-https://usewayward.app,https://www.usewayward.app}
+      MOODRIDE_ANALYTICS_HASH_SECRET: ${MOODRIDE_ANALYTICS_HASH_SECRET:?MOODRIDE_ANALYTICS_HASH_SECRET is required}
+      MOODRIDE_SCENIC_SCORING_VERSION: ${MOODRIDE_SCENIC_SCORING_VERSION:?MOODRIDE_SCENIC_SCORING_VERSION is required}
+      MOODRIDE_ROAD_DATASET_REVISION: ${MOODRIDE_ROAD_DATASET_REVISION:?MOODRIDE_ROAD_DATASET_REVISION is required}
+      MOODRIDE_ROAD_DATASET_FINGERPRINT: ${MOODRIDE_ROAD_DATASET_FINGERPRINT:?MOODRIDE_ROAD_DATASET_FINGERPRINT is required}
+      MOODRIDE_ROAD_ANCHOR_CACHE_SCHEMA: ${MOODRIDE_ROAD_ANCHOR_CACHE_SCHEMA:?MOODRIDE_ROAD_ANCHOR_CACHE_SCHEMA is required}
+      MOODRIDE_ALGORITHM_PROFILE: ${MOODRIDE_ALGORITHM_PROFILE:?MOODRIDE_ALGORITHM_PROFILE is required}
+      MOODRIDE_ALGORITHM_MODE: ${MOODRIDE_ALGORITHM_MODE:?MOODRIDE_ALGORITHM_MODE is required}
+      MOODRIDE_CACHE_GRAPH_WARMUP_ENABLED: ${MOODRIDE_CACHE_GRAPH_WARMUP_ENABLED:?MOODRIDE_CACHE_GRAPH_WARMUP_ENABLED is required}
     networks:
       - internal
 
   route-worker:
-    image: ghcr.io/${GHCR_NAMESPACE}/moodride-route-worker:${IMAGE_TAG}
+    image: ${ROUTE_WORKER_IMAGE_REF:?ROUTE_WORKER_IMAGE_REF digest is required}
     restart: unless-stopped
     depends_on:
       - postgres
@@ -103,54 +111,59 @@ services:
       - redis
       - osrm
     environment:
-      SPRING_PROFILES_ACTIVE: prod
-      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB}?reWriteBatchedInserts=true
-      SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER}
-      SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD}
+      SPRING_PROFILES_ACTIVE: ${SPRING_PROFILES_ACTIVE:?SPRING_PROFILES_ACTIVE is required}
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:?POSTGRES_DB is required}?reWriteBatchedInserts=true
+      SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER:?POSTGRES_USER is required}
+      SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
       SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
       SPRING_KAFKA_CONSUMER_BOOTSTRAP_SERVERS: kafka:29092
       SPRING_KAFKA_PRODUCER_BOOTSTRAP_SERVERS: kafka:29092
       SPRING_KAFKA_ADMIN_PROPERTIES_BOOTSTRAP_SERVERS: kafka:29092
       SPRING_DATA_REDIS_HOST: redis
-      SPRING_DATA_REDIS_PASSWORD: ${REDIS_PASSWORD}
+      SPRING_DATA_REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
+      MOODRIDE_SCENIC_SCORING_VERSION: ${MOODRIDE_SCENIC_SCORING_VERSION:?MOODRIDE_SCENIC_SCORING_VERSION is required}
+      MOODRIDE_ROAD_DATASET_REVISION: ${MOODRIDE_ROAD_DATASET_REVISION:?MOODRIDE_ROAD_DATASET_REVISION is required}
+      MOODRIDE_ROAD_DATASET_FINGERPRINT: ${MOODRIDE_ROAD_DATASET_FINGERPRINT:?MOODRIDE_ROAD_DATASET_FINGERPRINT is required}
+      MOODRIDE_ROAD_ANCHOR_CACHE_SCHEMA: ${MOODRIDE_ROAD_ANCHOR_CACHE_SCHEMA:?MOODRIDE_ROAD_ANCHOR_CACHE_SCHEMA is required}
+      MOODRIDE_ALGORITHM_PROFILE: ${MOODRIDE_ALGORITHM_PROFILE:?MOODRIDE_ALGORITHM_PROFILE is required}
+      MOODRIDE_ALGORITHM_MODE: ${MOODRIDE_ALGORITHM_MODE:?MOODRIDE_ALGORITHM_MODE is required}
+      MOODRIDE_CACHE_GRAPH_WARMUP_ENABLED: ${MOODRIDE_CACHE_GRAPH_WARMUP_ENABLED:?MOODRIDE_CACHE_GRAPH_WARMUP_ENABLED is required}
       MOODRIDE_OSRM_BASE_URL: http://osrm:5000
-      MOODRIDE_CACHE_GRAPH_WARMUP_ENABLED: "false"
       MOODRIDE_KAFKA_LISTENER_CONCURRENCY: ${MOODRIDE_KAFKA_LISTENER_CONCURRENCY:-3}
       MOODRIDE_ALGORITHM_OSRM_REQUEST_PARALLELISM: ${MOODRIDE_ALGORITHM_OSRM_REQUEST_PARALLELISM:-6}
     networks:
       - internal
 
   notification-service:
-    image: ghcr.io/${GHCR_NAMESPACE}/moodride-notification-service:${IMAGE_TAG}
+    image: ${NOTIFICATION_SERVICE_IMAGE_REF:?NOTIFICATION_SERVICE_IMAGE_REF digest is required}
     restart: unless-stopped
     depends_on:
       - kafka
       - redis
     environment:
-      SPRING_PROFILES_ACTIVE: prod
+      SPRING_PROFILES_ACTIVE: ${SPRING_PROFILES_ACTIVE:?SPRING_PROFILES_ACTIVE is required}
       SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
       SPRING_KAFKA_CONSUMER_BOOTSTRAP_SERVERS: kafka:29092
       SPRING_KAFKA_PRODUCER_BOOTSTRAP_SERVERS: kafka:29092
       SPRING_KAFKA_ADMIN_PROPERTIES_BOOTSTRAP_SERVERS: kafka:29092
       SPRING_DATA_REDIS_HOST: redis
-      SPRING_DATA_REDIS_PASSWORD: ${REDIS_PASSWORD}
+      SPRING_DATA_REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
     networks:
       - internal
 
   frontend:
-    image: ghcr.io/${GHCR_NAMESPACE}/moodride-frontend:${IMAGE_TAG}
+    image: ${FRONTEND_IMAGE_REF:?FRONTEND_IMAGE_REF digest is required}
     restart: unless-stopped
     networks:
       - internal
-
   caddy:
-    image: caddy:2-alpine
+    image: ${CADDY_IMAGE_REF:?CADDY_IMAGE_REF digest is required}
     restart: unless-stopped
     ports:
       - "80:80"
       - "443:443"
     volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile
+      - ${CADDYFILE_PATH:?CADDYFILE_PATH is required}:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
       - caddy_config:/config
     depends_on:

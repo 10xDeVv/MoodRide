@@ -1,10 +1,12 @@
 # Wayward Route Engine
 
-Last reconciled: 2026-07-01
+Last reconciled: 2026-07-19
 
 Wayward's active route algorithm is `hybrid_osrm_v2`. It keeps OSRM responsible for legal drivable geometry while Wayward decides which candidate places should shape the loop and how well the returned route satisfies the selected vibe.
 
 ## High-Level Flow
+
+Route submission precedes this worker flow. `route-api` returns HTTP `202 Accepted` after one database transaction commits the `QUEUED` job and its durable dispatch outbox record. An asynchronous dispatcher publishes the record to Kafka, records acknowledgement only after the broker ACK, and retries durable unacknowledged records. Submission acceptance therefore does not wait for immediate broker acknowledgement or worker receipt.
 
 1. `route-worker` consumes a Kafka `route-jobs` message.
 2. `RouteGenerationService` calls `RoutePlanner.generateRouteOptions`.
@@ -19,6 +21,8 @@ Wayward's active route algorithm is `hybrid_osrm_v2`. It keeps OSRM responsible 
    - `balanced`
    - `shorter`
 10. Score breakdowns and route explanations are persisted and returned by the API.
+
+First-result delivery does not split this planning work into stages. The worker computes the full candidate pool—including candidate generation, OSRM calls, scoring, filtering, deduplication, and option selection—before it publishes `PRIMARY_READY`. The revisioned lifecycle is `QUEUED -> PROCESSING -> PRIMARY_READY -> COMPLETED`, or the terminal state `FAILED`/`TIMEOUT`, with lease fencing and stale-revision rejection. `PRIMARY_READY` lets the client fetch and paint the slim exact primary before rich details, but this only removes post-planning response/enrichment delay. It is not staged route computation, and no new end-to-end p50/p95 latency is claimed here.
 
 OSRM is not a paid external endpoint in the default stack. It is a local service/container using prepared OSM data.
 
@@ -158,6 +162,24 @@ Tile scores are computed offline. They are not labels inherent in raw datasets.
 
 Runtime route generation samples these tile vectors along returned OSRM corridors.
 
+### Scenic Tile Lookup Cache
+
+Runtime lookup checks a local LRU first. For remaining tile IDs it uses one Redis `MGET`, resolves all Redis misses with one bulk SQL query, and pipelines Redis fill writes.
+
+This scenic cache is one of the shared data-plane contracts, alongside road-segment metadata and regional popularity. Route payload caches intentionally differ: the API's versioned rich-detail DTO uses `routeDetailsV2::route:detail:v2:<routeId>`, while the worker's internal persisted result uses `routeResults::route:result:<routeId>`. The parity checker validates both distinct route contracts as well as the shared data-plane contracts; it does not require route payloads to share a cache shape.
+
+Measured cache integration evidence used a real authenticated Redis 7.0-alpine instance and 1,500 deterministic tiles:
+
+| Cache operation or state | Measured time |
+| --- | ---: |
+| Serial Redis `GET` baseline | 3,213 ms |
+| Single Redis `MGET` | 90 ms |
+| Cold SQL lookup plus pipelined Redis fill | 685 ms |
+| Redis-warm service lookup | 140 ms |
+| Local-warm service lookup | 2 ms |
+
+These are scenic-tile cache microbenchmark/integration timings only. They establish cache round-trip behavior, not route-generation or end-to-end first-result latency, and do not support a new route p50/p95 claim.
+
 ## Scenic Data Releases
 
 Current data-quality train:
@@ -226,6 +248,13 @@ It checks:
 
 Use the CSV first, sort by `flags`, then inspect the JSON for detail.
 
+Evaluation vocabulary matters:
+
+- A **route-return count** is the number of frozen scenarios that technically completed and returned route output.
+- A **quality-pass rate** would require those returned routes to clear the defined geometry, contract, spread, and behavior checks.
+
+The matched historical artifacts below establish route-return counts, not a clean quality-pass rate. A technical completion must not be reported as a usable-route or quality-pass result.
+
 The important tuning rule is:
 
 ```text
@@ -241,4 +270,32 @@ Tune against repeated route-quality failures and real route behavior.
 | `hybrid_osrm_v1` | Replaced by v2. Useful as a conceptual predecessor. |
 | `hybrid_osrm_v2` | Current default route-generation contract. |
 
-V2 is functionally complete as the current route engine. Future work is calibration, feedback learning, and quality hardening.
+`hybrid_osrm_v2`/Legacy is the selected production foundation, but it is not documented as functionally complete or as a proven final architecture.
+
+### Matched Frozen Controls
+
+All rows use the same 27-scenario selected manifest, SHA-256 `2fc22496f3ee42bfcc298fd06a3aa1e3a126822fe0b51513b0034342b0d27c00`.
+
+| Source control | Route-engine configuration | Route returns | Job-processing p50 / p95 |
+| --- | --- | ---: | ---: |
+| `c54e7ae6a33bf6014225b9f714fe48037c9e9443` | Legacy | 14/27 | 1,132 / 2,389 ms |
+| `c54e7ae6a33bf6014225b9f714fe48037c9e9443` | PURE Design B anchor | 2/27 | 1,991 / 4,760 ms |
+| `c54e7ae6a33bf6014225b9f714fe48037c9e9443` | PURE Design B road-chain | 0/27 | n/a |
+| `0fda4ca7a98b02d067dea4d0d14417afe12fc3f1` | Legacy | 14/27 | 1,242 / 2,834 ms |
+| `0fda4ca7a98b02d067dea4d0d14417afe12fc3f1` | PURE Design B anchor | 4/27 | 2,585 / 3,426 ms |
+
+These are job-processing latency percentiles from the named controls, not end-to-end first-result measurements. On this matched evidence, retain `hybrid_osrm_v2`/Legacy as the production foundation and reject PURE Design B for production: Legacy returned routes in more frozen scenarios and had lower job-processing p50/p95 in both matched anchor comparisons. This is a bounded release decision, not proof of a final architecture or launch-quality routing.
+
+Legacy still needs quality hardening. Its route-return scenarios include repeated-corridor, backtracking, urban-pressure, edge-pressure, and low-spread failures, so the 14/27 counts are not clean usable-route results.
+
+### Evidence Limits and Current Release Status
+
+The archived selected manifest is hash-verified, but the historical canonical path `scripts/monitoring/benchmarks/m0-route-quality-scenarios-20260710.json` is absent. The checked-in runner also lacks the historical commit, image, runtime-mode, manifest-copy, and diagnostics provenance fields. Reusing the archived manifest with that runner would create a new reconstructed harness; it would not retroactively establish provenance for the historical runs.
+
+The earlier OSRM/scenic prerequisite blockage has been resolved. The current local source gate at `artifacts/route-quality-eval/current-source-full-gate-20260719/provenance.json` ran all 27 scenarios with restored scenic data and an identified OSRM image/dataset: 16 technically completed and 11 ended `vibe_unavailable`. All 16 completions retained route-quality contract failures, leaving zero clean contract-qualified completions.
+
+That gate used host JARs from a dirty worktree rather than immutable labeled images. It is local source-level evidence, not production evidence. The immutable-image gate and production deployment have not been completed.
+
+The pre-deploy browser artifact `artifacts/latency-release/baseline-cohort-browser-20260719.json` records 25 of 25 completed, payload-matched, current-job-attributed routes with click-to-visible p50 `10,167 ms`, p90 `13,873 ms`, and p95 `14,849 ms`. Its commit is inferred from the latest successful deployment workflow run: `runtimeCommitVerified` is `false`, and the live container digest and revision label were not observed. Do not claim runtime-verified commit provenance or a causal before/after latency change until a matched, runtime-attributed post-deploy cohort exists.
+
+The scenic-cache microbenchmark and historical-control reconciliation sidecar remains `artifacts/route-quality-eval/first-latency-release-20260719/evidence.json`.

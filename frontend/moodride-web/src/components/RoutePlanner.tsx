@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback, useRef, useEffect } from "react";
+import { useState, useCallback, useRef, useEffect, useLayoutEffect } from "react";
 import {
   MapPin, Navigation, Bike, Footprints, Car,
   Clock, ChevronDown, ChevronUp,
@@ -20,16 +20,24 @@ import {
   RouteSessionDock,
   SelectedRouteChip,
   getSelectedRouteOption,
-  guidanceFromStatus,
   type FailureGuidance
 } from "./RoutePlannerResults";
-import { coarseAnalyticsRegionKey, submitRoute, getJobStatus, getRoute, searchLocations, trackAnalyticsEvent } from "@/lib/api";
+import {
+  coarseAnalyticsRegionKey,
+  getJobStatus,
+  getPrimaryRoute,
+  getRoute,
+  searchLocations,
+  submitRoute,
+  trackAnalyticsEvent
+} from "@/lib/api";
 import { connectJobChannel } from "@/lib/ws";
 import type {
+  LocationSuggestion,
+  PrimaryRouteResponse,
   RouteDetailResponse,
   RouteMode,
-  Vibe,
-  LocationSuggestion
+  Vibe
 } from "@/lib/types";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -59,7 +67,8 @@ const VIBE_PREFERENCE_DEFAULTS: Record<string, Record<string, number>> = {
 };
 
 const TIME_BUDGET_OPTIONS = [30, 60, 90, 120] as const;
-const JOB_STATUS_POLL_INTERVAL_MS = 750;
+const JOB_STATUS_POLL_INTERVAL_MS = 1500;
+const WS_FIRST_GRACE_MS = 2500;
 
 const ROUTE_MODES: Array<{ value: RouteMode; label: string; status: string; enabled: boolean }> = [
   { value: "drive", label: "Drive",  status: "Live",  enabled: true },
@@ -85,6 +94,157 @@ function buildPreferenceVector(vibes: string[]): Record<string, number> {
   }
   const n = active.length;
   return Object.fromEntries(Object.entries(acc).map(([k, v]) => [k, Number((v / n).toFixed(4))]));
+}
+
+type LifecycleSource = "ws" | "poll";
+type RouteResponseKind = "primary" | "detail";
+
+type LifecycleUpdate = {
+  jobId: string;
+  status?: string | null;
+  routeId?: string | null;
+  reason?: string | null;
+  failureCode?: string | null;
+  userMessage?: string | null;
+  suggestedVibes?: string[];
+  suggestedActions?: string[];
+  stateRevision?: number;
+  optionRevision?: number;
+  optionCount?: number;
+  optionsComplete?: boolean;
+};
+
+type LifecycleCursor = {
+  stateRevision: number;
+  statusRank: number;
+  status: string;
+  optionRevision: number;
+  routeId: string | null;
+};
+
+type DisplayedRouteRevision = {
+  epoch: number;
+  jobId: string;
+  routeId: string;
+  stateRevision: number;
+  optionRevision: number;
+  optionsComplete: boolean;
+  rich: boolean;
+  source: LifecycleSource;
+};
+
+function routePaintRevisionKey(revision: DisplayedRouteRevision): string {
+  return `${revision.epoch}:${revision.jobId}:${revision.routeId}:${revision.optionRevision}`;
+}
+
+function normalizeLifecycleStatus(status: string | null | undefined): string {
+  const normalized = status?.trim().toLowerCase() ?? "";
+  return normalized === "success" ? "completed" : normalized;
+}
+
+function lifecycleStatusRank(status: string): number {
+  switch (status) {
+    case "queued":
+      return 0;
+    case "processing":
+      return 1;
+    case "primary_ready":
+      return 2;
+    case "completed":
+    case "failed":
+    case "timeout":
+      return 3;
+    default:
+      return 0;
+  }
+}
+
+function isTerminalLifecycleStatus(status: string): boolean {
+  return status === "completed" || status === "failed" || status === "timeout";
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof DOMException
+    ? error.name === "AbortError"
+    : error instanceof Error && error.name === "AbortError";
+}
+
+function performanceNow(): number {
+  return typeof performance !== "undefined" ? performance.now() : Date.now();
+}
+
+function adaptPrimaryRoute(primary: PrimaryRouteResponse): RouteDetailResponse {
+  const routeOptions = primary.routeOptions.some((option) => option.routeId === primary.routeId)
+    ? primary.routeOptions
+    : [{
+        profile: primary.profile,
+        routeId: primary.routeId,
+        routeUrl: primary.routeUrl,
+        scenicScore: primary.scenicScore,
+        totalDistanceKm: primary.totalDistanceKm,
+        estimatedDurationMinutes: primary.estimatedDurationMinutes
+      }, ...primary.routeOptions];
+
+  return {
+    routeId: primary.routeId,
+    jobId: primary.jobId,
+    routeUrl: primary.routeUrl,
+    scenicScore: primary.scenicScore,
+    scoreBreakdown: {},
+    qualityTier: "",
+    totalDistanceKm: primary.totalDistanceKm,
+    estimatedDurationMinutes: primary.estimatedDurationMinutes,
+    timeBudgetMinutes: primary.timeBudgetMinutes,
+    routeMode: primary.routeMode,
+    startLat: primary.startLat,
+    startLng: primary.startLng,
+    vibes: primary.vibes,
+    geometry: primary.geometry,
+    scenicHighlights: [],
+    routeOptions: routeOptions.map((option) => ({
+      ...option,
+      scoreBreakdown: {},
+      explanation: null
+    })),
+    optionRevision: primary.optionRevision,
+    optionCount: primary.optionCount,
+    optionsComplete: primary.optionsComplete,
+    algorithmVersion: primary.algorithmVersion,
+    beamCandidates: null,
+    computationTimeMs: primary.computationTimeMs,
+    userRating: null,
+    ratedAt: null,
+    createdAt: primary.createdAt,
+    expiresAt: primary.expiresAt
+  };
+}
+
+function mergeAcceptedRouteLifecycle(
+  accepted: RouteDetailResponse,
+  latest: RouteDetailResponse,
+  optionCount?: number,
+  optionsComplete?: boolean
+): RouteDetailResponse {
+  const acceptedOptions = new Map(accepted.routeOptions.map((option) => [option.routeId, option]));
+  const mergedOptions = latest.routeOptions.map((option) => {
+    const acceptedOption = acceptedOptions.get(option.routeId);
+    acceptedOptions.delete(option.routeId);
+    return acceptedOption
+      ? {
+          ...option,
+          scoreBreakdown: acceptedOption.scoreBreakdown,
+          explanation: acceptedOption.explanation
+        }
+      : option;
+  });
+
+  return {
+    ...accepted,
+    routeOptions: [...mergedOptions, ...acceptedOptions.values()],
+    optionRevision: latest.optionRevision,
+    optionCount: Math.max(accepted.optionCount, latest.optionCount, optionCount ?? 0),
+    optionsComplete: Boolean(accepted.optionsComplete || optionsComplete || latest.optionsComplete)
+  };
 }
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -447,7 +607,10 @@ export function RoutePlanner() {
   const [statusMessage, setStatusMessage] = useState("");
   const [failureGuidance, setFailureGuidance] = useState<FailureGuidance | null>(null);
   const [route, setRoute] = useState<RouteDetailResponse | null>(null);
+  const [displayedRevision, setDisplayedRevision] = useState<DisplayedRouteRevision | null>(null);
   const [selectedOptionId, setSelectedOptionId] = useState("");
+  const [pendingOptionId, setPendingOptionId] = useState("");
+  const [detailRetryOptionId, setDetailRetryOptionId] = useState("");
   const [showHandoff, setShowHandoff] = useState(false);
   const [progressStep, setProgressStep] = useState(0);
   const [sheetState, setSheetState] = useState<BottomSheetState>('mid');
@@ -459,10 +622,34 @@ export function RoutePlanner() {
   const isTablet = viewportMode === 'tablet';
   const isDesktop = viewportMode === 'desktop';
 
-  const geocodeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const geocodeTimerRef = useRef<number | null>(null);
   const stopWsRef = useRef<null | (() => void)>(null);
-  const pollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const routeDetailsRef = useRef<Record<string, RouteDetailResponse>>({});
+  const pollTimerRef = useRef<number | null>(null);
+  const wsGraceTimerRef = useRef<number | null>(null);
+  const progressTimerRef = useRef<number | null>(null);
+  const activeAbortRef = useRef<AbortController | null>(null);
+  const activeEpochRef = useRef(0);
+  const activeJobIdRef = useRef<string | null>(null);
+  const terminalAcceptedRef = useRef(false);
+  const lifecycleCursorRef = useRef<LifecycleCursor>({
+    stateRevision: -1,
+    statusRank: -1,
+    status: "",
+    optionRevision: -1,
+    routeId: null
+  });
+  const displayedRevisionRef = useRef<DisplayedRouteRevision | null>(null);
+  const routeRef = useRef<RouteDetailResponse | null>(null);
+  const selectedOptionIdRef = useRef("");
+  const selectionRequestRef = useRef(0);
+  const pendingOptionIdRef = useRef("");
+  const routeResponseCacheRef = useRef<Map<string, RouteDetailResponse>>(new Map());
+  const routeRequestFlightsRef = useRef<Map<string, Promise<RouteDetailResponse>>>(new Map());
+  const primaryFallbacksRef = useRef<Map<string, RouteDetailResponse>>(new Map());
+  const richDetailsRef = useRef<Map<string, RouteDetailResponse>>(new Map());
+  const milestoneKeysRef = useRef<Set<string>>(new Set());
+  const paintedRouteRevisionKeysRef = useRef<Set<string>>(new Set());
+  const routePaintWaitersRef = useRef<Map<string, Set<(painted: boolean) => void>>>(new Map());
   const seqRef = useRef(0);
   const previousPhaseRef = useRef<Phase>("idle");
   const generationStartedAtRef = useRef<number | null>(null);
@@ -501,7 +688,7 @@ export function RoutePlanner() {
     setLocationPending(true);
     setLocationError(null);
     setShowDropdown(true);
-    geocodeTimerRef.current = setTimeout(async () => {
+    geocodeTimerRef.current = window.setTimeout(async () => {
       const seq = ++seqRef.current;
       try {
         const results = await searchLocations(locationQuery);
@@ -626,29 +813,365 @@ export function RoutePlanner() {
     );
   }, []);
 
-  const resolveRouteDetail = useCallback(async (routeId: string, forceRefresh = false): Promise<RouteDetailResponse> => {
-    if (!forceRefresh && routeDetailsRef.current[routeId]) return routeDetailsRef.current[routeId];
-    const detail = await getRoute(routeId);
-    routeDetailsRef.current[routeId] = detail;
-    return detail;
-  }, []);
-
-  const prefetchRouteDetails = useCallback((detail: RouteDetailResponse) => {
-    for (const option of detail.routeOptions ?? []) {
-      if (!option.routeId || routeDetailsRef.current[option.routeId]) continue;
-      void getRoute(option.routeId)
-        .then((optionDetail) => {
-          routeDetailsRef.current[option.routeId] = optionDetail;
-        })
-        .catch(() => {
-          // Option prefetch is an interaction optimization; direct selection still retries.
-        });
+  const closeActiveChannels = useCallback(() => {
+    if (stopWsRef.current) {
+      stopWsRef.current();
+      stopWsRef.current = null;
+    }
+    if (pollTimerRef.current !== null) {
+      window.clearTimeout(pollTimerRef.current);
+      pollTimerRef.current = null;
+    }
+    if (wsGraceTimerRef.current !== null) {
+      window.clearTimeout(wsGraceTimerRef.current);
+      wsGraceTimerRef.current = null;
     }
   }, []);
 
+  const stopProgress = useCallback(() => {
+    if (progressTimerRef.current !== null) {
+      window.clearInterval(progressTimerRef.current);
+      progressTimerRef.current = null;
+    }
+  }, []);
+
+  const invalidateActiveJob = useCallback(() => {
+    activeEpochRef.current += 1;
+    selectionRequestRef.current += 1;
+    pendingOptionIdRef.current = "";
+    primaryFallbacksRef.current.clear();
+    activeAbortRef.current?.abort();
+    for (const waiters of routePaintWaitersRef.current.values()) {
+      for (const settle of waiters) settle(false);
+    }
+    routePaintWaitersRef.current.clear();
+    paintedRouteRevisionKeysRef.current.clear();
+    activeAbortRef.current = null;
+    activeJobIdRef.current = null;
+    terminalAcceptedRef.current = false;
+    lifecycleCursorRef.current = {
+      stateRevision: -1,
+      statusRank: -1,
+      status: "",
+      optionRevision: -1,
+      routeId: null
+    };
+    closeActiveChannels();
+    stopProgress();
+    return activeEpochRef.current;
+  }, [closeActiveChannels, stopProgress]);
+
+  const setSelectedRouteId = useCallback((routeId: string) => {
+    selectedOptionIdRef.current = routeId;
+    setSelectedOptionId(routeId);
+  }, []);
+
+  const resolveRouteResponse = useCallback((
+    jobId: string,
+    routeId: string,
+    optionRevision: number,
+    kind: RouteResponseKind,
+    requireComplete: boolean,
+    signal: AbortSignal
+  ) => {
+    const requestEpoch = activeEpochRef.current;
+    const completenessKey = requireComplete ? "complete" : "partial";
+    const requestKey = kind === "primary"
+      ? `${requestEpoch}:${jobId}:${routeId}:primary`
+      : `${requestEpoch}:${jobId}:${routeId}:${optionRevision}:${completenessKey}`;
+
+    const validateResponse = (detail: RouteDetailResponse) => {
+      if (detail.jobId !== jobId || detail.routeId !== routeId) {
+        throw new Error("Route response did not match the active job.");
+      }
+      if (detail.optionRevision < optionRevision) {
+        throw new Error("Route response was older than the accepted lifecycle revision.");
+      }
+      if (requireComplete && !detail.optionsComplete) {
+        throw new Error("Complete route details are not available yet.");
+      }
+      return detail;
+    };
+
+    const cached = routeResponseCacheRef.current.get(requestKey);
+    if (cached) {
+      if (
+        cached.jobId === jobId
+        && cached.routeId === routeId
+        && cached.optionRevision >= optionRevision
+        && (!requireComplete || cached.optionsComplete)
+      ) {
+        return Promise.resolve(cached);
+      }
+      routeResponseCacheRef.current.delete(requestKey);
+    }
+
+    const inFlight = routeRequestFlightsRef.current.get(requestKey);
+    if (inFlight) return inFlight.then(validateResponse);
+
+    const request = (kind === "primary"
+      ? getPrimaryRoute(routeId, signal).then(adaptPrimaryRoute)
+      : getRoute(routeId, signal)
+    ).then((detail) => {
+      if (detail.jobId !== jobId || detail.routeId !== routeId) {
+        throw new Error("Route response did not match the active job.");
+      }
+
+      if (
+        requestEpoch === activeEpochRef.current
+        && jobId === activeJobIdRef.current
+      ) {
+        if (kind === "primary") {
+          const previousPrimary = primaryFallbacksRef.current.get(requestKey);
+          if (!previousPrimary || detail.optionRevision >= previousPrimary.optionRevision) {
+            primaryFallbacksRef.current.set(requestKey, detail);
+          }
+        }
+        if (
+          kind === "primary"
+          || (
+            detail.optionRevision >= optionRevision
+            && (!requireComplete || detail.optionsComplete)
+          )
+        ) {
+          routeResponseCacheRef.current.set(requestKey, detail);
+        }
+        if (kind === "detail") {
+          const previous = richDetailsRef.current.get(routeId);
+          if (
+            !previous
+            || detail.optionRevision > previous.optionRevision
+            || (detail.optionRevision === previous.optionRevision && detail.optionsComplete && !previous.optionsComplete)
+          ) {
+            richDetailsRef.current.set(routeId, detail);
+          }
+        }
+      }
+      return detail;
+    });
+
+
+    const trackedRequest = request.finally(() => {
+      if (routeRequestFlightsRef.current.get(requestKey) === trackedRequest) {
+        routeRequestFlightsRef.current.delete(requestKey);
+      }
+    });
+    routeRequestFlightsRef.current.set(requestKey, trackedRequest);
+    return trackedRequest.then(validateResponse);
+  }, []);
+
+  const applyDisplayedRoute = useCallback((
+    detail: RouteDetailResponse,
+    candidate: DisplayedRouteRevision,
+    acceptedPendingOptionId?: string
+  ) => {
+    if (
+      candidate.epoch !== activeEpochRef.current
+      || candidate.jobId !== activeJobIdRef.current
+      || detail.jobId !== candidate.jobId
+      || detail.routeId !== candidate.routeId
+      || detail.optionRevision < candidate.optionRevision
+      || (
+        acceptedPendingOptionId !== undefined
+        && pendingOptionIdRef.current !== acceptedPendingOptionId
+      )
+    ) {
+      return false;
+    }
+
+    const current = displayedRevisionRef.current;
+    if (current && current.jobId === candidate.jobId) {
+      if (candidate.stateRevision < current.stateRevision) return false;
+      if (candidate.optionRevision < current.optionRevision) return false;
+      if (current.optionsComplete && !candidate.optionsComplete) return false;
+      if (current.rich && !candidate.rich) return false;
+      if (
+        acceptedPendingOptionId === undefined
+        && candidate.stateRevision === current.stateRevision
+        && candidate.optionRevision === current.optionRevision
+        && candidate.routeId === current.routeId
+        && candidate.optionsComplete === current.optionsComplete
+        && candidate.rich === current.rich
+      ) {
+        return false;
+      }
+      if (
+        candidate.stateRevision === current.stateRevision
+        && candidate.optionRevision === current.optionRevision
+        && ((current.optionsComplete && !candidate.optionsComplete) || (current.rich && !candidate.rich))
+      ) {
+        return false;
+      }
+    }
+
+    routeRef.current = detail;
+    displayedRevisionRef.current = candidate;
+    selectedOptionIdRef.current = candidate.routeId;
+    const nextPaintKey = routePaintRevisionKey(candidate);
+    for (const [paintKey, waiters] of routePaintWaitersRef.current) {
+      if (paintKey === nextPaintKey) continue;
+      routePaintWaitersRef.current.delete(paintKey);
+      for (const settle of waiters) settle(false);
+    }
+    setRoute(detail);
+    setDisplayedRevision(candidate);
+    setSelectedOptionId(candidate.routeId);
+    if (acceptedPendingOptionId !== undefined) {
+      pendingOptionIdRef.current = "";
+      setPendingOptionId("");
+    }
+    return true;
+  }, []);
+
+  const waitForRouteMapPainted = useCallback((
+    revision: DisplayedRouteRevision,
+    signal: AbortSignal
+  ): Promise<boolean> => {
+    if (signal.aborted) {
+      return Promise.reject(signal.reason ?? new DOMException("Route request was aborted.", "AbortError"));
+    }
+
+    const paintKey = routePaintRevisionKey(revision);
+    const currentRevision = displayedRevisionRef.current;
+    if (
+      revision.epoch !== activeEpochRef.current
+      || revision.jobId !== activeJobIdRef.current
+      || !currentRevision
+      || routePaintRevisionKey(currentRevision) !== paintKey
+    ) {
+      return Promise.resolve(false);
+    }
+    if (paintedRouteRevisionKeysRef.current.has(paintKey)) {
+      return Promise.resolve(true);
+    }
+
+    return new Promise<boolean>((resolve, reject) => {
+      const waiters = routePaintWaitersRef.current.get(paintKey) ?? new Set<(painted: boolean) => void>();
+      let settled = false;
+      const cleanup = () => {
+        signal.removeEventListener("abort", handleAbort);
+        waiters.delete(settle);
+        if (waiters.size === 0 && routePaintWaitersRef.current.get(paintKey) === waiters) {
+          routePaintWaitersRef.current.delete(paintKey);
+        }
+      };
+      const settle = (painted: boolean) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve(painted);
+      };
+      const handleAbort = () => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(signal.reason ?? new DOMException("Route request was aborted.", "AbortError"));
+      };
+
+      waiters.add(settle);
+      routePaintWaitersRef.current.set(paintKey, waiters);
+      signal.addEventListener("abort", handleAbort, { once: true });
+      if (paintedRouteRevisionKeysRef.current.has(paintKey)) settle(true);
+    });
+  }, []);
+
+  const emitMilestone = useCallback((
+    eventName: "route_generation_primary_ready" | "route_results_committed" | "route_map_painted",
+    detail: RouteDetailResponse,
+    revision: DisplayedRouteRevision
+  ) => {
+    const key = `${revision.jobId}:${revision.optionRevision}:${eventName}`;
+    if (milestoneKeysRef.current.has(key)) return;
+    milestoneKeysRef.current.add(key);
+
+    const selectedOption = getSelectedRouteOption(detail, revision.routeId);
+    const startedAt = generationStartedAtRef.current;
+    trackAnalyticsEvent({
+      eventName,
+      jobId: revision.jobId,
+      routeId: revision.routeId,
+      routeProfile: selectedOption?.profile,
+      routeMode: detail.routeMode,
+      vibes: detail.vibes,
+      timeBudgetMinutes: detail.timeBudgetMinutes,
+      regionKey: coarseAnalyticsRegionKey(detail.startLat, detail.startLng),
+      routeCount: detail.optionCount,
+      status: revision.optionsComplete ? "completed" : "primary_ready",
+      durationMs: startedAt === null ? null : Math.max(0, performanceNow() - startedAt),
+      scenicScore: selectedOption?.scenicScore ?? detail.scenicScore,
+      metadata: {
+        source: revision.source,
+        stateRevision: revision.stateRevision,
+        optionRevision: revision.optionRevision,
+        optionCount: detail.optionCount,
+        optionsComplete: revision.optionsComplete
+      }
+    });
+  }, []);
+
+  useLayoutEffect(() => {
+    if (
+      !route
+      || !displayedRevision
+      || route.routeId !== displayedRevision.routeId
+      || displayedRevisionRef.current !== displayedRevision
+    ) {
+      return;
+    }
+    emitMilestone("route_results_committed", route, displayedRevision);
+  }, [displayedRevision, emitMilestone, route]);
+
+  const handleRouteMapPainted = useCallback((jobId: string, routeId: string, optionRevision: number) => {
+    const detail = routeRef.current;
+    const revision = displayedRevisionRef.current;
+    if (
+      !detail
+      || !revision
+      || revision.epoch !== activeEpochRef.current
+      || revision.jobId !== activeJobIdRef.current
+      || detail.jobId !== jobId
+      || revision.jobId !== jobId
+      || detail.routeId !== routeId
+      || revision.routeId !== routeId
+      || revision.optionRevision !== optionRevision
+    ) {
+      return false;
+    }
+    const paintKey = routePaintRevisionKey(revision);
+    paintedRouteRevisionKeysRef.current.add(paintKey);
+    const waiters = routePaintWaitersRef.current.get(paintKey);
+    if (waiters) {
+      routePaintWaitersRef.current.delete(paintKey);
+      for (const settle of waiters) settle(true);
+    }
+    emitMilestone("route_map_painted", detail, revision);
+    return true;
+  }, [emitMilestone]);
+
+  useEffect(() => {
+    return () => {
+      invalidateActiveJob();
+    };
+  }, [invalidateActiveJob]);
+
   const handleGenerate = useCallback(async () => {
     if (routeMode !== "drive" || vibes.length === 0) return;
-    generationStartedAtRef.current = Date.now();
+
+    const epoch = invalidateActiveJob();
+    setPendingOptionId("");
+    setDetailRetryOptionId("");
+    const controller = new AbortController();
+    activeAbortRef.current = controller;
+    generationStartedAtRef.current = performanceNow();
+    routeResponseCacheRef.current.clear();
+    routeRequestFlightsRef.current.clear();
+    richDetailsRef.current.clear();
+    routeRef.current = null;
+    displayedRevisionRef.current = null;
+    setRoute(null);
+    setDisplayedRevision(null);
+    setSelectedRouteId("");
+
     trackAnalyticsEvent({
       eventName: "route_generate_clicked",
       routeMode,
@@ -660,12 +1183,10 @@ export function RoutePlanner() {
     setStatusMessage("");
     setFailureGuidance(null);
     setProgressStep(0);
-    routeDetailsRef.current = {};
-    setRoute(null);
     setLargeResultsOpen(true);
 
-    const stepTimer = setInterval(() => {
-      setProgressStep((p) => Math.min(p + 1, LOADING_STEPS.length - 1));
+    progressTimerRef.current = window.setInterval(() => {
+      setProgressStep((current) => Math.min(current + 1, LOADING_STEPS.length - 1));
     }, 2200);
 
     try {
@@ -678,8 +1199,10 @@ export function RoutePlanner() {
         vibes: vibes as Vibe[],
         preferenceVector: preferences,
         timeBudgetMinutes: timeBudget
-      });
+      }, controller.signal);
+      if (epoch !== activeEpochRef.current || controller.signal.aborted) return;
 
+      activeJobIdRef.current = submission.jobId;
       trackAnalyticsEvent({
         eventName: "route_generate_submitted",
         jobId: submission.jobId,
@@ -689,155 +1212,576 @@ export function RoutePlanner() {
         regionKey: coarseAnalyticsRegionKey(lat, lng),
         status: submission.status
       });
-
       setPhase("tracking");
 
-      let resolved = false;
-      let primaryRendered = false;
+      let pollingStarted = false;
+      let pollInFlight = false;
+      let finalWsTerminalStatusRequested = false;
+
+      const isActiveJob = () =>
+        epoch === activeEpochRef.current
+        && submission.jobId === activeJobIdRef.current
+        && !controller.signal.aborted;
+
+      const renderPrimary = async (
+        update: LifecycleUpdate,
+        source: LifecycleSource,
+        stateRevision: number,
+        statusRank: number,
+        optionRevision: number
+      ) => {
+        if (!update.routeId) return null;
+
+        const acceptedRoute = routeRef.current;
+        const acceptedRevision = displayedRevisionRef.current;
+        const committedRouteId = selectedOptionIdRef.current;
+        const alternativeSelected = Boolean(
+          acceptedRoute
+          && acceptedRevision
+          && committedRouteId
+          && acceptedRoute.routeId === committedRouteId
+          && committedRouteId !== update.routeId
+        );
+        const responseRouteId = alternativeSelected ? committedRouteId : update.routeId;
+        const detail = await resolveRouteResponse(
+          submission.jobId,
+          responseRouteId,
+          optionRevision,
+          alternativeSelected ? "detail" : "primary",
+          false,
+          controller.signal
+        );
+        const cursor = lifecycleCursorRef.current;
+        if (
+          !isActiveJob()
+          || cursor.stateRevision !== stateRevision
+          || cursor.statusRank !== statusRank
+          || cursor.optionRevision !== optionRevision
+          || detail.optionRevision < optionRevision
+        ) {
+          return null;
+        }
+
+        const currentRoute = routeRef.current;
+        const currentRevision = displayedRevisionRef.current;
+        const currentSelectedId = selectedOptionIdRef.current;
+        if (
+          currentRoute
+          && currentRevision
+          && currentRoute.jobId === submission.jobId
+          && currentRoute.routeId === currentSelectedId
+          && (
+            alternativeSelected
+            || (currentRevision.rich && currentRoute.routeId === update.routeId)
+          )
+        ) {
+          if (alternativeSelected && currentSelectedId !== responseRouteId) return null;
+          const mergedRoute = mergeAcceptedRouteLifecycle(
+            currentRoute,
+            detail,
+            update.optionCount,
+            update.optionsComplete
+          );
+          const mergedRevision: DisplayedRouteRevision = {
+            epoch,
+            jobId: submission.jobId,
+            routeId: currentRoute.routeId,
+            stateRevision,
+            optionRevision: mergedRoute.optionRevision,
+            optionsComplete: mergedRoute.optionsComplete,
+            rich: currentRevision.rich,
+            source
+          };
+          if (!applyDisplayedRoute(mergedRoute, mergedRevision)) return null;
+
+          if (!pendingOptionIdRef.current) setStatusMessage("");
+          setDetailRetryOptionId((retryId) => retryId === currentRoute.routeId ? "" : retryId);
+          setPhase("completed");
+          emitMilestone("route_generation_primary_ready", mergedRoute, mergedRevision);
+          return mergedRoute;
+        }
+
+        if (currentSelectedId !== "" && currentSelectedId !== update.routeId) return null;
+        const revision: DisplayedRouteRevision = {
+          epoch,
+          jobId: submission.jobId,
+          routeId: detail.routeId,
+          stateRevision,
+          optionRevision: detail.optionRevision,
+          optionsComplete: detail.optionsComplete,
+          rich: false,
+          source
+        };
+        if (!applyDisplayedRoute(detail, revision)) return null;
+
+        stopProgress();
+        setProgressStep(LOADING_STEPS.length);
+        if (!pendingOptionIdRef.current) setStatusMessage("");
+        setPhase("completed");
+        emitMilestone("route_generation_primary_ready", detail, revision);
+        return detail;
+      };
+
+      const handleLifecycle = async (update: LifecycleUpdate, source: LifecycleSource) => {
+        if (
+          !isActiveJob()
+          || update.jobId !== submission.jobId
+          || terminalAcceptedRef.current
+        ) {
+          return;
+        }
+
+        let lifecycleUpdate = update;
+        const incomingStatus = normalizeLifecycleStatus(update.status);
+        if (
+          source === "ws"
+          && (incomingStatus === "failed" || incomingStatus === "timeout")
+        ) {
+          const incomingStateRevision = Number.isFinite(update.stateRevision) ? update.stateRevision! : 0;
+          const incomingOptionRevision = Number.isFinite(update.optionRevision) ? update.optionRevision! : 0;
+          const currentCursor = lifecycleCursorRef.current;
+          if (
+            incomingStateRevision < currentCursor.stateRevision
+            || incomingOptionRevision < currentCursor.optionRevision
+            || (
+              incomingStateRevision === currentCursor.stateRevision
+              && lifecycleStatusRank(incomingStatus) < currentCursor.statusRank
+            )
+          ) {
+            return;
+          }
+          if (finalWsTerminalStatusRequested) return;
+          finalWsTerminalStatusRequested = true;
+          terminalAcceptedRef.current = true;
+          closeActiveChannels();
+          stopProgress();
+          setProgressStep(LOADING_STEPS.length);
+          try {
+            const finalStatus = await getJobStatus(submission.jobId, controller.signal);
+            if (!isActiveJob() || finalStatus.jobId !== submission.jobId) return;
+            const finalLifecycleStatus = normalizeLifecycleStatus(finalStatus.status);
+            if (
+              isTerminalLifecycleStatus(finalLifecycleStatus)
+              && finalStatus.stateRevision >= incomingStateRevision
+              && finalStatus.optionRevision >= incomingOptionRevision
+            ) {
+              lifecycleUpdate = finalStatus;
+            }
+          } catch (error) {
+            if (!isActiveJob() || isAbortError(error)) return;
+            // Retain the terminal websocket reason when final status guidance is unavailable.
+          }
+        }
+
+        const status = normalizeLifecycleStatus(lifecycleUpdate.status);
+        const stateRevision = Number.isFinite(lifecycleUpdate.stateRevision)
+          ? lifecycleUpdate.stateRevision!
+          : 0;
+        const optionRevision = Number.isFinite(lifecycleUpdate.optionRevision)
+          ? lifecycleUpdate.optionRevision!
+          : 0;
+        const statusRank = lifecycleStatusRank(status);
+        if (source === "ws" && !isTerminalLifecycleStatus(status) && !pollingStarted) {
+          rearmWsGrace();
+        }
+
+        const cursor = lifecycleCursorRef.current;
+        const displayed = displayedRevisionRef.current;
+        const retryingUnrenderedPrimary = (
+          status === "primary_ready"
+          && cursor.status === "primary_ready"
+          && stateRevision === cursor.stateRevision
+          && statusRank === cursor.statusRank
+          && optionRevision === cursor.optionRevision
+          && (lifecycleUpdate.routeId ?? null) === cursor.routeId
+          && !(
+            displayed
+            && displayed.epoch === epoch
+            && displayed.jobId === submission.jobId
+            && displayed.stateRevision === stateRevision
+            && displayed.optionRevision >= optionRevision
+          )
+        );
+        const newerOptionsAtSameLifecycle = (
+          status === cursor.status
+          && stateRevision === cursor.stateRevision
+          && statusRank === cursor.statusRank
+          && optionRevision > cursor.optionRevision
+        );
+        if (
+          optionRevision < cursor.optionRevision
+          || stateRevision < cursor.stateRevision
+          || (
+            stateRevision === cursor.stateRevision
+            && statusRank <= cursor.statusRank
+            && !retryingUnrenderedPrimary
+            && !newerOptionsAtSameLifecycle
+          )
+        ) {
+          return;
+        }
+        lifecycleCursorRef.current = {
+          stateRevision,
+          statusRank,
+          status,
+          optionRevision,
+          routeId: lifecycleUpdate.routeId ?? null
+        };
+
+        const terminal = isTerminalLifecycleStatus(status);
+        if (terminal) {
+          terminalAcceptedRef.current = true;
+          closeActiveChannels();
+          stopProgress();
+          setProgressStep(LOADING_STEPS.length);
+        }
+
+        if (status === "primary_ready") {
+          if (!lifecycleUpdate.routeId) return;
+          try {
+            await renderPrimary(lifecycleUpdate, source, stateRevision, statusRank, optionRevision);
+          } catch (error) {
+            if (isActiveJob() && !isAbortError(error)) {
+              const retainedRoute = routeRef.current;
+              if (retainedRoute?.jobId === submission.jobId) {
+                setDetailRetryOptionId(selectedOptionIdRef.current || retainedRoute.routeId);
+                setStatusMessage("Your route is still ready, but newer option details could not be loaded. Retry when you are ready.");
+                setPhase("completed");
+              } else {
+                setStatusMessage(error instanceof Error ? error.message : "Failed to load the primary route.");
+              }
+            }
+          }
+          return;
+        }
+
+        if (status === "completed") {
+          const targetRouteId = selectedOptionIdRef.current || lifecycleUpdate.routeId;
+          const selectionRequest = selectionRequestRef.current;
+          const requiredCompletionRevision = Math.max(
+            optionRevision,
+            displayedRevisionRef.current?.optionRevision ?? optionRevision
+          );
+          const richFlight = targetRouteId
+            ? resolveRouteResponse(
+                submission.jobId,
+                targetRouteId,
+                requiredCompletionRevision,
+                "detail",
+                true,
+                controller.signal
+              ).then(
+                (detail) => ({ ok: true as const, detail }),
+                (error: unknown) => ({ ok: false as const, error })
+              )
+            : null;
+
+          const startedAt = generationStartedAtRef.current;
+          const currentRoute = routeRef.current;
+          const selectedOption = currentRoute
+            ? getSelectedRouteOption(currentRoute, selectedOptionIdRef.current)
+            : null;
+          trackAnalyticsEvent({
+            eventName: "route_generation_completed",
+            jobId: submission.jobId,
+            routeId: lifecycleUpdate.routeId,
+            routeProfile: selectedOption?.profile,
+            routeMode,
+            vibes: currentRoute?.vibes?.length ? currentRoute.vibes : vibes,
+            timeBudgetMinutes: timeBudget,
+            regionKey: coarseAnalyticsRegionKey(lat, lng),
+            routeCount: lifecycleUpdate.optionCount ?? currentRoute?.optionCount ?? null,
+            status: "completed",
+            durationMs: startedAt === null ? null : Math.max(0, performanceNow() - startedAt),
+            scenicScore: selectedOption?.scenicScore ?? currentRoute?.scenicScore,
+            metadata: {
+              source,
+              stateRevision,
+              optionRevision,
+              optionCount: lifecycleUpdate.optionCount,
+              optionsComplete: lifecycleUpdate.optionsComplete
+            }
+          });
+
+          let canonicalRoute = routeRef.current?.jobId === submission.jobId
+            ? routeRef.current
+            : null;
+          if (!canonicalRoute && lifecycleUpdate.routeId) {
+            try {
+              canonicalRoute = await renderPrimary(
+                lifecycleUpdate,
+                source,
+                stateRevision,
+                statusRank,
+                optionRevision
+              );
+            } catch (error) {
+              if (!isAbortError(error)) {
+                const fallbackKey = `${epoch}:${submission.jobId}:${lifecycleUpdate.routeId}:primary`;
+                const lowerRevisionPrimary = primaryFallbacksRef.current.get(fallbackKey);
+                if (
+                  lowerRevisionPrimary
+                  && lowerRevisionPrimary.jobId === submission.jobId
+                  && lowerRevisionPrimary.routeId === lifecycleUpdate.routeId
+                  && lowerRevisionPrimary.optionRevision <= optionRevision
+                ) {
+                  const nonCompletePrimary: RouteDetailResponse = {
+                    ...lowerRevisionPrimary,
+                    optionsComplete: false
+                  };
+                  const fallbackRevision: DisplayedRouteRevision = {
+                    epoch,
+                    jobId: submission.jobId,
+                    routeId: nonCompletePrimary.routeId,
+                    stateRevision,
+                    optionRevision: nonCompletePrimary.optionRevision,
+                    optionsComplete: false,
+                    rich: false,
+                    source
+                  };
+                  if (applyDisplayedRoute(nonCompletePrimary, fallbackRevision)) {
+                    canonicalRoute = nonCompletePrimary;
+                    setStatusMessage("The primary route is ready while complete route details finish loading.");
+                    setPhase("completed");
+                    emitMilestone("route_generation_primary_ready", nonCompletePrimary, fallbackRevision);
+                  }
+                } else {
+                  setStatusMessage(error instanceof Error ? error.message : "Failed to load the primary route.");
+                }
+              }
+            }
+          }
+          if (!isActiveJob()) return;
+          if (canonicalRoute) setPhase("completed");
+          const primaryPaintRevision = canonicalRoute
+            && displayedRevisionRef.current?.epoch === epoch
+            && displayedRevisionRef.current.jobId === submission.jobId
+            && displayedRevisionRef.current.routeId === canonicalRoute.routeId
+              ? displayedRevisionRef.current
+              : null;
+          if (
+            !primaryPaintRevision
+            || (canonicalRoute?.geometry?.geometry?.coordinates?.length ?? 0) < 2
+          ) {
+            setFailureGuidance(null);
+            setStatusMessage("Route generation completed without a readable primary route.");
+            setPhase("failed");
+            return;
+          }
+
+          if (!targetRouteId || !richFlight) {
+            if (!canonicalRoute) {
+              setFailureGuidance(null);
+              setStatusMessage("Route generation completed without a readable route.");
+              setPhase("failed");
+            }
+            return;
+          }
+
+          try {
+            const richOutcome = await richFlight;
+            if (!richOutcome.ok) throw richOutcome.error;
+            const detail = richOutcome.detail;
+            const latestCursor = lifecycleCursorRef.current;
+            if (
+              !isActiveJob()
+              || latestCursor.stateRevision !== stateRevision
+              || latestCursor.status !== "completed"
+              || latestCursor.optionRevision !== optionRevision
+              || selectionRequest !== selectionRequestRef.current
+              || selectedOptionIdRef.current !== targetRouteId
+            ) {
+              return;
+            }
+
+            if (
+              !primaryPaintRevision
+              || !await waitForRouteMapPainted(primaryPaintRevision, controller.signal)
+            ) {
+              return;
+            }
+            const postPaintCursor = lifecycleCursorRef.current;
+            if (
+              !isActiveJob()
+              || postPaintCursor.stateRevision !== stateRevision
+              || postPaintCursor.status !== "completed"
+              || postPaintCursor.optionRevision !== optionRevision
+              || selectionRequest !== selectionRequestRef.current
+              || selectedOptionIdRef.current !== targetRouteId
+            ) {
+              return;
+            }
+
+            const revision: DisplayedRouteRevision = {
+              epoch,
+              jobId: submission.jobId,
+              routeId: detail.routeId,
+              stateRevision,
+              optionRevision: detail.optionRevision,
+              optionsComplete: detail.optionsComplete,
+              rich: true,
+              source
+            };
+            if (applyDisplayedRoute(detail, revision)) {
+              setDetailRetryOptionId("");
+              if (!pendingOptionIdRef.current) setStatusMessage("");
+              setPhase("completed");
+            }
+          } catch (error) {
+            if (
+              !isActiveJob()
+              || selectionRequest !== selectionRequestRef.current
+              || isAbortError(error)
+            ) {
+              return;
+            }
+            const retainedRoute = routeRef.current?.jobId === submission.jobId
+              ? routeRef.current
+              : null;
+            if (retainedRoute) {
+              setDetailRetryOptionId(targetRouteId);
+              setStatusMessage("Your route is ready. More route details are temporarily unavailable. Retry to load them.");
+              setPhase("completed");
+            } else {
+              setFailureGuidance(null);
+              setStatusMessage(error instanceof Error ? error.message : "Failed to load the completed route.");
+              setPhase("failed");
+            }
+          }
+          return;
+        }
+
+        if (status === "failed" || status === "timeout") {
+          selectionRequestRef.current += 1;
+          pendingOptionIdRef.current = "";
+          setPendingOptionId("");
+          setDetailRetryOptionId("");
+          const suggestedVibes = lifecycleUpdate.suggestedVibes ?? [];
+          const suggestedActions = lifecycleUpdate.suggestedActions ?? [];
+          setFailureGuidance(
+            lifecycleUpdate.failureCode || suggestedVibes.length > 0 || suggestedActions.length > 0
+              ? {
+                  failureCode: lifecycleUpdate.failureCode ?? null,
+                  suggestedVibes,
+                  suggestedActions
+                }
+              : null
+          );
+          setStatusMessage(
+            lifecycleUpdate.userMessage
+            ?? lifecycleUpdate.reason
+            ?? (status === "timeout" ? "Route generation timed out." : "Route generation failed.")
+          );
+          setPhase("failed");
+
+          const startedAt = generationStartedAtRef.current;
+          trackAnalyticsEvent({
+            eventName: "route_generation_failed",
+            jobId: submission.jobId,
+            routeMode,
+            vibes,
+            timeBudgetMinutes: timeBudget,
+            regionKey: coarseAnalyticsRegionKey(lat, lng),
+            status: lifecycleUpdate.failureCode ?? status,
+            durationMs: startedAt === null ? null : Math.max(0, performanceNow() - startedAt),
+            metadata: {
+              source,
+              reason: lifecycleUpdate.reason,
+              failureCode: lifecycleUpdate.failureCode,
+              stateRevision,
+              optionRevision
+            }
+          });
+          if (lifecycleUpdate.failureCode === "vibe_unavailable") {
+            trackAnalyticsEvent({
+              eventName: "vibe_unavailable",
+              jobId: submission.jobId,
+              routeMode,
+              vibes,
+              timeBudgetMinutes: timeBudget,
+              regionKey: coarseAnalyticsRegionKey(lat, lng),
+              status: lifecycleUpdate.failureCode,
+              metadata: {
+                suggestedVibes: lifecycleUpdate.suggestedVibes,
+                suggestedActions: lifecycleUpdate.suggestedActions
+              }
+            });
+          }
+          return;
+        }
+
+        setStatusMessage("Processing…");
+      };
+
+      const pollOnce = async () => {
+        if (!isActiveJob() || terminalAcceptedRef.current || pollInFlight) return;
+        pollInFlight = true;
+        try {
+          const status = await getJobStatus(submission.jobId, controller.signal);
+          await handleLifecycle(status, "poll");
+        } catch (error) {
+          if (!isAbortError(error) && isActiveJob()) {
+            console.warn("Status polling error:", error);
+          }
+        } finally {
+          pollInFlight = false;
+          if (isActiveJob() && !terminalAcceptedRef.current) {
+            pollTimerRef.current = window.setTimeout(() => {
+              pollTimerRef.current = null;
+              void pollOnce();
+            }, JOB_STATUS_POLL_INTERVAL_MS);
+          }
+        }
+      };
+
+      const startPolling = (delayMs = 0) => {
+        if (pollingStarted || !isActiveJob() || terminalAcceptedRef.current) return;
+        pollingStarted = true;
+        if (wsGraceTimerRef.current !== null) {
+          window.clearTimeout(wsGraceTimerRef.current);
+          wsGraceTimerRef.current = null;
+        }
+        pollTimerRef.current = window.setTimeout(() => {
+          pollTimerRef.current = null;
+          void pollOnce();
+        }, delayMs);
+      };
+
+      function rearmWsGrace() {
+        if (pollingStarted || !isActiveJob() || terminalAcceptedRef.current) return;
+        if (wsGraceTimerRef.current !== null) window.clearTimeout(wsGraceTimerRef.current);
+        wsGraceTimerRef.current = window.setTimeout(() => {
+          wsGraceTimerRef.current = null;
+          startPolling();
+        }, WS_FIRST_GRACE_MS);
+      }
 
       const stopWs = connectJobChannel(
         submission.jobId,
         submission.wsChannel,
-        async (event) => {
-          if (resolved) return;
-          if (event.routeId) {
-            const normalizedEventStatus = event.status?.toLowerCase();
-            const isPrimaryReady = normalizedEventStatus === "primary_ready";
-            if (!isPrimaryReady) {
-              resolved = true;
-              stopWs();
-              clearInterval(stepTimer);
-              clearInterval(pollTimerRef.current!);
-              setProgressStep(LOADING_STEPS.length);
-            }
-            try {
-              const detail = await resolveRouteDetail(event.routeId, !isPrimaryReady);
-              setRoute(detail);
-              prefetchRouteDetails(detail);
-              if (isPrimaryReady) primaryRendered = true;
-              setSelectedOptionId(event.routeId);
-              setPhase("completed");
-              const selectedOption = getSelectedRouteOption(detail, event.routeId);
-              trackAnalyticsEvent({
-                eventName: isPrimaryReady ? "route_generation_primary_ready" : "route_generation_completed",
-                jobId: submission.jobId,
-                routeId: event.routeId,
-                routeProfile: selectedOption?.profile,
-                routeMode,
-                vibes: detail.vibes?.length ? detail.vibes : vibes,
-                timeBudgetMinutes: timeBudget,
-                regionKey: coarseAnalyticsRegionKey(lat, lng),
-                routeCount: detail.routeOptions?.length ?? 1,
-                status: isPrimaryReady ? "primary_ready" : "completed",
-                durationMs: generationStartedAtRef.current ? Date.now() - generationStartedAtRef.current : null,
-                scenicScore: selectedOption?.scenicScore ?? detail.scenicScore
-              });
-            } catch (e) {
-              const msg = e instanceof Error ? e.message : "Failed to load route detail.";
-              setStatusMessage(msg);
-              if (!isPrimaryReady) setPhase("failed");
-            }
-          }
+        (event) => {
+          void handleLifecycle(event, "ws");
         },
-        (errMsg) => {
-          console.warn("WS error:", errMsg);
+        (errorMessage) => {
+          if (!isActiveJob() || terminalAcceptedRef.current) return;
+          console.warn("WS error:", errorMessage);
+          startPolling();
         }
       );
-      stopWsRef.current = stopWs;
-
-      // Polling fallback
-      const pollTimer = setInterval(async () => {
-        if (resolved) { clearInterval(pollTimer); return; }
-        try {
-          const status = await getJobStatus(submission.jobId);
-          const normalizedStatus = status.status?.toLowerCase();
-          const polledRouteId = status.routeId ?? status.routeOptions?.[0]?.routeId;
-          const hasPrimaryRoute = Boolean(polledRouteId);
-          if (normalizedStatus === "completed" || normalizedStatus === "primary_ready" || (normalizedStatus === "processing" && hasPrimaryRoute)) {
-            const isPrimaryReady = normalizedStatus !== "completed";
-            if (!isPrimaryReady) {
-              clearInterval(pollTimer);
-            }
-            if ((!resolved || isPrimaryReady) && (!isPrimaryReady || !primaryRendered)) {
-              if (!isPrimaryReady) {
-                resolved = true;
-                stopWs();
-                clearInterval(stepTimer);
-                setProgressStep(LOADING_STEPS.length);
-              }
-              if (polledRouteId) {
-                const detail = await resolveRouteDetail(polledRouteId, !isPrimaryReady);
-                setRoute(detail);
-                setSelectedOptionId(polledRouteId);
-                prefetchRouteDetails(detail);
-                setPhase("completed");
-                if (isPrimaryReady) primaryRendered = true;
-                const selectedOption = getSelectedRouteOption(detail, polledRouteId);
-                trackAnalyticsEvent({
-                  eventName: isPrimaryReady ? "route_generation_primary_ready" : "route_generation_completed",
-                  jobId: submission.jobId,
-                  routeId: polledRouteId,
-                  routeProfile: selectedOption?.profile,
-                  routeMode,
-                  vibes: detail.vibes?.length ? detail.vibes : vibes,
-                  timeBudgetMinutes: timeBudget,
-                  regionKey: coarseAnalyticsRegionKey(lat, lng),
-                  routeCount: detail.routeOptions?.length ?? 1,
-                  status: isPrimaryReady ? "primary_ready" : "completed",
-                  durationMs: generationStartedAtRef.current ? Date.now() - generationStartedAtRef.current : null,
-                  scenicScore: selectedOption?.scenicScore ?? detail.scenicScore
-                });
-              }
-            }
-          } else if (normalizedStatus === "failed") {
-            clearInterval(pollTimer);
-            if (!resolved) {
-              resolved = true;
-              stopWs();
-              clearInterval(stepTimer);
-              setFailureGuidance(guidanceFromStatus(status));
-              setStatusMessage(status.userMessage ?? status.reason ?? "Route generation failed.");
-              setPhase("failed");
-              trackAnalyticsEvent({
-                eventName: "route_generation_failed",
-                jobId: submission.jobId,
-                routeMode,
-                vibes,
-                timeBudgetMinutes: timeBudget,
-                regionKey: coarseAnalyticsRegionKey(lat, lng),
-                status: status.failureCode ?? status.status,
-                durationMs: generationStartedAtRef.current ? Date.now() - generationStartedAtRef.current : null,
-                metadata: { reason: status.reason, failureCode: status.failureCode }
-              });
-              if (status.failureCode === "vibe_unavailable") {
-                trackAnalyticsEvent({
-                  eventName: "vibe_unavailable",
-                  jobId: submission.jobId,
-                  routeMode,
-                  vibes,
-                  timeBudgetMinutes: timeBudget,
-                  regionKey: coarseAnalyticsRegionKey(lat, lng),
-                  status: status.failureCode,
-                  metadata: {
-                    suggestedVibes: status.suggestedVibes,
-                    suggestedActions: status.suggestedActions
-                  }
-                });
-              }
-            }
-          } else {
-            setStatusMessage("Processing…");
-          }
-        } catch { /* ignore poll errors */ }
-      }, JOB_STATUS_POLL_INTERVAL_MS);
-      pollTimerRef.current = pollTimer;
-
-    } catch (err: unknown) {
-      clearInterval(stepTimer);
-      const msg = err instanceof Error ? err.message : "An unexpected error occurred.";
-      setStatusMessage(msg);
+      if (terminalAcceptedRef.current || !isActiveJob()) {
+        stopWs();
+      } else {
+        stopWsRef.current = stopWs;
+        rearmWsGrace();
+      }
+    } catch (error) {
+      if (epoch !== activeEpochRef.current || controller.signal.aborted || isAbortError(error)) return;
+      stopProgress();
+      const message = error instanceof Error ? error.message : "An unexpected error occurred.";
+      setStatusMessage(message);
       setFailureGuidance(null);
       setPhase("failed");
+      const startedAt = generationStartedAtRef.current;
       trackAnalyticsEvent({
         eventName: "route_generation_failed",
         routeMode,
@@ -845,25 +1789,45 @@ export function RoutePlanner() {
         timeBudgetMinutes: timeBudget,
         regionKey: coarseAnalyticsRegionKey(lat, lng),
         status: "submit_failed",
-        durationMs: generationStartedAtRef.current ? Date.now() - generationStartedAtRef.current : null,
-        metadata: { message: msg.slice(0, 240) }
+        durationMs: startedAt === null ? null : Math.max(0, performanceNow() - startedAt),
+        metadata: { message: message.slice(0, 240) }
       });
     }
-  }, [lat, lng, routeMode, vibes, timeBudget, resolveRouteDetail, prefetchRouteDetails]);
+  }, [
+    applyDisplayedRoute,
+    closeActiveChannels,
+    emitMilestone,
+    invalidateActiveJob,
+    lat,
+    lng,
+    resolveRouteResponse,
+    routeMode,
+    waitForRouteMapPainted,
+    setSelectedRouteId,
+    stopProgress,
+    timeBudget,
+    vibes
+  ]);
 
   const handleReset = useCallback(() => {
-    if (stopWsRef.current) { stopWsRef.current(); stopWsRef.current = null; }
-    if (pollTimerRef.current) { clearInterval(pollTimerRef.current); pollTimerRef.current = null; }
+    invalidateActiveJob();
+    setPendingOptionId("");
+    setDetailRetryOptionId("");
+    routeResponseCacheRef.current.clear();
+    routeRequestFlightsRef.current.clear();
+    richDetailsRef.current.clear();
+    routeRef.current = null;
+    displayedRevisionRef.current = null;
     setPhase("idle");
-    routeDetailsRef.current = {};
     setRoute(null);
+    setDisplayedRevision(null);
     setStatusMessage("");
     setFailureGuidance(null);
-    setSelectedOptionId("");
+    setSelectedRouteId("");
     setShowHandoff(false);
     setProgressStep(0);
     setLargeResultsOpen(true);
-  }, []);
+  }, [invalidateActiveJob, setSelectedRouteId]);
 
   const handlePlanNewRoute = useCallback(() => {
     const selectedOption = route ? getSelectedRouteOption(route, selectedOptionId) : null;
@@ -877,8 +1841,9 @@ export function RoutePlanner() {
       timeBudgetMinutes: timeBudget,
       regionKey: coarseAnalyticsRegionKey(lat, lng)
     });
-    if (stopWsRef.current) { stopWsRef.current(); stopWsRef.current = null; }
-    if (pollTimerRef.current) { clearInterval(pollTimerRef.current); pollTimerRef.current = null; }
+    invalidateActiveJob();
+    setPendingOptionId("");
+    setDetailRetryOptionId("");
     setPhase("idle");
     setStatusMessage("");
     setFailureGuidance(null);
@@ -886,64 +1851,175 @@ export function RoutePlanner() {
     setProgressStep(0);
     setSheetState('mid');
     setLargeResultsOpen(true);
-  }, [lat, lng, route, selectedOptionId, routeMode, vibes, timeBudget]);
+  }, [invalidateActiveJob, lat, lng, route, selectedOptionId, routeMode, vibes, timeBudget]);
 
   const handleTryVibe = useCallback((vibe: string) => {
-    if (stopWsRef.current) { stopWsRef.current(); stopWsRef.current = null; }
-    if (pollTimerRef.current) { clearInterval(pollTimerRef.current); pollTimerRef.current = null; }
+    invalidateActiveJob();
+    setPendingOptionId("");
+    setDetailRetryOptionId("");
+    routeResponseCacheRef.current.clear();
+    routeRequestFlightsRef.current.clear();
+    richDetailsRef.current.clear();
+    routeRef.current = null;
+    displayedRevisionRef.current = null;
     setVibes([vibe]);
     setPhase("idle");
     setStatusMessage("");
     setFailureGuidance(null);
     setRoute(null);
-    setSelectedOptionId("");
+    setDisplayedRevision(null);
+    setSelectedRouteId("");
     setLargeResultsOpen(true);
-  }, []);
+  }, [invalidateActiveJob, setSelectedRouteId]);
 
-  const handleOptionSelect = useCallback(async (id: string) => {
-    setSelectedOptionId(id);
-    const cachedDetail = routeDetailsRef.current[id];
-    if (cachedDetail) {
-      setRoute(cachedDetail);
-      prefetchRouteDetails(cachedDetail);
-      const selectedOption = getSelectedRouteOption(cachedDetail, id);
-      trackAnalyticsEvent({
-        eventName: "route_option_selected",
-        jobId: cachedDetail.jobId,
-        routeId: id,
-        routeProfile: selectedOption?.profile,
-        routeMode: cachedDetail.routeMode,
-        vibes: cachedDetail.vibes,
-        timeBudgetMinutes: cachedDetail.timeBudgetMinutes,
-        regionKey: coarseAnalyticsRegionKey(lat, lng),
-        routeCount: cachedDetail.routeOptions?.length ?? 1,
-        scenicScore: selectedOption?.scenicScore ?? cachedDetail.scenicScore
-      });
+  const handleOptionSelect = useCallback(async (id: string, forceRetry = false) => {
+    const currentRoute = routeRef.current;
+    const currentRevision = displayedRevisionRef.current;
+    const jobId = currentRoute?.jobId;
+    const requestController = activeAbortRef.current;
+    if (
+      !currentRoute
+      || !currentRevision
+      || !jobId
+      || currentRevision.epoch !== activeEpochRef.current
+      || jobId !== activeJobIdRef.current
+      || !requestController
+      || pendingOptionIdRef.current === id
+      || (!forceRetry && selectedOptionIdRef.current === id)
+    ) {
       return;
     }
-    try {
-      const detail = await resolveRouteDetail(id);
-      setRoute(detail);
-      prefetchRouteDetails(detail);
 
+    const selectionRequest = ++selectionRequestRef.current;
+    pendingOptionIdRef.current = id;
+    setPendingOptionId(id);
+    setDetailRetryOptionId("");
+    setStatusMessage("Loading the selected route details…");
+
+    try {
+      let detail: RouteDetailResponse;
+      let acceptedCursor: LifecycleCursor;
+      for (;;) {
+        if (
+          currentRevision.epoch !== activeEpochRef.current
+          || jobId !== activeJobIdRef.current
+          || selectionRequest !== selectionRequestRef.current
+          || pendingOptionIdRef.current !== id
+        ) {
+          return;
+        }
+
+        const requestCursor = lifecycleCursorRef.current;
+        const requiredOptionRevision = Math.max(
+          requestCursor.optionRevision,
+          displayedRevisionRef.current?.optionRevision ?? requestCursor.optionRevision
+        );
+        const requireComplete = requestCursor.status === "completed";
+        const cachedDetail = richDetailsRef.current.get(id);
+        detail = cachedDetail
+          && cachedDetail.jobId === jobId
+          && cachedDetail.routeId === id
+          && cachedDetail.optionRevision >= requiredOptionRevision
+          && (!requireComplete || cachedDetail.optionsComplete)
+            ? cachedDetail
+            : await resolveRouteResponse(
+                jobId,
+                id,
+                requiredOptionRevision,
+                "detail",
+                requireComplete,
+                requestController.signal
+              );
+
+        acceptedCursor = lifecycleCursorRef.current;
+        const latestDisplayedOptionRevision = displayedRevisionRef.current?.optionRevision ?? -1;
+        if (
+          detail.optionRevision < acceptedCursor.optionRevision
+          || detail.optionRevision < latestDisplayedOptionRevision
+          || (acceptedCursor.status === "completed" && !detail.optionsComplete)
+        ) {
+          continue;
+        }
+        break;
+      }
+
+      if (
+        currentRevision.epoch !== activeEpochRef.current
+        || jobId !== activeJobIdRef.current
+        || selectionRequest !== selectionRequestRef.current
+        || pendingOptionIdRef.current !== id
+      ) {
+        return;
+      }
+
+      const latestDisplayedRevision = displayedRevisionRef.current;
+      const revision: DisplayedRouteRevision = {
+        epoch: currentRevision.epoch,
+        jobId,
+        routeId: detail.routeId,
+        stateRevision: acceptedCursor.stateRevision,
+        optionRevision: detail.optionRevision,
+        optionsComplete: detail.optionsComplete,
+        rich: true,
+        source: latestDisplayedRevision?.source ?? currentRevision.source
+      };
+      if (!applyDisplayedRoute(detail, revision, id)) {
+        if (
+          currentRevision.epoch === activeEpochRef.current
+          && jobId === activeJobIdRef.current
+          && selectionRequest === selectionRequestRef.current
+          && pendingOptionIdRef.current === id
+        ) {
+          pendingOptionIdRef.current = "";
+          setPendingOptionId("");
+          setDetailRetryOptionId(id);
+          setStatusMessage("That route changed before its details were ready. Your current route is unchanged. Retry when ready.");
+        }
+        return;
+      }
+
+      setDetailRetryOptionId("");
+      setStatusMessage("");
       const selectedOption = getSelectedRouteOption(detail, id);
       trackAnalyticsEvent({
         eventName: "route_option_selected",
-        jobId: detail.jobId,
+        jobId,
         routeId: id,
         routeProfile: selectedOption?.profile,
         routeMode: detail.routeMode,
         vibes: detail.vibes,
         timeBudgetMinutes: detail.timeBudgetMinutes,
-        regionKey: coarseAnalyticsRegionKey(lat, lng),
-        routeCount: detail.routeOptions?.length ?? 1,
-        scenicScore: selectedOption?.scenicScore ?? detail.scenicScore
+        regionKey: coarseAnalyticsRegionKey(detail.startLat, detail.startLng),
+        routeCount: detail.optionCount,
+        scenicScore: selectedOption?.scenicScore ?? detail.scenicScore,
+        metadata: {
+          stateRevision: revision.stateRevision,
+          optionRevision: revision.optionRevision,
+          optionsComplete: revision.optionsComplete
+        }
       });
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : "Failed to load route detail.";
-      setStatusMessage(msg);
+    } catch (error) {
+      if (
+        currentRevision.epoch !== activeEpochRef.current
+        || jobId !== activeJobIdRef.current
+        || selectionRequest !== selectionRequestRef.current
+        || pendingOptionIdRef.current !== id
+        || isAbortError(error)
+      ) {
+        return;
+      }
+      pendingOptionIdRef.current = "";
+      setPendingOptionId("");
+      setDetailRetryOptionId(id);
+      setStatusMessage("Could not load that route's details. Your current route is unchanged. Retry when ready.");
     }
-  }, [lat, lng, resolveRouteDetail, prefetchRouteDetails]);
+  }, [applyDisplayedRoute, resolveRouteResponse]);
+
+  const handleRetryDetails = useCallback(() => {
+    if (detailRetryOptionId) {
+      void handleOptionSelect(detailRetryOptionId, true);
+    }
+  }, [detailRetryOptionId, handleOptionSelect]);
 
   const handleViewRoutes = useCallback(() => {
     if (!route) return;
@@ -1132,7 +2208,15 @@ export function RoutePlanner() {
 
         {/* ── Map canvas — always rendered ── */}
         <div className="map-canvas">
-          <RouteMap route={route} selectedRouteId={selectedOptionId} centerLat={lat} centerLng={lng} theme={theme} onRouteSelect={handleOptionSelect} />
+          <RouteMap
+            route={route}
+            selectedRouteId={selectedOptionId}
+            centerLat={lat}
+            centerLng={lng}
+            theme={theme}
+            onRouteSelect={handleOptionSelect}
+            onRouteMapPainted={handleRouteMapPainted}
+          />
         </div>
 
         {/* ── Desktop: Results panel on right ── */}
@@ -1140,6 +2224,9 @@ export function RoutePlanner() {
           <ResultsPanel
             route={route}
             selectedOptionId={selectedOptionId}
+            pendingOptionId={pendingOptionId}
+            notice={statusMessage || undefined}
+            onRetryDetails={detailRetryOptionId ? handleRetryDetails : undefined}
             onOptionSelect={handleOptionSelect}
             onStartDrive={handleStartDrive}
             onPlanNewRoute={handlePlanNewRoute}
@@ -1201,6 +2288,9 @@ export function RoutePlanner() {
                 <ResultsPanel
                   route={route}
                   selectedOptionId={selectedOptionId}
+                  pendingOptionId={pendingOptionId}
+                  notice={statusMessage || undefined}
+                  onRetryDetails={detailRetryOptionId ? handleRetryDetails : undefined}
                   onOptionSelect={handleOptionSelect}
                   onStartDrive={handleStartDrive}
                   onPlanNewRoute={handlePlanNewRoute}
@@ -1296,6 +2386,9 @@ export function RoutePlanner() {
           <MobileResultsPanel
             route={route}
             selectedOptionId={selectedOptionId}
+            pendingOptionId={pendingOptionId}
+            notice={statusMessage || undefined}
+            onRetryDetails={detailRetryOptionId ? handleRetryDetails : undefined}
             sheetState={sheetState}
             onOptionSelect={(id) => {
               void handleOptionSelect(id);
@@ -1316,6 +2409,7 @@ export function RoutePlanner() {
       {showHandoff && route && (
         <HandoffModal
           route={route}
+          selectedOptionId={selectedOptionId}
           routeMode={routeMode}
           onClose={() => setShowHandoff(false)}
           onNavigationOpen={handleNavigationOpen}

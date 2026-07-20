@@ -27,7 +27,8 @@ public record AnalyticsEventRequest(
     @Size(max = 16)
     String routeMode,
 
-    List<@Size(max = 40) String> vibes,
+    @Size(max = 3)
+    List<@NotBlank @Size(max = 40) String> vibes,
 
     @Min(1)
     Integer timeBudgetMinutes,
@@ -46,6 +47,7 @@ public record AnalyticsEventRequest(
 
     Double scenicScore,
 
+    @Size(max = 20)
     Map<String, Object> metadata
 ) {
 }

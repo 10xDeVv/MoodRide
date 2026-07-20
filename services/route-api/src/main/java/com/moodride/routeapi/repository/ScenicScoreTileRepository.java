@@ -32,8 +32,20 @@ public interface ScenicScoreTileRepository extends JpaRepository<ScenicScoreTile
         @Param("limit") int limit
     );
 
-    @Query(value = "SELECT * FROM scenic_score_tiles ORDER BY scenic_score DESC LIMIT :limit", nativeQuery = true)
-    List<ScenicScoreTile> findTopByScenicScore(@Param("limit") int limit);
+    @Query(
+        value = """
+            SELECT *
+            FROM scenic_score_tiles
+            WHERE scoring_version = :scoringVersion
+            ORDER BY scenic_score DESC
+            LIMIT :limit
+            """,
+        nativeQuery = true
+    )
+    List<ScenicScoreTile> findTopByScenicScore(
+        @Param("scoringVersion") String scoringVersion,
+        @Param("limit") int limit
+    );
 
     @Query(
         value = """

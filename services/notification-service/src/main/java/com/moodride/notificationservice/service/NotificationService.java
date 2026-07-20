@@ -29,41 +29,65 @@ public class NotificationService {
      * Message is sent to /topic/routes/{userId}
      */
     public void sendRouteCompletion(RouteCompletionEvent event) {
-        try {
-            String destination = "/topic/job/" + event.jobId();
-            RouteReadyNotification payload = new RouteReadyNotification(
-                event.jobId(),
-                event.routeId(),
-                event.status(),
-                event.scenicScore(),
-                Instant.now().toString()
-            );
-            messagingTemplate.convertAndSend(destination, payload);
-            logger.info("Sent route completion notification for job {} to channel {}", event.jobId(), destination);
-        } catch (Exception e) {
-            logger.error("Failed to send route completion notification for job {}: {}", event.jobId(), e.getMessage(), e);
-        }
+        String destination = "/topic/job/" + event.jobId();
+        RouteReadyNotification payload = new RouteReadyNotification(
+            event.jobId(),
+            event.routeId(),
+            event.status(),
+            event.scenicScore(),
+            Instant.now().toString(),
+            event.stateRevision(),
+            event.optionRevision(),
+            event.optionCount(),
+            event.optionsComplete()
+        );
+        messagingTemplate.convertAndSend(destination, payload);
+        logger.info("Sent route completion notification for job {} to channel {}", event.jobId(), destination);
     }
     
     /**
      * Sends route failure notification to a specific user.
      */
-    public void sendRouteFailure(UUID jobId, UUID userId, String errorMessage) {
-        try {
-            String destination = "/topic/job/" + jobId;
-            var failureEvent = new RouteFailureNotification(
-                    jobId,
-                    userId,
-                    errorMessage,
-                    true,
-                    "/routes/" + jobId,
-                    Instant.now().toString()
-            );
-            messagingTemplate.convertAndSend(destination, failureEvent);
-            logger.info("Sent route failure notification for job {} to channel {}", jobId, destination);
-        } catch (Exception e) {
-            logger.error("Failed to send route failure notification for job {}: {}", jobId, e.getMessage(), e);
-        }
+    public void sendRouteFailure(RouteCompletionEvent event) {
+        sendRouteFailure(
+            event.jobId(),
+            event.userId(),
+            event.errorMessage(),
+            event.status(),
+            event.stateRevision(),
+            event.optionRevision(),
+            event.optionCount(),
+            event.optionsComplete()
+        );
+    }
+
+
+    private void sendRouteFailure(
+        UUID jobId,
+        UUID userId,
+        String errorMessage,
+        String status,
+        long stateRevision,
+        long optionRevision,
+        int optionCount,
+        boolean optionsComplete
+    ) {
+        String destination = "/topic/job/" + jobId;
+        var failureEvent = new RouteFailureNotification(
+            jobId,
+            userId,
+            errorMessage,
+            true,
+            "/routes/" + jobId,
+            Instant.now().toString(),
+            status,
+            stateRevision,
+            optionRevision,
+            optionCount,
+            optionsComplete
+        );
+        messagingTemplate.convertAndSend(destination, failureEvent);
+        logger.info("Sent route failure notification for job {} to channel {}", jobId, destination);
     }
     
     /**
@@ -75,7 +99,12 @@ public class NotificationService {
         String reason,
         boolean retryable,
         String pollUrl,
-        String timestamp
+        String timestamp,
+        String status,
+        long stateRevision,
+        long optionRevision,
+        int optionCount,
+        boolean optionsComplete
     ) {}
 
     public record RouteReadyNotification(
@@ -83,6 +112,10 @@ public class NotificationService {
         UUID routeId,
         String status,
         double scenicScore,
-        String timestamp
+        String timestamp,
+        long stateRevision,
+        long optionRevision,
+        int optionCount,
+        boolean optionsComplete
     ) {}
 }

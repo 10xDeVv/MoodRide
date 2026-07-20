@@ -47,15 +47,17 @@ spring:
       value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
   
   # Redis Configuration
-  redis:
-    host: localhost
-    port: 6379
-    password: redis_password
-    timeout: 2000ms
-    lettuce:
-      pool:
-        max-active: 20
-        max-idle: 10
+  data:
+    redis:
+      host: localhost
+      port: 6379
+      password: redis_password
+      connect-timeout: 2000ms
+      timeout: 2000ms
+      lettuce:
+        pool:
+          max-active: 20
+          max-idle: 10
 
 # Server Configuration
 server:
@@ -86,10 +88,25 @@ logging:
 moodride:
   cors:
     allowed-origins: http://localhost:3000,http://localhost:3001,https://usewayward.app,https://www.usewayward.app
+  analytics:
+    hash-secret: ${MOODRIDE_ANALYTICS_HASH_SECRET}
+  kafka:
+    producer:
+      ack-timeout: ${MOODRIDE_KAFKA_PRODUCER_ACK_TIMEOUT:10s}
+  route-job:
+    dispatch:
+      recovery-enabled: ${MOODRIDE_ROUTE_JOB_DISPATCH_RECOVERY_ENABLED:true}
+      stale-after: ${MOODRIDE_ROUTE_JOB_DISPATCH_STALE_AFTER:1m}
+      lease-duration: ${MOODRIDE_ROUTE_JOB_DISPATCH_LEASE_DURATION:30s}
+      batch-size: ${MOODRIDE_ROUTE_JOB_DISPATCH_BATCH_SIZE:25}
+      retry-base-delay: ${MOODRIDE_ROUTE_JOB_DISPATCH_RETRY_BASE_DELAY:30s}
+      retry-max-delay: ${MOODRIDE_ROUTE_JOB_DISPATCH_RETRY_MAX_DELAY:5m}
+      interval-ms: ${MOODRIDE_ROUTE_JOB_DISPATCH_INTERVAL_MS:60000}
+      initial-delay-ms: ${MOODRIDE_ROUTE_JOB_DISPATCH_INITIAL_DELAY_MS:60000}
   cache:
+    scenic-scoring-version: ${MOODRIDE_SCENIC_SCORING_VERSION:3.7-bridge-coastal-calibration}
     warmup:
       enabled: true
       limit: 200
       interval-ms: 3600000
       initial-delay-ms: 30000
-

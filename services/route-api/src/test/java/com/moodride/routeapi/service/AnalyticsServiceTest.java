@@ -16,11 +16,13 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.stream.IntStream;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.when;
 
@@ -33,15 +35,18 @@ class AnalyticsServiceTest {
     @Mock
     private JdbcTemplate jdbcTemplate;
 
+    private ObjectMapper objectMapper;
+
     private AnalyticsService analyticsService;
 
     @BeforeEach
     void setUp() {
-        analyticsService = new AnalyticsService(eventRepository, jdbcTemplate, new ObjectMapper(), "test-analytics-secret");
+        objectMapper = new ObjectMapper();
+        analyticsService = new AnalyticsService(eventRepository, jdbcTemplate, objectMapper, "test-analytics-secret");
     }
 
     @Test
-    void recordEventPersistsAnonymousRouteAnalytics() {
+    void recordEventPersistsAnonymousRouteAnalyticsAsCompleteJson() throws Exception {
         UUID jobId = UUID.randomUUID();
         UUID routeId = UUID.randomUUID();
         when(eventRepository.save(any(AnalyticsEvent.class))).thenAnswer(invocation -> {
@@ -81,7 +86,8 @@ class AnalyticsServiceTest {
         assertThat(event.getRouteId()).isEqualTo(routeId);
         assertThat(event.getRouteProfile()).isEqualTo("most_scenic");
         assertThat(event.getRouteMode()).isEqualTo("drive");
-        assertThat(event.getVibesJson()).contains("coastal", "scenic");
+        assertThat(objectMapper.readTree(event.getVibesJson()))
+            .isEqualTo(objectMapper.valueToTree(List.of("coastal", "countryside")));
         assertThat(event.getTimeBudgetMinutes()).isEqualTo(60);
         assertThat(event.getTimeBudgetBucket()).isEqualTo(60);
         assertThat(event.getRegionKey()).isEqualTo("grid:43.5:-79.5");
@@ -89,8 +95,146 @@ class AnalyticsServiceTest {
         assertThat(event.getStatus()).isEqualTo("completed");
         assertThat(event.getDurationMs()).isEqualTo(12_500L);
         assertThat(event.getScenicScore()).isEqualTo(0.72);
-        assertThat(event.getMetadataJson()).contains("mobile");
+        assertThat(objectMapper.readTree(event.getMetadataJson()))
+            .isEqualTo(objectMapper.valueToTree(Map.of("surface", "mobile")));
         verify(jdbcTemplate, times(2)).update(any(String.class), any(Object[].class));
+    }
+
+    @Test
+    void recordEventAcceptsFirstLatencyMilestonesWithoutChangingTerminalGenerationRollups() {
+        List<String> eventNames = List.of(
+            "route_generation_primary_ready",
+            "route_results_committed",
+            "route_map_painted",
+            "route_generation_completed",
+            "route_generation_failed"
+        );
+        when(eventRepository.save(any(AnalyticsEvent.class))).thenAnswer(invocation -> invocation.getArgument(0));
+
+        for (String eventName : eventNames) {
+            analyticsService.recordEvent(new AnalyticsEventRequest(
+                "anon-session-1",
+                "anon-client-" + eventName,
+                eventName,
+                UUID.randomUUID(),
+                UUID.randomUUID(),
+                null,
+                "drive",
+                List.of("scenic"),
+                60,
+                "grid:43.5:-79.5",
+                1,
+                "COMPLETED",
+                9_000L,
+                null,
+                Map.of("source", "test")
+            ));
+        }
+
+        ArgumentCaptor<AnalyticsEvent> saved = ArgumentCaptor.forClass(AnalyticsEvent.class);
+        verify(eventRepository, times(eventNames.size())).save(saved.capture());
+        assertThat(saved.getAllValues())
+            .extracting(AnalyticsEvent::getEventName)
+            .containsExactlyElementsOf(eventNames);
+
+        ArgumentCaptor<Object[]> rollupArguments = ArgumentCaptor.forClass(Object[].class);
+        verify(jdbcTemplate, times(eventNames.size())).update(any(String.class), rollupArguments.capture());
+        assertThat(rollupArguments.getAllValues().subList(0, 3))
+            .allSatisfy(arguments -> {
+                assertThat(arguments[11]).isEqualTo(0.0);
+                assertThat(arguments[12]).isEqualTo(0L);
+            });
+        assertThat(rollupArguments.getAllValues().subList(3, 5))
+            .allSatisfy(arguments -> {
+                assertThat(arguments[11]).isEqualTo(9_000.0);
+                assertThat(arguments[12]).isEqualTo(1L);
+            });
+    }
+
+    @Test
+    void recordEventRejectsMoreThanThreeVibesBeforePersistence() {
+        AnalyticsEventRequest request = validRequest(
+            List.of("coastal", "mountain", "relaxing", "adventure"),
+            Map.of("source", "test")
+        );
+
+        assertThatThrownBy(() -> analyticsService.recordEvent(request))
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("At most three vibes");
+        verifyNoInteractions(eventRepository, jdbcTemplate);
+    }
+
+    @Test
+    void recordEventRejectsUnsupportedVibeBeforePersistence() {
+        AnalyticsEventRequest request = validRequest(
+            List.of("coastal", "anything-goes"),
+            Map.of("source", "test")
+        );
+
+        assertThatThrownBy(() -> analyticsService.recordEvent(request))
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("Unsupported analytics vibe");
+        verifyNoInteractions(eventRepository, jdbcTemplate);
+    }
+
+    @Test
+    void recordEventRejectsOversizedMetadataValueBeforePersistence() {
+        AnalyticsEventRequest request = validRequest(
+            List.of("scenic"),
+            Map.of("payload", "x".repeat(1_001))
+        );
+
+        assertThatThrownBy(() -> analyticsService.recordEvent(request))
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("metadata value exceeds maximum size");
+        verifyNoInteractions(eventRepository, jdbcTemplate);
+    }
+
+    @Test
+    void recordEventRejectsNestedMetadataWithTooManyItemsBeforePersistence() {
+        AnalyticsEventRequest request = validRequest(
+            List.of("scenic"),
+            Map.of("items", IntStream.range(0, 51).boxed().toList())
+        );
+
+        assertThatThrownBy(() -> analyticsService.recordEvent(request))
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("metadata contains too many items");
+        verifyNoInteractions(eventRepository, jdbcTemplate);
+    }
+
+    @Test
+    void recordEventRejectsMetadataThatIsNestedTooDeeplyBeforePersistence() {
+        AnalyticsEventRequest request = validRequest(
+            List.of("scenic"),
+            Map.of("one", Map.of("two", Map.of("three", Map.of("four", Map.of("five", "value")))))
+        );
+
+        assertThatThrownBy(() -> analyticsService.recordEvent(request))
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("metadata exceeds maximum nesting depth");
+        verifyNoInteractions(eventRepository, jdbcTemplate);
+    }
+
+    @Test
+    void recordEventRejectsBoundedMetadataThatExceedsStoredJsonLimit() {
+        String value = "x".repeat(900);
+        AnalyticsEventRequest request = validRequest(
+            List.of("scenic"),
+            Map.of("one", value, "two", value, "three", value, "four", value, "five", value)
+        );
+
+        assertThatThrownBy(() -> analyticsService.recordEvent(request))
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("metadata exceeds maximum serialized size");
+        verifyNoInteractions(eventRepository, jdbcTemplate);
+    }
+
+    @Test
+    void constructorRejectsBlankAnalyticsSecret() {
+        assertThatThrownBy(() -> new AnalyticsService(eventRepository, jdbcTemplate, objectMapper, " "))
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("hash-secret must be configured");
     }
 
     @Test
@@ -116,5 +260,25 @@ class AnalyticsServiceTest {
         assertThatThrownBy(() -> analyticsService.recordEvent(request))
             .isInstanceOf(IllegalArgumentException.class)
             .hasMessageContaining("Unsupported analytics event");
+    }
+
+    private AnalyticsEventRequest validRequest(List<String> vibes, Map<String, Object> metadata) {
+        return new AnalyticsEventRequest(
+            "anon-session-1",
+            "anon-client-1",
+            "route_generation_primary_ready",
+            UUID.randomUUID(),
+            UUID.randomUUID(),
+            null,
+            "drive",
+            vibes,
+            60,
+            "grid:43.5:-79.5",
+            1,
+            "completed",
+            500L,
+            null,
+            metadata
+        );
     }
 }

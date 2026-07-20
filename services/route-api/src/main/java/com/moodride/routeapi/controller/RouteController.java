@@ -1,11 +1,13 @@
 package com.moodride.routeapi.controller;
 
+import com.moodride.routeapi.dto.PrimaryRouteResponse;
 import com.moodride.routeapi.dto.RouteDetailResponse;
 import com.moodride.routeapi.dto.RouteJobStatusResponse;
 import com.moodride.routeapi.dto.RouteRatingRequest;
 import com.moodride.routeapi.dto.RouteRatingResponse;
 import com.moodride.routeapi.dto.RouteRequest;
 import com.moodride.routeapi.dto.RouteSubmissionResponse;
+import com.moodride.routeapi.service.PrimaryRouteService;
 import com.moodride.routeapi.service.RouteService;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
@@ -22,9 +24,11 @@ public class RouteController {
     private static final String SUCCESSOR_LINK = "</api/routes>; rel=\"successor-version\"";
     
     private final RouteService routeService;
+    private final PrimaryRouteService primaryRouteService;
     
-    public RouteController(RouteService routeService) {
+    public RouteController(RouteService routeService, PrimaryRouteService primaryRouteService) {
         this.routeService = routeService;
+        this.primaryRouteService = primaryRouteService;
     }
     
     @PostMapping({"", "/generate"})
@@ -54,6 +58,13 @@ public class RouteController {
         return responseFor(servletRequest, ResponseEntity.ok())
             .body(routeService.getRoute(routeId));
     }
+    @GetMapping("/route/{routeId}/primary")
+    public ResponseEntity<PrimaryRouteResponse> getPrimaryRoute(@PathVariable UUID routeId,
+                                                                HttpServletRequest servletRequest) {
+        return responseFor(servletRequest, ResponseEntity.ok())
+            .body(primaryRouteService.getPrimaryRoute(routeId));
+    }
+
 
     @PostMapping("/{routeId}/rating")
     public ResponseEntity<RouteRatingResponse> rateRoute(@PathVariable UUID routeId,

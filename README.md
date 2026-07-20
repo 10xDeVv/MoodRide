@@ -17,24 +17,22 @@ Wayward generates scenic driving loops from a start point, time budget, and vibe
 
 | Service | Role |
 | --- | --- |
-| `services/route-api` | Public REST API, route jobs, route details, route feedback endpoints, scenic regions, cache controls |
-| `services/route-worker` | Consumes route jobs, runs `hybrid_osrm_v2`, calls OSRM, scores routes, persists route options |
-| `services/notification-service` | Sends route completion/failure notifications over WebSocket |
-| `frontend/moodride-web` | Wayward web app |
+| `services/route-api` | Public REST API for revisioned route jobs, slim primary results, rich route details, feedback, scenic regions, and cache controls |
+| `services/route-worker` | Consumes route jobs, runs `hybrid_osrm_v2`, calls OSRM, scores routes, and persists route options |
+| `services/notification-service` | Relays revisioned route-status events, including `PRIMARY_READY`, over WebSocket |
+| `frontend/moodride-web` | WebSocket-first Wayward web app with a bounded polling fallback |
 | `services/scenic-scoring-service` | Internal/offline scenic recompute experiments; not part of production compose |
 
 ## How Routing Works
 
-1. The frontend submits a route request to `POST /api/routes`.
-2. `route-api` creates a job and publishes it to Kafka.
-3. `route-worker` loads nearby precomputed H3 scenic tiles from `scenic_score_tiles`.
-4. The worker builds waypoint candidates based on the selected vibe and time budget.
-5. The worker calls the local OSRM `/trip` endpoint to get legal drivable loop geometry.
-6. Wayward samples the returned route corridor against H3 scenic tiles and scores landscape quality, vibe fit, drive quality, route shape, scenic moments, urban pressure, and start/end quality.
-7. The best options are persisted as `most_scenic`, `balanced`, and `shorter`.
-8. `notification-service` sends the frontend a completion event, and the frontend fetches route details.
+1. The frontend submits a route request to `POST /api/routes`; `route-api` commits the revisioned `QUEUED` job and its durable dispatch outbox record in one database transaction. That commit is the HTTP `202 Accepted` boundary. Kafka dispatch, broker acknowledgement, and retry happen asynchronously.
+2. `route-worker` claims the job with lease fencing, advances it to `PROCESSING`, and batch-loads nearby H3 scenic tiles through the local LRU, one Redis `MGET`, and one bulk SQL miss query with a pipelined Redis fill.
+3. The worker builds the full waypoint-candidate pool for the selected vibe and time budget, calls the local OSRM `/trip` endpoint, and scores the returned corridors for landscape quality, vibe fit, drive quality, route shape, scenic moments, urban pressure, and start/end quality.
+4. The selected options are persisted as `most_scenic`, `balanced`, and `shorter`; once the exact primary is available, the job advances to `PRIMARY_READY`.
+5. A revisioned WebSocket event normally prompts the frontend to fetch the slim exact primary and paint it before loading rich details. If the event does not arrive, the frontend waits 2.5 seconds, then uses a single-in-flight polling fallback at 1.5-second intervals; stale revisions are rejected.
+6. The revisioned lifecycle finishes at `COMPLETED`, `FAILED`, or `TIMEOUT`.
 
-The current route algorithm is `hybrid_osrm_v2`. The old beam-search implementation has been removed from the active codebase.
+The current planner still computes the candidate pool before `PRIMARY_READY`: progressive delivery removes response and enrichment delay, but is not staged route computation. Matched technical-completion and latency controls support retaining `hybrid_osrm_v2` (Legacy) as the better production foundation than PURE Design B; they are not route-quality pass results, and the current engine still needs quality hardening.
 
 ## Data Pipeline
 
@@ -124,7 +122,9 @@ Production uses:
 - `scripts/deploy/deploy_prod.sh`
 - `scripts/deploy/rollback_prod.sh`
 
-App deploys are triggered from GitHub Actions. Data releases are published as GitHub release assets, then deployed by the OSRM/scenic release workflows.
+Pushes to `main` publish immutable `sha-<40-hex-commit>` images but do not deploy them. Production changes require a later explicit `Publish and Deploy Production Stack` workflow dispatch using `deploy-existing` for an already published immutable tag, after that exact image set passes the route-quality gate. The workflow cannot publish and deploy in one run.
+
+Production is single-instance, so an app release is a guarded full-stack maintenance cutover, not a traffic-isolated canary or percentage rollout. The cutover closes Caddy ingress, drains active route jobs, creates and verifies an off-volume database dump, starts `route-api` first so Flyway owns the schema transition, starts and smoke-tests the worker stack behind closed ingress, and only then reopens Caddy. Rollback coordinates the compatible image set and database state under the same closed-ingress boundary. Data releases remain separate GitHub release assets deployed by the OSRM/scenic release workflows.
 
 ## Official Docs
 

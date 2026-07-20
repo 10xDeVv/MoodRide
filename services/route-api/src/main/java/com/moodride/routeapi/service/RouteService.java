@@ -17,14 +17,17 @@ import java.util.UUID;
 import java.util.Comparator;
 import java.util.stream.Collectors;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.locationtech.jts.geom.Coordinate;
 import org.springframework.cache.annotation.CacheEvict;
 import org.springframework.cache.annotation.Cacheable;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Isolation;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
-import org.springframework.transaction.annotation.Transactional;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
@@ -38,10 +41,10 @@ import com.moodride.datamodels.ScenicScoreTile;
 import com.moodride.datamodels.scoring.ComponentScores;
 import com.moodride.datamodels.scoring.ScenicScoreCalculator;
 import com.moodride.eventmodels.DriveCompletedEvent;
-import com.moodride.eventmodels.RouteJobEvent;
 import com.moodride.eventmodels.RouteRatedEvent;
 import com.moodride.geo.H3Utils;
 import com.moodride.geo.VibeCatalog;
+import com.moodride.routeapi.cache.CacheNames;
 import com.moodride.routeapi.dto.RouteDetailResponse;
 import com.moodride.routeapi.dto.RouteJobStatusResponse;
 import com.moodride.routeapi.dto.RouteOptionExplanationResponse;
@@ -60,6 +63,8 @@ import com.moodride.routeapi.repository.ScenicScoreTileRepository;
 @Service
 @Transactional
 public class RouteService {
+
+    private static final Logger logger = LoggerFactory.getLogger(RouteService.class);
 
     private static final Set<String> ALLOWED_VIBES = VibeCatalog.supportedVibes();
 
@@ -145,6 +150,7 @@ public class RouteService {
     private final ScenicScoreTileRepository scenicScoreTileRepository;
     private final RouteFailureGuidanceService routeFailureGuidanceService;
     private final KafkaTemplate<String, String> kafkaTemplate;
+    private final RouteJobDispatchService dispatchService;
     private final ObjectMapper objectMapper;
     private final ScenicScoreCalculator scenicScoreCalculator = new ScenicScoreCalculator();
     
@@ -154,6 +160,7 @@ public class RouteService {
                         ScenicScoreTileRepository scenicScoreTileRepository,
                         RouteFailureGuidanceService routeFailureGuidanceService,
                         KafkaTemplate<String, String> kafkaTemplate,
+                        RouteJobDispatchService dispatchService,
                         ObjectMapper objectMapper) {
         this.jobRepository = jobRepository;
         this.routeRepository = routeRepository;
@@ -161,6 +168,7 @@ public class RouteService {
         this.scenicScoreTileRepository = scenicScoreTileRepository;
         this.routeFailureGuidanceService = routeFailureGuidanceService;
         this.kafkaTemplate = kafkaTemplate;
+        this.dispatchService = dispatchService;
         this.objectMapper = objectMapper.copy().findAndRegisterModules();
     }
     
@@ -181,6 +189,7 @@ public class RouteService {
         Map<String, Double> requestedPreferenceVector = normalizePreferenceVector(request.preferenceVector());
         job.setPreferenceVector(serializePreferenceVector(applyRouteWeightCalibrations(resolvedVibes, requestedPreferenceVector)));
         jobRepository.save(job);
+        dispatchService.enqueue(job.getId(), job.getSubmittedAt());
 
         publishRouteJobAfterCommit(job.getId());
 
@@ -195,10 +204,10 @@ public class RouteService {
             job.getMaxRetries()
         );
     }
-
     private void publishRouteJobAfterCommit(UUID jobId) {
-        Runnable publish = () -> kafkaTemplate.send(RouteJobEvent.TOPIC, jobId.toString(), jobId.toString());
-        if (!TransactionSynchronizationManager.isActualTransactionActive()) {
+        Runnable publish = () -> publishCommittedDispatch(jobId);
+        if (!TransactionSynchronizationManager.isActualTransactionActive()
+                || !TransactionSynchronizationManager.isSynchronizationActive()) {
             publish.run();
             return;
         }
@@ -211,21 +220,25 @@ public class RouteService {
         });
     }
 
+    private void publishCommittedDispatch(UUID jobId) {
+        try {
+            dispatchService.publishCommitted(jobId);
+        } catch (RuntimeException exception) {
+            logger.error(
+                "Route job {} remains pending after publication failed; recovery will retry it",
+                jobId,
+                exception
+            );
+        }
+    }
+
+
+
     public RouteJobStatusResponse getRouteJobStatus(UUID jobId) {
         RouteJob job = jobRepository.findById(jobId)
             .orElseThrow(() -> new JobNotFoundException(jobId));
 
-        List<Route> jobRoutes = routeRepository.findByJobIdOrderByGeneratedAtAsc(jobId);
-        List<RouteOptionResponse> routeOptions = buildRouteOptions(jobRoutes, job);
-
-        UUID routeId = job.getRouteId();
-        if (routeId == null) {
-            routeId = resolvePrimaryRouteId(jobRoutes).orElse(null);
-        }
-        if (routeId == null && !routeOptions.isEmpty()) {
-            routeId = routeOptions.getFirst().routeId();
-        }
-
+        UUID routeId = resolveRouteIdForStatus(job);
         String routeUrl = routeId == null ? null : "/routes/route/" + routeId;
         Integer estimatedRemaining = job.getStatus() == RouteJob.JobStatus.QUEUED
                 || job.getStatus() == RouteJob.JobStatus.PROCESSING
@@ -239,7 +252,11 @@ public class RouteService {
             job.getStatus().name(),
             routeId,
             routeUrl,
-            routeOptions,
+            job.getPrimaryReadyAt(),
+            job.getStateRevision(),
+            job.getOptionRevision(),
+            job.getOptionCount(),
+            job.isOptionsComplete(),
             job.getFailureReason(),
             job.getSubmittedAt(),
             job.getStartedAt(),
@@ -256,7 +273,47 @@ public class RouteService {
         );
     }
 
-    @Cacheable(cacheNames = "routeResults", key = "#routeId.toString()")
+    private UUID resolveRouteIdForStatus(RouteJob job) {
+        if (job.getRouteId() != null) {
+            return job.getRouteId();
+        }
+        if (job.getStatus() != RouteJob.JobStatus.PRIMARY_READY
+                && job.getStatus() != RouteJob.JobStatus.COMPLETED) {
+            return null;
+        }
+
+        List<Route> profiledRoutes =
+            routeRepository.findByJobIdAndRouteProfileIsNotNullOrderByGeneratedAtAsc(job.getId());
+        UUID profiledPrimary = resolveMostScenicRouteId(profiledRoutes).orElse(null);
+        if (profiledPrimary != null) {
+            return profiledPrimary;
+        }
+
+        return routeRepository.findTopByJobIdOrderByGeneratedAtAsc(job.getId())
+            .map(Route::getId)
+            .orElse(null);
+    }
+
+    private java.util.Optional<UUID> resolveMostScenicRouteId(List<Route> routes) {
+        if (routes == null || routes.isEmpty()) {
+            return java.util.Optional.empty();
+        }
+
+        Comparator<Route> generatedOrder = Comparator
+            .comparing(Route::getGeneratedAt, Comparator.nullsLast(Comparator.naturalOrder()))
+            .thenComparing(Route::getId);
+        return routes.stream()
+            .filter(route -> "most_scenic".equals(normalizeRouteProfile(route.getRouteProfile())))
+            .min(generatedOrder)
+            .map(Route::getId);
+    }
+
+    @Cacheable(
+        cacheNames = CacheNames.ROUTE_DETAILS_V2,
+        key = "T(com.moodride.routeapi.cache.CacheKeySchema).routeDetailV2(#p0)",
+        unless = "#result == null || !#result.optionsComplete() || #result.routeOptions().size() != #result.optionCount()"
+    )
+    @Transactional(readOnly = true, isolation = Isolation.REPEATABLE_READ)
     public RouteDetailResponse getRoute(UUID routeId) {
         Route route = routeRepository.findById(routeId)
             .orElseThrow(() -> new RouteNotFoundException(routeId));
@@ -269,7 +326,10 @@ public class RouteService {
             .orElseGet(() -> getRouteJobStatus(id));
     }
 
-    @CacheEvict(cacheNames = "routeResults", key = "#routeId.toString()")
+    @CacheEvict(
+        cacheNames = CacheNames.ROUTE_DETAILS_V2,
+        key = "T(com.moodride.routeapi.cache.CacheKeySchema).routeDetailV2(#p0)"
+    )
     public RouteRatingResponse rateRoute(UUID routeId, RouteRatingRequest request) {
         Route route = routeRepository.findById(routeId)
             .orElseThrow(() -> new RouteNotFoundException(routeId));
@@ -295,7 +355,7 @@ public class RouteService {
     private RouteDetailResponse mapRouteToDetail(Route route) {
         RouteJob routeJob = jobRepository.findById(route.getJobId()).orElse(null);
         List<RouteOptionResponse> routeOptions = buildRouteOptions(
-            routeRepository.findByJobIdOrderByGeneratedAtAsc(route.getJobId()),
+            routeRepository.findByJobIdAndRouteProfileIsNotNullOrderByGeneratedAtAsc(route.getJobId()),
             routeJob
         );
 
@@ -345,6 +405,9 @@ public class RouteService {
             feature,
             scenicHighlights,
             routeOptions,
+            routeJob == null ? 0L : routeJob.getOptionRevision(),
+            routeJob == null ? 0 : routeJob.getOptionCount(),
+            routeJob != null && routeJob.isOptionsComplete(),
             algorithmVersion,
             beamCandidates,
             computationTimeMs,
@@ -667,6 +730,7 @@ public class RouteService {
         }
 
         List<Route> chronologicallyOrdered = routes.stream()
+            .filter(route -> route.getRouteProfile() != null)
             .sorted(Comparator.comparing(Route::getGeneratedAt, Comparator.nullsLast(Comparator.naturalOrder())))
             .toList();
         List<Route> profileOrdered = orderByProfileWithFallback(chronologicallyOrdered);
@@ -1524,19 +1588,6 @@ public class RouteService {
         return List.copyOf(ordered);
     }
 
-    private java.util.Optional<UUID> resolvePrimaryRouteId(List<Route> routes) {
-        if (routes == null || routes.isEmpty()) {
-            return java.util.Optional.empty();
-        }
-
-        return routes.stream()
-            .filter(route -> "most_scenic".equals(normalizeRouteProfile(route.getRouteProfile())))
-            .min(Comparator.comparing(Route::getGeneratedAt, Comparator.nullsLast(Comparator.naturalOrder())))
-            .map(Route::getId)
-            .or(() -> routes.stream()
-                .min(Comparator.comparing(Route::getGeneratedAt, Comparator.nullsLast(Comparator.naturalOrder())))
-                .map(Route::getId));
-    }
 
     private List<String> resolveRouteVibes(RouteJob routeJob, Route route) {
         if (routeJob != null) {

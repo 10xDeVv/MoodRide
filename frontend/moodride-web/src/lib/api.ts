@@ -2,6 +2,7 @@ import {
   AnalyticsEventPayload,
   AnalyticsSummaryResponse,
   LocationSuggestion,
+  PrimaryRouteResponse,
   RouteDetailResponse,
   RouteJobStatusResponse,
   RouteRatingResponse,
@@ -13,6 +14,41 @@ import {
 const apiBase =
   process.env.NEXT_PUBLIC_API_BASE_URL ??
   (typeof window !== "undefined" ? "" : "https://usewayward.app");
+
+const ROUTE_SUBMISSION_REQUEST_TIMEOUT_MS = 15_000;
+const STATUS_REQUEST_TIMEOUT_MS = 5_000;
+const PRIMARY_ROUTE_REQUEST_TIMEOUT_MS = 8_000;
+const ROUTE_DETAIL_REQUEST_TIMEOUT_MS = 12_000;
+
+async function withRequestDeadline<T>(
+  timeoutMs: number,
+  callerSignal: AbortSignal | undefined,
+  request: (signal: AbortSignal) => Promise<T>
+): Promise<T> {
+  const controller = new AbortController();
+  const onCallerAbort = () => {
+    controller.abort(callerSignal?.reason);
+  };
+
+  if (callerSignal?.aborted) {
+    onCallerAbort();
+  } else {
+    callerSignal?.addEventListener("abort", onCallerAbort, { once: true });
+  }
+
+  const timer = setTimeout(() => {
+    if (!controller.signal.aborted) {
+      controller.abort(new DOMException("Request timed out", "TimeoutError"));
+    }
+  }, timeoutMs);
+
+  try {
+    return await request(controller.signal);
+  } finally {
+    clearTimeout(timer);
+    callerSignal?.removeEventListener("abort", onCallerAbort);
+  }
+}
 
 function apiUrl(path: string): string {
   if (typeof window !== "undefined") {
@@ -47,6 +83,15 @@ type ScenicRegionsApiResponse = Omit<ScenicRegionsResponse, "regions"> & {
   regions: ScenicRegionApiResponse[];
 };
 
+type RouteDetailApiResponse = Omit<RouteDetailResponse, "optionRevision"> & {
+  optionRevision?: number;
+};
+
+export function normalizeRouteDetailResponse(payload: RouteDetailApiResponse): RouteDetailResponse {
+  if (payload.optionRevision !== undefined) return payload as RouteDetailResponse;
+  return { ...payload, optionRevision: 0 };
+}
+
 async function handleJson<T>(response: Response): Promise<T> {
   if (!response.ok) {
     const body = await response.text();
@@ -55,8 +100,27 @@ async function handleJson<T>(response: Response): Promise<T> {
   return (await response.json()) as T;
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  const promiseConstructor = Promise as PromiseConstructor & {
+    withResolvers<T>(): {
+      promise: Promise<T>;
+      resolve: (value: T | PromiseLike<T>) => void;
+      reject: (reason?: unknown) => void;
+    };
+  };
+  const { promise, resolve, reject } = promiseConstructor.withResolvers<void>();
+  const timer = setTimeout(() => {
+    signal?.removeEventListener("abort", onAbort);
+    resolve();
+  }, ms);
+  const onAbort = () => {
+    clearTimeout(timer);
+    signal?.removeEventListener("abort", onAbort);
+    reject(signal?.reason ?? new DOMException("The operation was aborted.", "AbortError"));
+  };
+  signal?.addEventListener("abort", onAbort, { once: true });
+  if (signal?.aborted) onAbort();
+  return promise;
 }
 
 let fallbackAnalyticsClientId: string | null = null;
@@ -125,32 +189,57 @@ export async function getAnalyticsSummary(days = 30): Promise<AnalyticsSummaryRe
   return handleJson<AnalyticsSummaryResponse>(response);
 }
 
-export async function submitRoute(payload: RouteRequest): Promise<RouteSubmissionResponse> {
-  const response = await fetch(apiUrl("/api/routes"), {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload)
+export async function submitRoute(payload: RouteRequest, signal?: AbortSignal): Promise<RouteSubmissionResponse> {
+  return withRequestDeadline(ROUTE_SUBMISSION_REQUEST_TIMEOUT_MS, signal, async (requestSignal) => {
+    const response = await fetch(apiUrl("/api/routes"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      signal: requestSignal
+    });
+    return handleJson<RouteSubmissionResponse>(response);
   });
-  return handleJson<RouteSubmissionResponse>(response);
 }
 
-export async function getJobStatus(jobId: string): Promise<RouteJobStatusResponse> {
-  const response = await fetch(apiUrl(`/api/routes/${jobId}`), { cache: "no-store" });
-  return handleJson<RouteJobStatusResponse>(response);
+export async function getJobStatus(jobId: string, signal?: AbortSignal): Promise<RouteJobStatusResponse> {
+  return withRequestDeadline(STATUS_REQUEST_TIMEOUT_MS, signal, async (requestSignal) => {
+    const response = await fetch(apiUrl(`/api/routes/${jobId}`), {
+      cache: "no-store",
+      signal: requestSignal
+    });
+    return handleJson<RouteJobStatusResponse>(response);
+  });
 }
 
-export async function getRoute(routeId: string): Promise<RouteDetailResponse> {
+export async function getPrimaryRoute(routeId: string, signal?: AbortSignal): Promise<PrimaryRouteResponse> {
+  return withRequestDeadline(PRIMARY_ROUTE_REQUEST_TIMEOUT_MS, signal, async (requestSignal) => {
+    const response = await fetch(apiUrl(`/api/routes/route/${routeId}/primary`), {
+      cache: "no-store",
+      signal: requestSignal
+    });
+    return handleJson<PrimaryRouteResponse>(response);
+  });
+}
+
+export async function getRoute(routeId: string, signal?: AbortSignal): Promise<RouteDetailResponse> {
   const maxAttempts = 5;
   let lastError: Error | null = null;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
-      const response = await fetch(apiUrl(`/api/routes/route/${routeId}`), { cache: "no-store" });
-      return await handleJson<RouteDetailResponse>(response);
+      return await withRequestDeadline(ROUTE_DETAIL_REQUEST_TIMEOUT_MS, signal, async (requestSignal) => {
+        const response = await fetch(apiUrl(`/api/routes/route/${routeId}`), {
+          cache: "no-store",
+          signal: requestSignal
+        });
+        const payload = await handleJson<RouteDetailApiResponse>(response);
+        return normalizeRouteDetailResponse(payload);
+      });
     } catch (error) {
+      if (signal?.aborted) throw error;
       lastError = error as Error;
       if (attempt < maxAttempts) {
-        await sleep(500 * attempt);
+        await sleep(500 * attempt, signal);
       }
     }
   }
@@ -218,7 +307,8 @@ export async function getRouteByUrl(routeUrl: string): Promise<RouteDetailRespon
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
       const response = await fetch(targetUrl, { cache: "no-store" });
-      return await handleJson<RouteDetailResponse>(response);
+      const payload = await handleJson<RouteDetailApiResponse>(response);
+      return normalizeRouteDetailResponse(payload);
     } catch (error) {
       lastError = error as Error;
       if (attempt < maxAttempts) {

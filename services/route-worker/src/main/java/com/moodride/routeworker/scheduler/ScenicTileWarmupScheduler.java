@@ -1,6 +1,7 @@
 package com.moodride.routeworker.scheduler;
 
 import com.moodride.geo.H3Utils;
+import com.moodride.routeworker.config.RouteWorkerSchedulingConfiguration;
 import com.moodride.routeworker.config.ApplicationConfiguration;
 import com.moodride.routeworker.service.ScenicTileLookupService;
 import com.moodride.routeworker.service.WorkerCacheMetricsService;
@@ -48,7 +49,8 @@ public class ScenicTileWarmupScheduler {
 
     @Scheduled(
         fixedDelayString = "${moodride.cache.scenic-warmup.interval-ms:1800000}",
-        initialDelayString = "${moodride.cache.scenic-warmup.initial-delay-ms:5000}"
+        initialDelayString = "${moodride.cache.scenic-warmup.initial-delay-ms:5000}",
+        scheduler = RouteWorkerSchedulingConfiguration.CACHE_WARMUP_TASK_SCHEDULER
     )
     public void warmRecentRouteRegions() {
         if (!enabled) {
