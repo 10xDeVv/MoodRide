@@ -1,5 +1,6 @@
 package com.moodride.notificationservice.consumer;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.moodride.eventmodels.RouteCompletionEvent;
 import com.moodride.notificationservice.service.NotificationService;
@@ -25,28 +26,20 @@ public class RouteCompletionConsumer {
         this.notificationService = notificationService;
         this.objectMapper = objectMapper;
     }
-    
+
     /**
      * Consumes route completion events from Kafka and sends WebSocket notifications.
      */
     @KafkaListener(topics = RouteCompletionEvent.TOPIC, groupId = "notification-service")
-    public void consumeRouteCompletion(String message) {
-        try {
-            RouteCompletionEvent event = objectMapper.readValue(message, RouteCompletionEvent.class);
-            
-            if (event.success() && event.routeId() != null) {
-                notificationService.sendRouteCompletion(event);
-                logger.info("Processed route completion for job {}", event.jobId());
-            } else {
-                notificationService.sendRouteFailure(
-                    event.jobId(),
-                    event.userId(),
-                    event.errorMessage()
-                );
-                logger.info("Processed route failure for job {}", event.jobId());
-            }
-        } catch (Exception e) {
-            logger.error("Failed to process route completion message: {}", e.getMessage(), e);
+    public void consumeRouteCompletion(String message) throws JsonProcessingException {
+        RouteCompletionEvent event = objectMapper.readValue(message, RouteCompletionEvent.class);
+
+        if (event.success() && event.routeId() != null) {
+            notificationService.sendRouteCompletion(event);
+            logger.info("Processed route completion for job {}", event.jobId());
+        } else {
+            notificationService.sendRouteFailure(event);
+            logger.info("Processed route failure for job {}", event.jobId());
         }
     }
 }

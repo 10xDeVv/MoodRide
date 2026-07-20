@@ -3,10 +3,14 @@ package com.moodride.routeworker.service;
 import com.moodride.datamodels.ScenicScoreTile;
 import com.moodride.routeworker.cache.CacheKeySchema;
 import com.moodride.routeworker.cache.CacheNames;
+import com.moodride.routeworker.cache.CachePolicy;
+import com.moodride.routeworker.config.ScenicCacheConfiguration;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.cache.Cache;
-import org.springframework.cache.CacheManager;
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.data.redis.core.RedisOperations;
+import org.springframework.data.redis.core.RedisTemplate;
+import org.springframework.data.redis.core.SessionCallback;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
 import org.springframework.stereotype.Service;
@@ -31,14 +35,21 @@ public class ScenicTileLookupService {
 
     private static final RowMapper<ScenicScoreTile> SCENIC_TILE_ROW_MAPPER = ScenicTileLookupService::mapScenicTile;
 
+    private static final String REDIS_KEY_PREFIX = CacheNames.SCENIC_TILES + "::";
+
     private final JdbcTemplate jdbcTemplate;
-    private final CacheManager cacheManager;
+    private final RedisTemplate<String, ScenicScoreTile> redisTemplate;
+    private final String scoringVersion;
     private final Map<String, ScenicScoreTile> localTiles = new LinkedHashMap<>(1024, 0.75f, true);
 
-    public ScenicTileLookupService(JdbcTemplate jdbcTemplate,
-                                   CacheManager cacheManager) {
+    public ScenicTileLookupService(
+        JdbcTemplate jdbcTemplate,
+        @Qualifier("scenicTileRedisTemplate") RedisTemplate<String, ScenicScoreTile> redisTemplate,
+        ScenicCacheConfiguration cacheConfiguration
+    ) {
         this.jdbcTemplate = jdbcTemplate;
-        this.cacheManager = cacheManager;
+        this.redisTemplate = redisTemplate;
+        this.scoringVersion = cacheConfiguration.getScenicScoringVersion();
     }
 
     @Transactional(readOnly = true)
@@ -53,63 +64,55 @@ public class ScenicTileLookupService {
             return Map.of();
         }
 
-        Map<String, ScenicScoreTile> found = new LinkedHashMap<>();
+        Map<String, ScenicScoreTile> orderedFound = new LinkedHashMap<>(orderedIndexes.size());
         List<String> cacheMisses = new ArrayList<>();
-        Cache redisCache = scenicCache();
-
         for (String h3Index : orderedIndexes) {
             ScenicScoreTile localTile = getLocal(h3Index);
-            if (localTile != null) {
-                found.put(h3Index, localTile);
-                continue;
+            orderedFound.put(h3Index, localTile);
+            if (localTile == null) {
+                cacheMisses.add(h3Index);
             }
-
-            ScenicScoreTile cachedTile = getRedis(redisCache, h3Index);
-            if (cachedTile != null) {
-                putLocal(h3Index, cachedTile);
-                found.put(h3Index, cachedTile);
-                continue;
-            }
-
-            cacheMisses.add(h3Index);
         }
 
         if (!cacheMisses.isEmpty()) {
-            List<ScenicScoreTile> fetchedTiles = fetchTiles(cacheMisses);
-            for (ScenicScoreTile tile : fetchedTiles) {
-                if (tile == null || tile.getH3Index() == null) {
-                    continue;
+            List<String> redisMisses = getRedis(cacheMisses, orderedFound);
+            if (!redisMisses.isEmpty()) {
+                List<ScenicScoreTile> fetchedTiles = fetchTiles(redisMisses);
+                boolean hasCacheWrites = false;
+                for (ScenicScoreTile tile : fetchedTiles) {
+                    if (!isActiveTile(tile)
+                        || tile.getH3Index() == null
+                        || !orderedFound.containsKey(tile.getH3Index())) {
+                        continue;
+                    }
+                    orderedFound.put(tile.getH3Index(), tile);
+                    putLocal(tile.getH3Index(), tile);
+                    hasCacheWrites = true;
                 }
-                found.put(tile.getH3Index(), tile);
-                putLocal(tile.getH3Index(), tile);
-                putRedis(redisCache, tile.getH3Index(), tile);
+                if (hasCacheWrites) {
+                    putRedis(fetchedTiles, orderedFound.keySet());
+                }
             }
         }
 
-        Map<String, ScenicScoreTile> orderedFound = new LinkedHashMap<>();
-        for (String h3Index : orderedIndexes) {
-            ScenicScoreTile tile = found.get(h3Index);
-            if (tile != null) {
-                orderedFound.put(h3Index, tile);
-            }
-        }
+        orderedFound.values().removeIf(tile -> tile == null);
         return orderedFound;
     }
 
     public void evict(Collection<String> h3Indexes) {
-        if (h3Indexes == null || h3Indexes.isEmpty()) {
+        List<String> normalizedIndexes = normalizeIndexes(h3Indexes);
+        if (normalizedIndexes.isEmpty()) {
             return;
         }
-        Cache redisCache = scenicCache();
-        for (String h3Index : normalizeIndexes(h3Indexes)) {
+
+        for (String h3Index : normalizedIndexes) {
             evictLocal(h3Index);
-            if (redisCache != null) {
-                try {
-                    redisCache.evict(CacheKeySchema.scenicTile(h3Index));
-                } catch (RuntimeException ex) {
-                    logger.debug("Failed to evict scenic tile {} from Redis cache", h3Index, ex);
-                }
-            }
+        }
+
+        try {
+            redisTemplate.delete(redisKeys(normalizedIndexes));
+        } catch (RuntimeException ex) {
+            logger.debug("Failed to bulk-evict {} scenic tiles from Redis", normalizedIndexes.size(), ex);
         }
     }
 
@@ -119,42 +122,99 @@ public class ScenicTileLookupService {
         }
     }
 
-    private Cache scenicCache() {
+    private List<String> getRedis(
+        List<String> h3Indexes,
+        Map<String, ScenicScoreTile> orderedFound
+    ) {
+        List<String> keys = redisKeys(h3Indexes);
+        final List<?> cachedValues;
         try {
-            return cacheManager.getCache(CacheNames.SCENIC_TILES);
+            cachedValues = redisTemplate.opsForValue().multiGet(keys);
         } catch (RuntimeException ex) {
-            logger.debug("Scenic tile Redis cache unavailable", ex);
-            return null;
+            logger.debug("Failed to bulk-read {} scenic tiles from Redis", h3Indexes.size(), ex);
+            return h3Indexes;
+        }
+
+        if (cachedValues == null || cachedValues.size() != h3Indexes.size()) {
+            logger.debug(
+                "Discarding misaligned scenic tile Redis response: expected {}, received {}",
+                h3Indexes.size(),
+                cachedValues == null ? null : cachedValues.size()
+            );
+            return h3Indexes;
+        }
+
+        List<String> cacheMisses = new ArrayList<>();
+        for (int index = 0; index < h3Indexes.size(); index++) {
+            String h3Index = h3Indexes.get(index);
+            Object cachedValue = cachedValues.get(index);
+            if (!(cachedValue instanceof ScenicScoreTile tile)
+                || !h3Index.equals(tile.getH3Index())
+                || !isActiveTile(tile)) {
+                cacheMisses.add(h3Index);
+                continue;
+            }
+            orderedFound.put(h3Index, tile);
+            putLocal(h3Index, tile);
+        }
+        return cacheMisses;
+    }
+
+    private void putRedis(
+        List<ScenicScoreTile> tiles,
+        Collection<String> allowedIndexes
+    ) {
+        try {
+            redisTemplate.executePipelined(new SessionCallback<Object>() {
+                @Override
+                @SuppressWarnings("unchecked")
+                public <K, V> Object execute(RedisOperations<K, V> operations) {
+                    RedisOperations<String, ScenicScoreTile> tileOperations =
+                        (RedisOperations<String, ScenicScoreTile>) (RedisOperations<?, ?>) operations;
+                    for (ScenicScoreTile tile : tiles) {
+                        if (isActiveTile(tile)
+                            && tile.getH3Index() != null
+                            && allowedIndexes.contains(tile.getH3Index())) {
+                            tileOperations.opsForValue().set(
+                                redisKey(tile.getH3Index()),
+                                tile,
+                                CachePolicy.SCENIC_TILES_TTL
+                            );
+                        }
+                    }
+                    return null;
+                }
+            });
+        } catch (RuntimeException ex) {
+            logger.debug("Failed to bulk-write scenic tiles to Redis", ex);
         }
     }
 
-    private ScenicScoreTile getRedis(Cache cache, String h3Index) {
-        if (cache == null) {
-            return null;
+    private List<String> redisKeys(List<String> h3Indexes) {
+        List<String> keys = new ArrayList<>(h3Indexes.size());
+        for (String h3Index : h3Indexes) {
+            keys.add(redisKey(h3Index));
         }
-        try {
-            return cache.get(CacheKeySchema.scenicTile(h3Index), ScenicScoreTile.class);
-        } catch (RuntimeException ex) {
-            logger.debug("Failed to read scenic tile {} from Redis cache", h3Index, ex);
-            return null;
-        }
+        return keys;
     }
 
-    private void putRedis(Cache cache, String h3Index, ScenicScoreTile tile) {
-        if (cache == null || tile == null) {
-            return;
-        }
-        try {
-            cache.put(CacheKeySchema.scenicTile(h3Index), tile);
-        } catch (RuntimeException ex) {
-            logger.debug("Failed to write scenic tile {} to Redis cache", h3Index, ex);
-        }
+    private String redisKey(String h3Index) {
+        return REDIS_KEY_PREFIX + CacheKeySchema.scenicTile(scoringVersion, h3Index);
     }
 
     private ScenicScoreTile getLocal(String h3Index) {
         synchronized (localTiles) {
-            return localTiles.get(h3Index);
+            ScenicScoreTile tile = localTiles.get(h3Index);
+            if (tile != null && !isActiveTile(tile)) {
+                localTiles.remove(h3Index);
+                return null;
+            }
+            return tile;
         }
+    }
+
+    private boolean isActiveTile(ScenicScoreTile tile) {
+        return tile != null && scoringVersion.equals(tile.getScoringVersion());
     }
 
     private void putLocal(String h3Index, ScenicScoreTile tile) {
@@ -211,8 +271,14 @@ public class ScenicTileLookupService {
                 scoring_version
             FROM scenic_score_tiles
             WHERE h3_index IN (%s)
+              AND scoring_version = ?
             """.formatted(placeholders);
-        return jdbcTemplate.query(sql, SCENIC_TILE_ROW_MAPPER, h3Indexes.toArray());
+        Object[] parameters = new Object[h3Indexes.size() + 1];
+        for (int index = 0; index < h3Indexes.size(); index++) {
+            parameters[index] = h3Indexes.get(index);
+        }
+        parameters[h3Indexes.size()] = scoringVersion;
+        return jdbcTemplate.query(sql, SCENIC_TILE_ROW_MAPPER, parameters);
     }
 
     private static ScenicScoreTile mapScenicTile(ResultSet rs, int rowNum) throws SQLException {

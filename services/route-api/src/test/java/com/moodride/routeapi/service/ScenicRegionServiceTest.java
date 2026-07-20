@@ -1,6 +1,7 @@
 package com.moodride.routeapi.service;
 
 import com.moodride.datamodels.ScenicScoreTile;
+import com.moodride.routeapi.config.ScenicCacheConfiguration;
 import com.moodride.routeapi.dto.ScenicRegionsResponse;
 import com.moodride.routeapi.repository.ScenicScoreTileRepository;
 import org.junit.jupiter.api.Test;
@@ -18,6 +19,8 @@ import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
 class ScenicRegionServiceTest {
+    private static final String SCORING_VERSION = "3.7-active-test";
+
 
     @Mock
     private ScenicScoreTileRepository scenicScoreTileRepository;
@@ -44,11 +47,22 @@ class ScenicRegionServiceTest {
         tile.setPoiDensity(0.25);
         tile.setVisualComplexity(0.70);
         tile.setScenicScore(0.88);
+        tile.setWaterScore(0.95);
+        tile.setElevationScore(0.20);
+        tile.setGreenScore(0.15);
+        tile.setSolitudeScore(0.85);
+        tile.setCurveScore(0.70);
+        tile.setPoiScore(0.25);
+        tile.setScoringVersion(SCORING_VERSION);
 
-        when(scenicScoreTileRepository.findTopScenicRegionsNearPoint(45.50, -122.70, 50000.0, 75))
-            .thenReturn(List.of(tile));
+        when(scenicScoreTileRepository.findTopScenicRegionsNearPoint(
+            SCORING_VERSION, 45.50, -122.70, 50000.0, 75
+        )).thenReturn(List.of(tile));
 
-        ScenicRegionService service = new ScenicRegionService(scenicScoreTileRepository);
+        ScenicRegionService service = new ScenicRegionService(
+            scenicScoreTileRepository,
+            scenicCacheConfiguration()
+        );
         ScenicRegionsResponse coastal = service.getScenicRegions(45.50, -122.70, 50, 25, "coastal");
         ScenicRegionsResponse mountain = service.getScenicRegions(45.50, -122.70, 50, 25, "mountain");
         ScenicRegionsResponse riverside = service.getScenicRegions(45.50, -122.70, 50, 25, "riverside");
@@ -81,6 +95,7 @@ class ScenicRegionServiceTest {
         base.setCurveScore(0.30);
         base.setPoiScore(0.25);
         base.setScenicScore(0.45);
+        base.setScoringVersion(SCORING_VERSION);
 
         ScenicScoreTile park = new ScenicScoreTile();
         park.setH3Index("872a1070bfffff1");
@@ -93,16 +108,66 @@ class ScenicRegionServiceTest {
         park.setPoiScore(0.25);
         park.setParkScore(1.0);
         park.setScenicScore(0.45);
+        park.setScoringVersion(SCORING_VERSION);
 
-        when(scenicScoreTileRepository.findTopScenicRegionsNearPoint(45.50, -122.70, 50000.0, 75))
-            .thenReturn(List.of(base, park));
+        when(scenicScoreTileRepository.findTopScenicRegionsNearPoint(
+            SCORING_VERSION, 45.50, -122.70, 50000.0, 75
+        )).thenReturn(List.of(base, park));
 
-        ScenicRegionService service = new ScenicRegionService(scenicScoreTileRepository);
+        ScenicRegionService service = new ScenicRegionService(
+            scenicScoreTileRepository,
+            scenicCacheConfiguration()
+        );
         ScenicRegionsResponse response = service.getScenicRegions(45.50, -122.70, 50, 25, "scenic");
 
         assertThat(response.regions()).hasSize(2);
         assertThat(response.regions().getFirst().h3Index()).isEqualTo("872a1070bfffff1");
         assertThat(response.regions().getFirst().compositeScore())
             .isGreaterThan(response.regions().get(1).compositeScore());
+    }
+
+    @Test
+    void getScenicRegionsNeverAdvertisesInactiveScoringVersion() {
+        GeometryFactory geometryFactory = new GeometryFactory();
+        Polygon polygon = geometryFactory.createPolygon(new Coordinate[] {
+            new Coordinate(-122.80, 45.40),
+            new Coordinate(-122.75, 45.40),
+            new Coordinate(-122.75, 45.45),
+            new Coordinate(-122.80, 45.45),
+            new Coordinate(-122.80, 45.40)
+        });
+        ScenicScoreTile active = new ScenicScoreTile();
+        active.setH3Index("872a1070bfffff2");
+        active.setGeometry(polygon);
+        active.setScenicScore(0.60);
+        active.setScoringVersion(SCORING_VERSION);
+        ScenicScoreTile inactive = new ScenicScoreTile();
+        inactive.setH3Index("872a1070bfffff3");
+        inactive.setGeometry(polygon);
+        inactive.setScenicScore(0.99);
+        inactive.setScoringVersion("previous-release");
+
+        when(scenicScoreTileRepository.findTopScenicRegionsNearPoint(
+            SCORING_VERSION, 45.50, -122.70, 50000.0, 75
+        )).thenReturn(List.of(inactive, active));
+
+        ScenicRegionService service = new ScenicRegionService(
+            scenicScoreTileRepository,
+            scenicCacheConfiguration()
+        );
+
+        ScenicRegionsResponse response = service.getScenicRegions(
+            45.50, -122.70, 50, 25, "scenic"
+        );
+
+        assertThat(response.regions())
+            .extracting(region -> region.h3Index())
+            .containsExactly(active.getH3Index());
+    }
+
+    private ScenicCacheConfiguration scenicCacheConfiguration() {
+        ScenicCacheConfiguration configuration = new ScenicCacheConfiguration();
+        configuration.setScenicScoringVersion(SCORING_VERSION);
+        return configuration;
     }
 }

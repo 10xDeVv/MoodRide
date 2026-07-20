@@ -6,6 +6,7 @@ import com.moodride.eventmodels.ScenicTilesRefreshedEvent;
 import com.moodride.routeapi.cache.CacheKeySchema;
 import com.moodride.routeapi.cache.CacheMetricsService;
 import com.moodride.routeapi.cache.CacheNames;
+import com.moodride.routeapi.config.ScenicCacheConfiguration;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.cache.Cache;
@@ -21,11 +22,18 @@ public class CacheInvalidationConsumer {
     private final CacheManager cacheManager;
     private final ObjectMapper objectMapper;
     private final CacheMetricsService metricsService;
+    private final String scenicScoringVersion;
 
-    public CacheInvalidationConsumer(CacheManager cacheManager, ObjectMapper objectMapper, CacheMetricsService metricsService) {
+    public CacheInvalidationConsumer(
+        CacheManager cacheManager,
+        ObjectMapper objectMapper,
+        CacheMetricsService metricsService,
+        ScenicCacheConfiguration scenicCacheConfiguration
+    ) {
         this.cacheManager = cacheManager;
         this.objectMapper = objectMapper;
         this.metricsService = metricsService;
+        this.scenicScoringVersion = scenicCacheConfiguration.getScenicScoringVersion();
     }
 
     @KafkaListener(topics = ScenicTilesRefreshedEvent.TOPIC, groupId = "route-api-cache-hooks")
@@ -37,7 +45,7 @@ public class CacheInvalidationConsumer {
             int count = 0;
             if (scenicCache != null && event.h3Indexes() != null) {
                 for (String h3 : event.h3Indexes()) {
-                    scenicCache.evict(CacheKeySchema.scenicTile(h3));
+                    scenicCache.evict(CacheKeySchema.scenicTile(scenicScoringVersion, h3));
                     count++;
                 }
             }
@@ -57,7 +65,7 @@ public class CacheInvalidationConsumer {
             CdcTileUpdateEvent event = objectMapper.readValue(payload, CdcTileUpdateEvent.class);
             Cache scenicCache = cacheManager.getCache(CacheNames.SCENIC_TILES);
             if (scenicCache != null) {
-                scenicCache.evict(CacheKeySchema.scenicTile(event.h3Index()));
+                scenicCache.evict(CacheKeySchema.scenicTile(scenicScoringVersion, event.h3Index()));
                 metricsService.invalidate(CacheNames.SCENIC_TILES, 1);
             }
             Cache popularityCache = cacheManager.getCache(CacheNames.REGIONAL_POPULARITY);

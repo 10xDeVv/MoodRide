@@ -1,6 +1,6 @@
 import { Client, IMessage } from "@stomp/stompjs";
 import SockJS from "sockjs-client";
-import { JobSocketEvent } from "@/lib/types";
+import type { JobSocketEvent } from "@/lib/types";
 
 const configuredWsBaseUrl = process.env.NEXT_PUBLIC_WS_BASE_URL ?? "https://usewayward.app/ws";
 
@@ -65,6 +65,10 @@ export function connectJobChannel(
 
   client.onWebSocketError = () => {
     onError("WebSocket transport error. Polling fallback remains active.");
+  };
+
+  client.onWebSocketClose = () => {
+    onError("WebSocket transport closed. Starting polling fallback.");
   };
 
   client.onConnect = () => {

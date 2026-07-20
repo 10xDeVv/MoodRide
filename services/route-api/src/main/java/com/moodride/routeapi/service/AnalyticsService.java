@@ -3,6 +3,7 @@ package com.moodride.routeapi.service;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.moodride.datamodels.AnalyticsEvent;
+import com.moodride.geo.VibeCatalog;
 import com.moodride.routeapi.dto.AnalyticsCountResponse;
 import com.moodride.routeapi.dto.AnalyticsEventRequest;
 import com.moodride.routeapi.dto.AnalyticsEventResponse;
@@ -21,6 +22,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneOffset;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -31,9 +33,17 @@ import java.util.Set;
 public class AnalyticsService {
 
     private static final int MAX_METADATA_JSON_LENGTH = 4_000;
+    private static final int MAX_METADATA_ITEMS = 50;
+    private static final int MAX_METADATA_DEPTH = 4;
+    private static final int MAX_METADATA_VALUE_LENGTH = 1_000;
+    private static final int MAX_VIBES = 3;
+    private static final Set<String> ALLOWED_VIBES = VibeCatalog.supportedVibes();
     private static final Set<String> ALLOWED_EVENT_NAMES = Set.of(
         "route_generate_clicked",
         "route_generate_submitted",
+        "route_generation_primary_ready",
+        "route_results_committed",
+        "route_map_painted",
         "route_generation_completed",
         "route_generation_failed",
         "vibe_unavailable",
@@ -57,7 +67,10 @@ public class AnalyticsService {
     public AnalyticsService(AnalyticsEventRepository eventRepository,
                             JdbcTemplate jdbcTemplate,
                             ObjectMapper objectMapper,
-                            @Value("${moodride.analytics.hash-secret:${MOODRIDE_ANALYTICS_HASH_SECRET:local-dev-analytics-secret}}") String analyticsHashSecret) {
+                            @Value("${moodride.analytics.hash-secret}") String analyticsHashSecret) {
+        if (analyticsHashSecret == null || analyticsHashSecret.isBlank()) {
+            throw new IllegalStateException("moodride.analytics.hash-secret must be configured");
+        }
         this.eventRepository = eventRepository;
         this.jdbcTemplate = jdbcTemplate;
         this.objectMapper = objectMapper.copy().findAndRegisterModules();
@@ -66,6 +79,7 @@ public class AnalyticsService {
 
     public AnalyticsEventResponse recordEvent(AnalyticsEventRequest request) {
         String eventName = normalizeEventName(request.eventName());
+        List<String> normalizedVibes = normalizeAndValidateVibes(request.vibes());
         String anonymousClientHash = hashAnonymousClientId(request.anonymousClientId(), request.anonymousSessionId());
         String regionKey = normalizeRegionKey(request.regionKey());
         Integer timeBudgetBucket = bucketTimeBudget(request.timeBudgetMinutes());
@@ -77,7 +91,7 @@ public class AnalyticsService {
         event.setRouteId(request.routeId());
         event.setRouteProfile(normalizeNullable(request.routeProfile()));
         event.setRouteMode(normalizeNullable(request.routeMode()));
-        event.setVibesJson(serializeNullable(request.vibes()));
+        event.setVibesJson(serializeNullable(normalizedVibes));
         event.setTimeBudgetMinutes(request.timeBudgetMinutes());
         event.setTimeBudgetBucket(timeBudgetBucket);
         event.setRegionKey(regionKey);
@@ -89,7 +103,7 @@ public class AnalyticsService {
         event.setCreatedAt(Instant.now());
 
         AnalyticsEvent saved = eventRepository.save(event);
-        updateDailyRollups(saved, request.vibes());
+        updateDailyRollups(saved, normalizedVibes);
         return new AnalyticsEventResponse(saved.getId(), saved.getEventName(), saved.getCreatedAt());
     }
 
@@ -179,6 +193,25 @@ public class AnalyticsService {
         return value.trim().toLowerCase(Locale.ROOT);
     }
 
+    private List<String> normalizeAndValidateVibes(List<String> vibes) {
+        if (vibes == null) {
+            return null;
+        }
+        if (vibes.size() > MAX_VIBES) {
+            throw new IllegalArgumentException("At most three vibes are allowed");
+        }
+
+        LinkedHashSet<String> normalizedVibes = new LinkedHashSet<>();
+        for (String vibe : vibes) {
+            String normalized = VibeCatalog.normalize(vibe);
+            if (!ALLOWED_VIBES.contains(normalized)) {
+                throw new IllegalArgumentException("Unsupported analytics vibe: " + vibe);
+            }
+            normalizedVibes.add(normalized);
+        }
+        return List.copyOf(normalizedVibes);
+    }
+
     private String normalizeRegionKey(String regionKey) {
         String normalized = normalizeNullable(regionKey);
         if (normalized == null) {
@@ -207,11 +240,69 @@ public class AnalyticsService {
     }
 
     private String serializeMetadata(Map<String, Object> metadata) {
-        String json = serializeNullable(metadata);
-        if (json == null) {
+        if (metadata == null) {
             return null;
         }
-        return json.length() <= MAX_METADATA_JSON_LENGTH ? json : json.substring(0, MAX_METADATA_JSON_LENGTH);
+        validateMetadataValue(metadata, 1, new int[] { 0 });
+        String json = serializeNullable(metadata);
+        if (json.length() > MAX_METADATA_JSON_LENGTH) {
+            throw new IllegalArgumentException("Analytics metadata exceeds maximum serialized size");
+        }
+        return json;
+    }
+
+    private void validateMetadataValue(Object value, int depth, int[] itemCount) {
+        if (value == null || value instanceof Boolean) {
+            return;
+        }
+        if (value instanceof CharSequence text) {
+            validateMetadataValueLength(text.length());
+            return;
+        }
+        if (value instanceof Number number) {
+            validateMetadataValueLength(number.toString().length());
+            return;
+        }
+        if (value instanceof Map<?, ?> map) {
+            validateMetadataDepth(depth);
+            for (Map.Entry<?, ?> entry : map.entrySet()) {
+                countMetadataItem(itemCount);
+                if (!(entry.getKey() instanceof String key)) {
+                    throw new IllegalArgumentException("Analytics metadata keys must be strings");
+                }
+                validateMetadataValueLength(key.length());
+                validateMetadataValue(entry.getValue(), depth + 1, itemCount);
+            }
+            return;
+        }
+        if (value instanceof List<?> list) {
+            validateMetadataDepth(depth);
+            for (Object item : list) {
+                countMetadataItem(itemCount);
+                validateMetadataValue(item, depth + 1, itemCount);
+            }
+            return;
+        }
+        throw new IllegalArgumentException("Analytics metadata values must be JSON-compatible");
+    }
+
+    private void validateMetadataDepth(int depth) {
+        if (depth > MAX_METADATA_DEPTH) {
+            throw new IllegalArgumentException("Analytics metadata exceeds maximum nesting depth");
+        }
+    }
+
+    private void validateMetadataValueLength(int length) {
+        if (length > MAX_METADATA_VALUE_LENGTH) {
+            throw new IllegalArgumentException("Analytics metadata value exceeds maximum size");
+        }
+    }
+
+    private void countMetadataItem(int[] itemCount) {
+        itemCount[0]++;
+        if (itemCount[0] > MAX_METADATA_ITEMS) {
+            throw new IllegalArgumentException("Analytics metadata contains too many items");
+        }
     }
 
     private long countEvents(Instant from, Instant to, String eventName) {
@@ -323,12 +414,20 @@ public class AnalyticsService {
         long unavailable = "vibe_unavailable".equals(event.getEventName()) ? 1L : 0L;
         long startDrive = "start_drive_clicked".equals(event.getEventName()) ? 1L : 0L;
         long navigationOpen = "navigation_opened".equals(event.getEventName()) ? 1L : 0L;
-        double generationMsTotal = event.getDurationMs() == null ? 0.0 : event.getDurationMs();
-        long generationMsCount = event.getDurationMs() == null ? 0L : 1L;
-        long routeOptionsTotal = event.getRouteCount() == null ? 0L : event.getRouteCount();
-        long routeOptionsCount = event.getRouteCount() == null ? 0L : 1L;
-        double scenicScoreTotal = event.getScenicScore() == null ? 0.0 : event.getScenicScore();
-        long scenicScoreCount = event.getScenicScore() == null ? 0L : 1L;
+        boolean firstLatencyMilestone = switch (event.getEventName()) {
+            case "route_generation_primary_ready", "route_results_committed", "route_map_painted" -> true;
+            default -> false;
+        };
+        double generationMsTotal = !firstLatencyMilestone && event.getDurationMs() != null ? event.getDurationMs() : 0.0;
+        long generationMsCount = !firstLatencyMilestone && event.getDurationMs() != null ? 1L : 0L;
+        long routeOptionsTotal = !firstLatencyMilestone && event.getRouteCount() != null
+            ? event.getRouteCount()
+            : 0L;
+        long routeOptionsCount = !firstLatencyMilestone && event.getRouteCount() != null ? 1L : 0L;
+        double scenicScoreTotal = !firstLatencyMilestone && event.getScenicScore() != null
+            ? event.getScenicScore()
+            : 0.0;
+        long scenicScoreCount = !firstLatencyMilestone && event.getScenicScore() != null ? 1L : 0L;
 
         String sql = """
             INSERT INTO route_analytics_daily (

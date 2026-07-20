@@ -31,14 +31,17 @@ export interface RouteSubmissionResponse {
   maxRetries: number;
 }
 
-export interface RouteOptionResponse {
+export interface PrimaryRouteOptionResponse {
   profile: string;
   routeId: string;
   routeUrl: string;
   scenicScore: number;
-  scoreBreakdown: Record<string, number>;
   totalDistanceKm: number;
   estimatedDurationMinutes: number;
+}
+
+export interface RouteOptionResponse extends PrimaryRouteOptionResponse {
+  scoreBreakdown: Record<string, number>;
   explanation: RouteOptionExplanationResponse | null;
 }
 
@@ -62,10 +65,10 @@ export interface RouteJobStatusResponse {
   status: string;
   routeId: string | null;
   routeUrl: string | null;
-  routeOptions: RouteOptionResponse[];
   reason: string | null;
   queuedAt: string;
   startedAt: string | null;
+  primaryReadyAt: string | null;
   completedAt: string | null;
   failedAt: string | null;
   estimatedRemainingSeconds: number | null;
@@ -76,6 +79,47 @@ export interface RouteJobStatusResponse {
   userMessage: string | null;
   suggestedVibes: string[];
   suggestedActions: string[];
+  stateRevision: number;
+  optionRevision: number;
+  optionCount: number;
+  optionsComplete: boolean;
+}
+
+export interface RouteGeometry {
+  type: "Feature";
+  geometry: {
+    type: "LineString";
+    coordinates: [number, number][];
+  };
+  properties?: {
+    segmentScores?: number[];
+    segmentColors?: string[];
+    [key: string]: unknown;
+  };
+}
+
+export interface PrimaryRouteResponse {
+  routeId: string;
+  jobId: string;
+  routeUrl: string;
+  profile: string;
+  scenicScore: number;
+  totalDistanceKm: number;
+  estimatedDurationMinutes: number;
+  timeBudgetMinutes: number | null;
+  routeMode: RouteMode;
+  startLat: number;
+  startLng: number;
+  vibes: string[];
+  geometry: RouteGeometry;
+  routeOptions: PrimaryRouteOptionResponse[];
+  algorithmVersion: string;
+  computationTimeMs: number | null;
+  optionRevision: number;
+  optionCount: number;
+  optionsComplete: boolean;
+  createdAt: string;
+  expiresAt: string | null;
 }
 
 export interface RouteDetailResponse {
@@ -92,19 +136,12 @@ export interface RouteDetailResponse {
   startLat: number;
   startLng: number;
   vibes: string[];
-  geometry: {
-    type: "Feature";
-    geometry: {
-      type: "LineString";
-      coordinates: [number, number][];
-    };
-    properties: {
-      segmentScores: number[];
-      segmentColors: string[];
-    };
-  };
+  geometry: RouteGeometry;
   scenicHighlights: Record<string, unknown>[];
   routeOptions: RouteOptionResponse[];
+  optionRevision: number;
+  optionCount: number;
+  optionsComplete: boolean;
   algorithmVersion: string;
   beamCandidates: number | null;
   computationTimeMs: number | null;
@@ -142,6 +179,14 @@ export interface JobSocketEvent {
   reason?: string;
   retryable?: boolean;
   timestamp?: string;
+  stateRevision?: number;
+  optionRevision?: number;
+  optionCount?: number;
+  optionsComplete?: boolean;
+  failureCode?: string | null;
+  userMessage?: string | null;
+  suggestedVibes?: string[];
+  suggestedActions?: string[];
 }
 
 export interface RouteRatingResponse {

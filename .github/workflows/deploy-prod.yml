@@ -1,4 +1,4 @@
-name: Deploy Production Stack
+name: Publish and Deploy Production Stack
 
 on:
   push:
@@ -14,80 +14,803 @@ on:
       - ".github/workflows/deploy-prod.yml"
   workflow_dispatch:
     inputs:
+      operation:
+        description: "Release operation"
+        required: true
+        type: choice
+        default: publish-only
+        options:
+          - publish-only
+          - deploy-existing
+          - rollback-current
+          - capture-runtime
       image_tag:
-        description: "Image tag to deploy (defaults to sha-<commit>)"
+        description: "Expected immutable sha-<40 lowercase hex> tag (deploy-existing or rollback-current)"
         required: false
         type: string
-      skip_build:
-        description: "Skip image build/push and deploy an existing tag"
+      release_lock:
+        description: "Four-image release-lock JSON emitted by publish-only (deploy-existing or rollback-current)"
         required: false
-        type: boolean
-        default: false
+        type: string
+      release_lock_sha256:
+        description: "SHA-256 of the exact release_lock JSON bytes (deploy-existing or rollback-current)"
+        required: false
+        type: string
+      quality_acceptance_b64:
+        description: "Base64-encoded compact quality-acceptance JSON (deploy-existing only)"
+        required: false
+        type: string
+      quality_acceptance_sha256:
+        description: "SHA-256 of decoded quality-acceptance JSON bytes (deploy-existing only)"
+        required: false
+        type: string
 
 permissions:
   contents: read
   packages: write
 
 jobs:
-  deploy:
-    name: Build and Deploy
+  release-values:
+    name: Resolve Release Values
     runs-on: ubuntu-latest
     environment: production
-    concurrency:
-      group: deploy-production
-      cancel-in-progress: false
-
+    outputs:
+      ghcr_namespace: ${{ steps.release.outputs.ghcr_namespace }}
+      image_tag: ${{ steps.release.outputs.image_tag }}
+      source_sha: ${{ steps.release.outputs.source_sha }}
+      should_publish: ${{ steps.release.outputs.should_publish }}
+      should_deploy: ${{ steps.release.outputs.should_deploy }}
+      should_capture: ${{ steps.release.outputs.should_capture }}
+      should_rollback: ${{ steps.release.outputs.should_rollback }}
+      api_base_url: ${{ steps.release.outputs.api_base_url }}
+      ws_base_url: ${{ steps.release.outputs.ws_base_url }}
+      route_api_image_ref: ${{ steps.release.outputs.route_api_image_ref }}
+      route_worker_image_ref: ${{ steps.release.outputs.route_worker_image_ref }}
+      notification_service_image_ref: ${{ steps.release.outputs.notification_service_image_ref }}
+      frontend_image_ref: ${{ steps.release.outputs.frontend_image_ref }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Resolve release values
+      - name: Resolve and validate operation
         id: release
         shell: bash
+        env:
+          DISPATCH_OPERATION: ${{ inputs.operation }}
+          DISPATCH_IMAGE_TAG: ${{ inputs.image_tag }}
+          DISPATCH_RELEASE_LOCK: ${{ inputs.release_lock }}
+          DISPATCH_RELEASE_LOCK_SHA256: ${{ inputs.release_lock_sha256 }}
+          DISPATCH_QUALITY_ACCEPTANCE_B64: ${{ inputs.quality_acceptance_b64 }}
+          DISPATCH_QUALITY_ACCEPTANCE_SHA256: ${{ inputs.quality_acceptance_sha256 }}
+          CONFIGURED_NAMESPACE: ${{ vars.GHCR_NAMESPACE }}
+          CONFIGURED_API_BASE_URL: ${{ vars.NEXT_PUBLIC_API_BASE_URL }}
+          CONFIGURED_WS_BASE_URL: ${{ vars.NEXT_PUBLIC_WS_BASE_URL }}
         run: |
           set -euo pipefail
 
-          namespace="${{ vars.GHCR_NAMESPACE }}"
+          namespace="$CONFIGURED_NAMESPACE"
           if [ -z "$namespace" ]; then
             namespace="${{ github.repository_owner }}"
           fi
-          namespace="$(echo "$namespace" | tr '[:upper:]' '[:lower:]')"
-
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.skip_build }}" = "true" ] && [ -z "${{ inputs.image_tag }}" ]; then
-            echo "image_tag is required when skip_build=true." >&2
+          namespace="$(printf '%s' "$namespace" | tr '[:upper:]' '[:lower:]')"
+          if ! printf '%s' "$namespace" | grep -Eq '^[a-z0-9][a-z0-9._-]*$'; then
+            echo "GHCR namespace is invalid." >&2
             exit 1
           fi
 
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ inputs.image_tag }}" ]; then
-            image_tag="${{ inputs.image_tag }}"
+          if [ "${{ github.event_name }}" = "push" ]; then
+            operation="publish-only"
           else
-            short_sha="${GITHUB_SHA::12}"
-            image_tag="sha-${short_sha}"
+            operation="$DISPATCH_OPERATION"
           fi
 
-          should_build="true"
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.skip_build }}" = "true" ]; then
-            should_build="false"
+          should_publish="false"
+          should_deploy="false"
+          should_capture="false"
+          should_rollback="false"
+          image_tag=""
+          source_sha="$GITHUB_SHA"
+          route_api_image_ref=""
+          route_worker_image_ref=""
+          notification_service_image_ref=""
+          frontend_image_ref=""
+
+          case "$operation" in
+            publish-only)
+              should_publish="true"
+              image_tag="sha-${GITHUB_SHA}"
+              source_sha="$GITHUB_SHA"
+              if [ -n "$DISPATCH_IMAGE_TAG" ] || [ -n "$DISPATCH_RELEASE_LOCK" ] || [ -n "$DISPATCH_RELEASE_LOCK_SHA256" ] || [ -n "$DISPATCH_QUALITY_ACCEPTANCE_B64" ] || [ -n "$DISPATCH_QUALITY_ACCEPTANCE_SHA256" ]; then
+                echo "publish-only derives its immutable tag and checksum-pinned lock; release inputs are forbidden." >&2
+                exit 1
+              fi
+              ;;
+            deploy-existing|rollback-current)
+              if [ "$operation" = "deploy-existing" ]; then
+                should_deploy="true"
+              else
+                should_rollback="true"
+              fi
+              image_tag="$DISPATCH_IMAGE_TAG"
+              if ! printf '%s' "$image_tag" | grep -Eq '^sha-[0-9a-f]{40}$'; then
+                echo "$operation requires image_tag in the immutable sha-<40 lowercase hex> form." >&2
+                exit 1
+              fi
+              source_sha="${image_tag#sha-}"
+              [ -n "$DISPATCH_RELEASE_LOCK" ] || {
+                echo "$operation requires the four-image release_lock JSON." >&2
+                exit 1
+              }
+              printf '%s' "$DISPATCH_RELEASE_LOCK_SHA256" | grep -Eq '^[0-9a-f]{64}$' || {
+                echo "$operation requires release_lock_sha256 for the exact JSON bytes." >&2
+                exit 1
+              }
+              actual_lock_sha256="$(printf '%s' "$DISPATCH_RELEASE_LOCK" | sha256sum)"
+              actual_lock_sha256="${actual_lock_sha256%% *}"
+              [ "$actual_lock_sha256" = "$DISPATCH_RELEASE_LOCK_SHA256" ] || {
+                echo "release_lock_sha256 does not match the exact release_lock input bytes." >&2
+                exit 1
+              }
+              printf '%s' "$DISPATCH_RELEASE_LOCK" | jq -e . >/dev/null
+              [ "$(printf '%s' "$DISPATCH_RELEASE_LOCK" | jq -er '.schema_version')" = "2" ] || {
+                echo "Unsupported release-lock schema." >&2
+                exit 1
+              }
+              [ "$(printf '%s' "$DISPATCH_RELEASE_LOCK" | jq -er '.source_sha')" = "$source_sha" ] || {
+                echo "Release-lock source_sha does not match image_tag." >&2
+                exit 1
+              }
+              [ "$(printf '%s' "$DISPATCH_RELEASE_LOCK" | jq -er '.image_tag')" = "$image_tag" ] || {
+                echo "Release-lock image_tag does not match dispatch input." >&2
+                exit 1
+              }
+              [ "$(printf '%s' "$DISPATCH_RELEASE_LOCK" | jq -er '.ghcr_namespace')" = "$namespace" ] || {
+                echo "Release-lock GHCR namespace does not match the selected namespace." >&2
+                exit 1
+              }
+              [ "$(printf '%s' "$DISPATCH_RELEASE_LOCK" | jq -er '.source_url')" = \
+                "https://github.com/${GITHUB_REPOSITORY}" ] || {
+                echo "Release-lock OCI source URL does not match this repository." >&2
+                exit 1
+              }
+              [ "$(printf '%s' "$DISPATCH_RELEASE_LOCK" | jq -er '.images | keys | join(",")')" = \
+                "frontend,notification_service,route_api,route_worker" ] || {
+                echo "Release-lock must contain exactly the four production application images." >&2
+                exit 1
+              }
+
+              for entry in \
+                "route_api|moodride-route-api|route_api_image_ref" \
+                "route_worker|moodride-route-worker|route_worker_image_ref" \
+                "notification_service|moodride-notification-service|notification_service_image_ref" \
+                "frontend|moodride-frontend|frontend_image_ref"; do
+                IFS='|' read -r key repository output_name <<< "$entry"
+                tag_ref="$(printf '%s' "$DISPATCH_RELEASE_LOCK" | jq -er --arg key "$key" '.images[$key].tag')"
+                digest_ref="$(printf '%s' "$DISPATCH_RELEASE_LOCK" | jq -er --arg key "$key" '.images[$key].ref')"
+                revision="$(printf '%s' "$DISPATCH_RELEASE_LOCK" | jq -er --arg key "$key" '.images[$key].revision')"
+                index_digest="$(printf '%s' "$DISPATCH_RELEASE_LOCK" | jq -er --arg key "$key" '.images[$key].index_digest')"
+                [ "$tag_ref" = "ghcr.io/${namespace}/${repository}:${image_tag}" ] || {
+                  echo "Release-lock tag reference for $repository is outside the selected GHCR release." >&2
+                  exit 1
+                }
+                printf '%s' "$digest_ref" | grep -Eq "^ghcr.io/${namespace}/${repository}@sha256:[0-9a-f]{64}$" || {
+                  echo "Release-lock digest reference for $repository is invalid." >&2
+                  exit 1
+                }
+                [ "$index_digest" = "${digest_ref##*@}" ] || {
+                  echo "Release-lock image-index digest for $repository does not match its digest reference." >&2
+                  exit 1
+                }
+                [ "$revision" = "$source_sha" ] || {
+                  echo "Release-lock revision for $repository does not match source_sha." >&2
+                  exit 1
+                }
+                printf -v "$output_name" '%s' "$digest_ref"
+              done
+              if [ "$operation" = "deploy-existing" ]; then
+                [ -n "$DISPATCH_QUALITY_ACCEPTANCE_B64" ] || {
+                  echo "deploy-existing requires a base64-encoded quality-acceptance manifest." >&2
+                  exit 1
+                }
+                printf '%s' "$DISPATCH_QUALITY_ACCEPTANCE_SHA256" | grep -Eq '^[0-9a-f]{64}$' || {
+                  echo "deploy-existing requires quality_acceptance_sha256." >&2
+                  exit 1
+                }
+                quality_file="$(mktemp)"
+                printf '%s' "$DISPATCH_QUALITY_ACCEPTANCE_B64" | base64 --decode > "$quality_file" || {
+                  echo "Quality-acceptance input is not valid base64." >&2
+                  rm -f "$quality_file"
+                  exit 1
+                }
+                quality_sha="$(sha256sum "$quality_file")"
+                quality_sha="${quality_sha%% *}"
+                [ "$quality_sha" = "$DISPATCH_QUALITY_ACCEPTANCE_SHA256" ] || {
+                  echo "Quality-acceptance checksum does not match decoded bytes." >&2
+                  rm -f "$quality_file"
+                  exit 1
+                }
+                expected_candidate_images="$(printf '%s' "$DISPATCH_RELEASE_LOCK" | jq -c '
+                  .images
+                  | with_entries(.value = {
+                      ref: .value.ref,
+                      index_digest: .value.index_digest,
+                      revision: .value.revision
+                    })
+                ')"
+                jq -e \
+                  --arg lock_sha "$DISPATCH_RELEASE_LOCK_SHA256" \
+                  --arg source_sha "$source_sha" \
+                  --arg image_tag "$image_tag" \
+                  --arg namespace "$namespace" \
+                  --argjson expected_candidate_images "$expected_candidate_images" '
+                    def exact_image($repository; $revision):
+                      ((keys | join(",")) == "index_digest,ref,revision")
+                      and (.ref | test(
+                        "^ghcr\\.io/" + $namespace + "/" + $repository + "@sha256:[0-9a-f]{64}$"
+                      ))
+                      and .index_digest == (.ref | split("@")[1])
+                      and .revision == $revision;
+                    def exact_images($revision):
+                      ((keys | join(",")) == "frontend,notification_service,route_api,route_worker")
+                      and (.route_api | exact_image("moodride-route-api"; $revision))
+                      and (.route_worker | exact_image("moodride-route-worker"; $revision))
+                      and (.notification_service | exact_image("moodride-notification-service"; $revision))
+                      and (.frontend | exact_image("moodride-frontend"; $revision));
+                    def exact_runtime_identity($expected_algorithm_mode):
+                      ((keys | join(",")) ==
+                        "cache_policy,database_identity,osrm,runtime_algorithm_mode")
+                      and (.database_identity
+                        | ((keys | join(",")) ==
+                            "database_fingerprint,road_dataset_fingerprint,scenic_dataset_fingerprint,scenic_scoring_version")
+                        and (.database_fingerprint | test("^[0-9a-f]{64}$"))
+                        and (.scenic_scoring_version | test("^3\\.7([._+-][A-Za-z0-9][A-Za-z0-9._+-]*)?$"))
+                        and (.scenic_dataset_fingerprint | test("^[0-9a-f]{64}$"))
+                        and (.road_dataset_fingerprint | test("^[0-9a-f]{64}$")))
+                      and (.osrm
+                        | ((keys | join(",")) ==
+                            "dataset_basename,file_manifest_sha256,image_ref")
+                        and (.image_ref | test(
+                          "^ghcr\\.io/project-osrm/osrm-backend@sha256:[0-9a-f]{64}$"
+                        ))
+                        and .dataset_basename == "canada-latest"
+                        and (.file_manifest_sha256 | test("^[0-9a-f]{64}$")))
+                      and .cache_policy == {
+                        spring_profiles_active: "prod",
+                        algorithm_profile: "hybrid_osrm_v2",
+                        route_mode: "drive",
+                        graph_warmup_enabled: false,
+                        road_anchor_cache_schema: "v1"
+                      }
+                      and .runtime_algorithm_mode == $expected_algorithm_mode;
+                    .schema_version == 1
+                    and .verdict == "pass"
+                    and .release_lock_sha256 == $lock_sha
+                    and .source_sha == $source_sha
+                    and .image_tag == $image_tag
+                    and (has("images") | not)
+                    and (has("image_digests") | not)
+                    and (has("database_identity") | not)
+                    and (has("osrm") | not)
+                    and (has("runtime_algorithm_mode") | not)
+                    and (has("cache_policy") | not)
+                    and .scenario_manifest_sha256 == "2fc22496f3ee42bfcc298fd06a3aa1e3a126822fe0b51513b0034342b0d27c00"
+                    and .scenario_count == 27
+                    and .route_mode == "drive"
+                    # These hashes are caller-supplied approval claims inside the checksum-pinned
+                    # quality document. Production-environment authorization trusts that approval;
+                    # the quality artifact bytes remain in their upstream quality evidence.
+                    and ((.artifacts | keys | join(",")) == "candidate,control")
+                    and (.artifacts.control.sha256 | test("^[0-9a-f]{64}$"))
+                    and (.artifacts.control.source_sha | test("^[0-9a-f]{40}$"))
+                    and (.artifacts.control.release_lock_sha256 | test("^[0-9a-f]{64}$"))
+                    and (.artifacts.control as $control
+                      | $control.images | exact_images($control.source_sha))
+                    and (.artifacts.control.runtime_identity
+                      | exact_runtime_identity({
+                          algorithm: "hybrid_osrm_v2",
+                          mode: "drive"
+                        }))
+                    and (.artifacts.candidate.sha256 | test("^[0-9a-f]{64}$"))
+                    and .artifacts.control.sha256 != .artifacts.candidate.sha256
+                    and .artifacts.candidate.source_sha == $source_sha
+                    and .artifacts.candidate.release_lock_sha256 == $lock_sha
+                    and .artifacts.candidate.images == $expected_candidate_images
+                    and (.artifacts.candidate.images | exact_images($source_sha))
+                    and (.artifacts.candidate.runtime_identity
+                      | exact_runtime_identity({
+                          algorithm: "hybrid_osrm_v2",
+                          mode: "drive"
+                        }))
+                    and .artifacts.control.runtime_identity.database_identity.scenic_scoring_version
+                      == .artifacts.candidate.runtime_identity.database_identity.scenic_scoring_version
+                    and .artifacts.control.runtime_identity.database_identity.scenic_dataset_fingerprint
+                      == .artifacts.candidate.runtime_identity.database_identity.scenic_dataset_fingerprint
+                    and .artifacts.control.runtime_identity.database_identity.road_dataset_fingerprint
+                      == .artifacts.candidate.runtime_identity.database_identity.road_dataset_fingerprint
+                    and .artifacts.control.runtime_identity.osrm
+                      == .artifacts.candidate.runtime_identity.osrm
+                    and .artifacts.control.runtime_identity.cache_policy
+                      == .artifacts.candidate.runtime_identity.cache_policy
+                    and .artifacts.control.runtime_identity.runtime_algorithm_mode
+                      == .artifacts.candidate.runtime_identity.runtime_algorithm_mode
+                    and ((.artifacts.control | keys | join(",")) ==
+                      "images,release_lock_sha256,runtime_identity,sha256,source_sha")
+                    and ((.artifacts.candidate | keys | join(",")) ==
+                      "images,release_lock_sha256,runtime_identity,sha256,source_sha")
+                  ' "$quality_file" >/dev/null || {
+                    echo "Quality acceptance is missing a canonical artifact identity, policy, scenario, or pass verdict." >&2
+                    rm -f "$quality_file"
+                    exit 1
+                  }
+                rm -f "$quality_file"
+              elif [ -n "$DISPATCH_QUALITY_ACCEPTANCE_B64" ] || [ -n "$DISPATCH_QUALITY_ACCEPTANCE_SHA256" ]; then
+                echo "rollback-current accepts only its current release-lock fence, not a new quality decision." >&2
+                exit 1
+              fi
+              ;;
+            capture-runtime)
+              should_capture="true"
+              if [ -n "$DISPATCH_IMAGE_TAG" ] || [ -n "$DISPATCH_RELEASE_LOCK" ] || [ -n "$DISPATCH_RELEASE_LOCK_SHA256" ] || [ -n "$DISPATCH_QUALITY_ACCEPTANCE_B64" ] || [ -n "$DISPATCH_QUALITY_ACCEPTANCE_SHA256" ]; then
+                echo "capture-runtime observes production and accepts no release inputs." >&2
+                exit 1
+              fi
+              ;;
+            *)
+              echo "Unsupported release operation: $operation" >&2
+              exit 1
+              ;;
+          esac
+
+          if ! printf '%s' "$source_sha" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "Release source must resolve to one exact lowercase commit SHA." >&2
+            exit 1
+          fi
+          if [ -n "$image_tag" ] && [ "$image_tag" != "sha-${source_sha}" ]; then
+            echo "Image tag and release source SHA do not match." >&2
+            exit 1
           fi
 
-          api_base_url="${{ vars.NEXT_PUBLIC_API_BASE_URL }}"
-          if [ -z "$api_base_url" ]; then
-            api_base_url="https://usewayward.app"
+          api_base_url="${CONFIGURED_API_BASE_URL:-https://usewayward.app}"
+          ws_base_url="${CONFIGURED_WS_BASE_URL:-https://usewayward.app/ws}"
+          {
+            echo "ghcr_namespace=$namespace"
+            echo "image_tag=$image_tag"
+            echo "source_sha=$source_sha"
+            echo "should_publish=$should_publish"
+            echo "should_deploy=$should_deploy"
+            echo "should_capture=$should_capture"
+            echo "should_rollback=$should_rollback"
+            echo "api_base_url=$api_base_url"
+            echo "ws_base_url=$ws_base_url"
+            echo "route_api_image_ref=$route_api_image_ref"
+            echo "route_worker_image_ref=$route_worker_image_ref"
+            echo "notification_service_image_ref=$notification_service_image_ref"
+            echo "frontend_image_ref=$frontend_image_ref"
+          } >> "$GITHUB_OUTPUT"
+
+  verify:
+    name: Verify Exact Release Source
+    needs: release-values
+    if: >-
+      needs.release-values.outputs.should_publish == 'true' ||
+      needs.release-values.outputs.should_deploy == 'true' ||
+      needs.release-values.outputs.should_capture == 'true' ||
+      needs.release-values.outputs.should_rollback == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout exact release source for verification
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release-values.outputs.source_sha }}
+          persist-credentials: false
+
+      - name: Assert verification checkout provenance
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ needs.release-values.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          [ "$(git rev-parse HEAD)" = "$SOURCE_SHA" ] || {
+            echo "Verification checkout does not equal release source_sha." >&2
+            exit 1
+          }
+
+      - name: Set up Java 25 for reactor tests
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+          cache: maven
+
+      - name: Run backend reactor tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          mockito_version="$(
+            mvn -N -q -DforceStdout help:evaluate -Dexpression=mockito.version
+          )"
+          if ! printf '%s' "$mockito_version" \
+              | grep -Eq '^[0-9]+(\.[0-9]+){2}([.-][0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$'; then
+            echo "Inherited mockito.version is absent or unsafe: ${mockito_version:-<empty>}" >&2
+            exit 1
+          fi
+          mvn -q -pl services/route-worker -am dependency:go-offline -DskipTests
+          mockito_agent="$HOME/.m2/repository/org/mockito/mockito-core/$mockito_version/mockito-core-$mockito_version.jar"
+          if [ ! -f "$mockito_agent" ]; then
+            echo "Resolved Mockito Java agent is missing: $mockito_agent" >&2
+            exit 1
+          fi
+          mvn -DargLine="-javaagent:$mockito_agent" test
+
+      - name: Set up Node for frontend verification
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/moodride-web/package-lock.json
+
+      - name: Run frontend install, lint, typecheck, and production build
+        shell: bash
+        working-directory: frontend/moodride-web
+        env:
+          NEXT_PUBLIC_MAPBOX_ACCESS_TOKEN: verification-placeholder
+          NEXT_PUBLIC_API_BASE_URL: https://example.invalid
+          NEXT_PUBLIC_WS_BASE_URL: wss://example.invalid/ws
+        run: |
+          set -euo pipefail
+          npm ci
+          npm run lint
+          npx tsc --noEmit
+          npm run build
+
+      - name: Run production release contract and behavior fixtures
+        shell: bash
+        run: python3 scripts/deploy/check_prod_release_contract.py
+
+      - name: Validate strict production Compose interpolation
+        shell: bash
+        run: |
+          set -euo pipefail
+          fixture_env="$RUNNER_TEMP/compose-fixture.env"
+          cp .env.prod.template "$fixture_env"
+          python3 - "$fixture_env" <<'PY'
+          import pathlib
+          import sys
+
+          path = pathlib.Path(sys.argv[1])
+          replacements = {
+              "POSTGRES_PASSWORD": "fixture-postgres-password",
+              "REDIS_PASSWORD": "fixture-redis-password",
+              "MOODRIDE_ANALYTICS_HASH_SECRET": "a" * 64,
+              "MOODRIDE_SCENIC_SCORING_VERSION": "3.7-fixture",
+              "MOODRIDE_ROAD_DATASET_REVISION": "fixture-road-revision",
+              "MOODRIDE_ROAD_DATASET_FINGERPRINT": "b" * 64,
+              "GHCR_NAMESPACE": "acme",
+              "IMAGE_TAG": "sha-" + ("c" * 40),
+              "ROUTE_API_IMAGE_REF": "ghcr.io/acme/moodride-route-api@sha256:" + ("d" * 64),
+              "ROUTE_WORKER_IMAGE_REF": "ghcr.io/acme/moodride-route-worker@sha256:" + ("d" * 64),
+              "NOTIFICATION_SERVICE_IMAGE_REF": "ghcr.io/acme/moodride-notification-service@sha256:" + ("d" * 64),
+              "FRONTEND_IMAGE_REF": "ghcr.io/acme/moodride-frontend@sha256:" + ("d" * 64),
+              "OSRM_IMAGE_REF": "ghcr.io/project-osrm/osrm-backend@sha256:" + ("e" * 64),
+              "CADDY_IMAGE_REF": "caddy@sha256:" + ("f" * 64),
+              "NEXT_PUBLIC_MAPBOX_ACCESS_TOKEN": "fixture-mapbox-token",
+              "OSRM_DATASET_BASENAME": "canada-latest",
+              "CADDYFILE_PATH": str(pathlib.Path.cwd() / "Caddyfile"),
+          }
+          rendered = []
+          replaced = set()
+          for line in path.read_text(encoding="utf-8").splitlines():
+              if line and not line.startswith("#") and "=" in line:
+                  key, _ = line.split("=", 1)
+                  if key in replacements:
+                      line = f"{key}={replacements[key]}"
+                      replaced.add(key)
+              rendered.append(line)
+          missing = sorted(replacements.keys() - replaced)
+          if missing:
+              raise SystemExit(f"Compose fixture replacements missing from template: {missing}")
+          path.write_text("\n".join(rendered) + "\n", encoding="utf-8")
+          PY
+          if grep -q 'replace-with-' "$fixture_env"; then
+            echo "Generated Compose fixture retains a template placeholder." >&2
+            exit 1
+          fi
+          docker compose --project-directory "$PWD" -f docker-compose.prod.yml \
+            --env-file "$fixture_env" config >/dev/null
+
+      - name: Validate production shell syntax
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash -n \
+            scripts/deploy/deploy_prod.sh \
+            scripts/deploy/rollback_prod.sh \
+            scripts/deploy/deploy_scenic_release.sh \
+            scripts/deploy/database_recovery.sh \
+            scripts/deploy/test_database_recovery.sh
+
+  capture-runtime:
+    name: Capture Production Runtime Attribution
+    needs:
+      - release-values
+      - verify
+    if: >-
+      always() &&
+      needs.release-values.outputs.should_capture == 'true' &&
+      needs.verify.result == 'success'
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Checkout observation probe
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Configure SSH key
+        shell: bash
+        run: |
+          set -euo pipefail
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "${{ secrets.PROD_SSH_PRIVATE_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H "${{ secrets.PROD_SSH_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Observe production runtime without mutation
+        shell: bash
+        run: |
+          set -euo pipefail
+          diagnostics_dir="production-runtime-diagnostics"
+          remote_document="${diagnostics_dir}/remote-stdout.json"
+          ssh_stderr="${diagnostics_dir}/ssh.stderr.log"
+          validation_stderr="${diagnostics_dir}/validation.stderr.log"
+          rm -f production-runtime.json
+          rm -rf "$diagnostics_dir"
+          mkdir -p "$diagnostics_dir"
+
+          validate_capture_document() {
+            jq -e \
+              --arg expected_source_url "https://github.com/${{ github.repository }}" '
+                type == "object"
+                and .schema_version == 3
+                and .source == "production-runtime-observation"
+                and (.captured_at | type == "string" and length > 0)
+                and (
+                  .attribution_status == "attributable"
+                  or .attribution_status == "unattributable"
+                )
+                and (.attribution_reasons | type == "array")
+                and (.attribution_reasons | all(.[]; type == "string"))
+                and (
+                  .expected_source_revision == null
+                  or (.expected_source_revision | test("^[0-9a-f]{40}$"))
+                )
+                and (
+                  .expected_github_source_url == null
+                  or (.expected_github_source_url | type == "string")
+                )
+                and (.compose_env_identity | type == "object")
+                and (.compose_runtime | type == "object")
+                and (.database_cache_identity | type == "object")
+                and (.osrm_identity | type == "object")
+                and (.caddy_identity | type == "object")
+                and (.flyway_schema_history | type == "object")
+                and (.running_route_api_migrations | type == "object")
+                and (.services | type == "array")
+                and (
+                  if .attribution_status == "attributable" then
+                    .attribution_reasons == []
+                    and .expected_github_source_url == $expected_source_url
+                    and (.expected_source_revision | test("^[0-9a-f]{40}$"))
+                  else
+                    (.attribution_reasons | length) > 0
+                  end
+                )
+              ' "$1" >/dev/null
+          }
+
+          ssh_status=0
+          ssh "${{ secrets.PROD_SSH_USER }}@${{ secrets.PROD_SSH_HOST }}" \
+            "EXPECTED_GITHUB_SOURCE_URL='https://github.com/${{ github.repository }}' python3 -" \
+            < scripts/deploy/capture_prod_runtime.py \
+            > "$remote_document" 2> "$ssh_stderr" || ssh_status=$?
+          printf '%s\n' "$ssh_status" > "${diagnostics_dir}/ssh-exit-status"
+
+          remote_document_valid="false"
+          published_document="local-unattributable-fallback"
+          if validate_capture_document "$remote_document" 2> "$validation_stderr"; then
+            cp "$remote_document" production-runtime.json
+            remote_document_valid="true"
+            published_document="remote"
+          else
+            if [ "$ssh_status" -ne 0 ]; then
+              fallback_reason="Production runtime SSH capture failed with status ${ssh_status} before valid schema-versioned evidence was received."
+            else
+              fallback_reason="Production runtime SSH capture returned non-JSON or invalid schema-versioned evidence."
+            fi
+            fallback_document="${RUNNER_TEMP}/production-runtime-fallback.json"
+            CAPTURE_FALLBACK_REASON="$fallback_reason" python3 - <<'PY' > "$fallback_document"
+          import json
+          import os
+          import sys
+
+          sys.path.insert(0, "scripts/deploy")
+          from capture_prod_runtime import unattributable_document
+
+          print(json.dumps(
+              unattributable_document(os.environ["CAPTURE_FALLBACK_REASON"]),
+              indent=2,
+              sort_keys=True,
+          ))
+          PY
+            validate_capture_document "$fallback_document" 2>> "$validation_stderr"
+            mv "$fallback_document" production-runtime.json
           fi
 
-          ws_base_url="${{ vars.NEXT_PUBLIC_WS_BASE_URL }}"
-          if [ -z "$ws_base_url" ]; then
-            ws_base_url="https://usewayward.app/ws"
+          final_status="$ssh_status"
+          attribution_status="$(jq -er '.attribution_status' production-runtime.json)"
+          if [ "$remote_document_valid" != "true" ] || \
+              [ "$attribution_status" != "attributable" ]; then
+            if [ "$final_status" -eq 0 ]; then
+              final_status=2
+            fi
+          fi
+          {
+            echo "ssh_exit_status=$ssh_status"
+            echo "remote_document_valid=$remote_document_valid"
+            echo "published_document=$published_document"
+            echo "attribution_status=$attribution_status"
+            echo "final_exit_status=$final_status"
+          } > "${diagnostics_dir}/capture.status"
+          exit "$final_status"
+
+      - name: Upload production runtime evidence
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: production-runtime-${{ github.run_id }}-${{ github.run_attempt }}
+          path: production-runtime.json
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload production runtime capture diagnostics
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: production-runtime-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          path: production-runtime-diagnostics/
+          if-no-files-found: error
+          retention-days: 30
+
+  publish:
+    name: Publish Immutable Images
+    needs:
+      - release-values
+      - verify
+    if: needs.release-values.outputs.should_publish == 'true'
+    runs-on: ubuntu-latest
+    environment: production
+    concurrency:
+      group: publish-production-${{ needs.release-values.outputs.source_sha }}-${{ needs.release-values.outputs.image_tag }}
+      cancel-in-progress: false
+    steps:
+      - name: Checkout exact release source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release-values.outputs.source_sha }}
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ secrets.GHCR_USERNAME != '' && secrets.GHCR_USERNAME || github.repository_owner }}
+          password: ${{ secrets.GHCR_PAT != '' && secrets.GHCR_PAT || secrets.GITHUB_TOKEN }}
+
+      - name: Verify pinned production migration lineage
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import zlib
+
+          root = Path("services/route-api/src/main/resources/db/migration")
+          expected = {
+              "V38__add_road_segment_stable_identity.sql": 1443186875,
+              "V39__add_route_job_lifecycle_fencing.sql": -2068215762,
+              "V40__add_route_job_dispatch_outbox.sql": -1969470883,
+              "V41__add_route_job_terminal_event_outbox.sql": -819117119,
+          }
+          forbidden = list(root.glob("V3[6-8]__add_route_job_*.sql"))
+          if forbidden:
+              raise SystemExit(f"Lifecycle migrations reuse applied production versions: {forbidden}")
+          for filename, expected_checksum in expected.items():
+              path = root / filename
+              if not path.is_file():
+                  raise SystemExit(f"Pinned migration is missing: {filename}")
+              checksum = 0
+              for line in path.read_text(encoding="utf-8-sig").splitlines():
+                  checksum = zlib.crc32(line.encode("utf-8"), checksum)
+              if checksum >= 2**31:
+                  checksum -= 2**32
+              if checksum != expected_checksum:
+                  raise SystemExit(
+                      f"Pinned Flyway checksum mismatch for {filename}: "
+                      f"expected {expected_checksum}, found {checksum}"
+                  )
+          PY
+
+      - name: Refuse partial or divergent immutable tag set
+        id: preflight
+        shell: bash
+        env:
+          NAMESPACE: ${{ needs.release-values.outputs.ghcr_namespace }}
+          IMAGE_TAG: ${{ needs.release-values.outputs.image_tag }}
+          SOURCE_SHA: ${{ needs.release-values.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          existing=0
+          missing=0
+          for repository in moodride-route-api moodride-route-worker moodride-notification-service moodride-frontend; do
+            ref="ghcr.io/${NAMESPACE}/${repository}:${IMAGE_TAG}"
+            if inspect_output="$(docker buildx imagetools inspect "$ref" 2>&1)"; then
+              existing=$((existing + 1))
+            else
+              case "$(printf '%s' "$inspect_output" | tr '[:upper:]' '[:lower:]')" in
+                *"manifest unknown"*|*"not found"*) missing=$((missing + 1)) ;;
+                *)
+                  echo "Could not establish immutable tag availability for $ref: $inspect_output" >&2
+                  exit 1
+                  ;;
+              esac
+            fi
+          done
+
+          if [ "$existing" -ne 0 ] && [ "$missing" -ne 0 ]; then
+            echo "Immutable release is partially present ($existing existing, $missing missing); refusing repair or overwrite." >&2
+            exit 1
           fi
 
-          echo "ghcr_namespace=$namespace" >> "$GITHUB_OUTPUT"
-          echo "image_tag=$image_tag" >> "$GITHUB_OUTPUT"
-          echo "should_build=$should_build" >> "$GITHUB_OUTPUT"
-          echo "api_base_url=$api_base_url" >> "$GITHUB_OUTPUT"
-          echo "ws_base_url=$ws_base_url" >> "$GITHUB_OUTPUT"
+          if [ "$existing" -eq 4 ]; then
+            echo "All immutable tags already exist; verifying exact source labels and reusing them without build or push."
+            for entry in \
+              "route_api|moodride-route-api" \
+              "route_worker|moodride-route-worker" \
+              "notification_service|moodride-notification-service" \
+              "frontend|moodride-frontend"; do
+              IFS='|' read -r key repository <<< "$entry"
+              repository_ref="ghcr.io/${NAMESPACE}/${repository}"
+              tag_ref="${repository_ref}:${IMAGE_TAG}"
+              index_digest="$(docker buildx imagetools inspect "$tag_ref" \
+                | sed -n 's/^Digest:[[:space:]]*//p')"
+              printf '%s' "$index_digest" | grep -Eq '^sha256:[0-9a-f]{64}$' || {
+                echo "Existing immutable tag $tag_ref did not resolve to one exact image-index digest." >&2
+                exit 1
+              }
+              docker pull "$tag_ref" >/dev/null
+              revision="$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$tag_ref")"
+              [ "$revision" = "$SOURCE_SHA" ] || {
+                echo "Existing immutable tag $tag_ref has divergent or absent OCI revision $revision." >&2
+                exit 1
+              }
+              source="$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.source" }}' "$tag_ref")"
+              [ "$source" = "https://github.com/${GITHUB_REPOSITORY}" ] || {
+                echo "Existing immutable tag $tag_ref has divergent or absent OCI source $source." >&2
+                exit 1
+              }
+              echo "${key}_digest=${index_digest}" >> "$GITHUB_OUTPUT"
+            done
+            echo "should_build=false" >> "$GITHUB_OUTPUT"
+          else
+            [ "$missing" -eq 4 ] || {
+              echo "Expected all four immutable tags to be absent before build." >&2
+              exit 1
+            }
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Set up Java 25
-        if: steps.release.outputs.should_build == 'true'
+        if: steps.preflight.outputs.should_build == 'true'
         uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -95,25 +818,13 @@ jobs:
           cache: maven
 
       - name: Package services
-        if: steps.release.outputs.should_build == 'true'
+        if: steps.preflight.outputs.should_build == 'true'
         shell: bash
-        run: |
-          mvn -pl services/route-api,services/route-worker,services/notification-service -am package -DskipTests
-
-      - name: Set up Docker Buildx
-        if: steps.release.outputs.should_build == 'true'
-        uses: docker/setup-buildx-action@v3
-
-      - name: Log in to GHCR
-        if: steps.release.outputs.should_build == 'true'
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ secrets.GHCR_USERNAME != '' && secrets.GHCR_USERNAME || github.repository_owner }}
-          password: ${{ secrets.GHCR_PAT != '' && secrets.GHCR_PAT || secrets.GITHUB_TOKEN }}
+        run: mvn -pl services/route-api,services/route-worker,services/notification-service -am package -DskipTests
 
       - name: Build and push route-api
-        if: steps.release.outputs.should_build == 'true'
+        id: build-route-api
+        if: steps.preflight.outputs.should_build == 'true'
         uses: docker/build-push-action@v6
         with:
           context: services/route-api
@@ -121,11 +832,12 @@ jobs:
           push: true
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
-            org.opencontainers.image.revision=${{ github.sha }}
-          tags: ghcr.io/${{ steps.release.outputs.ghcr_namespace }}/moodride-route-api:${{ steps.release.outputs.image_tag }}
+            org.opencontainers.image.revision=${{ needs.release-values.outputs.source_sha }}
+          tags: ghcr.io/${{ needs.release-values.outputs.ghcr_namespace }}/moodride-route-api:${{ needs.release-values.outputs.image_tag }}
 
       - name: Build and push route-worker
-        if: steps.release.outputs.should_build == 'true'
+        id: build-route-worker
+        if: steps.preflight.outputs.should_build == 'true'
         uses: docker/build-push-action@v6
         with:
           context: services/route-worker
@@ -133,11 +845,12 @@ jobs:
           push: true
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
-            org.opencontainers.image.revision=${{ github.sha }}
-          tags: ghcr.io/${{ steps.release.outputs.ghcr_namespace }}/moodride-route-worker:${{ steps.release.outputs.image_tag }}
+            org.opencontainers.image.revision=${{ needs.release-values.outputs.source_sha }}
+          tags: ghcr.io/${{ needs.release-values.outputs.ghcr_namespace }}/moodride-route-worker:${{ needs.release-values.outputs.image_tag }}
 
       - name: Build and push notification-service
-        if: steps.release.outputs.should_build == 'true'
+        id: build-notification-service
+        if: steps.preflight.outputs.should_build == 'true'
         uses: docker/build-push-action@v6
         with:
           context: services/notification-service
@@ -145,11 +858,12 @@ jobs:
           push: true
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
-            org.opencontainers.image.revision=${{ github.sha }}
-          tags: ghcr.io/${{ steps.release.outputs.ghcr_namespace }}/moodride-notification-service:${{ steps.release.outputs.image_tag }}
+            org.opencontainers.image.revision=${{ needs.release-values.outputs.source_sha }}
+          tags: ghcr.io/${{ needs.release-values.outputs.ghcr_namespace }}/moodride-notification-service:${{ needs.release-values.outputs.image_tag }}
 
       - name: Build and push frontend
-        if: steps.release.outputs.should_build == 'true'
+        id: build-frontend
+        if: steps.preflight.outputs.should_build == 'true'
         uses: docker/build-push-action@v6
         with:
           context: frontend/moodride-web
@@ -157,12 +871,199 @@ jobs:
           push: true
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
-            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.revision=${{ needs.release-values.outputs.source_sha }}
           build-args: |
-            NEXT_PUBLIC_API_BASE_URL=${{ steps.release.outputs.api_base_url }}
-            NEXT_PUBLIC_WS_BASE_URL=${{ steps.release.outputs.ws_base_url }}
+            NEXT_PUBLIC_API_BASE_URL=${{ needs.release-values.outputs.api_base_url }}
+            NEXT_PUBLIC_WS_BASE_URL=${{ needs.release-values.outputs.ws_base_url }}
             NEXT_PUBLIC_MAPBOX_ACCESS_TOKEN=${{ secrets.NEXT_PUBLIC_MAPBOX_ACCESS_TOKEN }}
-          tags: ghcr.io/${{ steps.release.outputs.ghcr_namespace }}/moodride-frontend:${{ steps.release.outputs.image_tag }}
+          tags: ghcr.io/${{ needs.release-values.outputs.ghcr_namespace }}/moodride-frontend:${{ needs.release-values.outputs.image_tag }}
+
+      - name: Emit four-image release lock
+        shell: bash
+        env:
+          NAMESPACE: ${{ needs.release-values.outputs.ghcr_namespace }}
+          IMAGE_TAG: ${{ needs.release-values.outputs.image_tag }}
+          SOURCE_SHA: ${{ needs.release-values.outputs.source_sha }}
+          SHOULD_BUILD: ${{ steps.preflight.outputs.should_build }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          EXISTING_ROUTE_API_DIGEST: ${{ steps.preflight.outputs.route_api_digest }}
+          EXISTING_ROUTE_WORKER_DIGEST: ${{ steps.preflight.outputs.route_worker_digest }}
+          EXISTING_NOTIFICATION_DIGEST: ${{ steps.preflight.outputs.notification_service_digest }}
+          EXISTING_FRONTEND_DIGEST: ${{ steps.preflight.outputs.frontend_digest }}
+          BUILT_ROUTE_API_DIGEST: ${{ steps.build-route-api.outputs.digest }}
+          BUILT_ROUTE_WORKER_DIGEST: ${{ steps.build-route-worker.outputs.digest }}
+          BUILT_NOTIFICATION_DIGEST: ${{ steps.build-notification-service.outputs.digest }}
+          BUILT_FRONTEND_DIGEST: ${{ steps.build-frontend.outputs.digest }}
+        run: |
+          set -euo pipefail
+          if [ "$SHOULD_BUILD" = "true" ]; then
+            route_api_digest="$BUILT_ROUTE_API_DIGEST"
+            route_worker_digest="$BUILT_ROUTE_WORKER_DIGEST"
+            notification_digest="$BUILT_NOTIFICATION_DIGEST"
+            frontend_digest="$BUILT_FRONTEND_DIGEST"
+          else
+            route_api_digest="$EXISTING_ROUTE_API_DIGEST"
+            route_worker_digest="$EXISTING_ROUTE_WORKER_DIGEST"
+            notification_digest="$EXISTING_NOTIFICATION_DIGEST"
+            frontend_digest="$EXISTING_FRONTEND_DIGEST"
+          fi
+          for entry in \
+            "moodride-route-api|$route_api_digest" \
+            "moodride-route-worker|$route_worker_digest" \
+            "moodride-notification-service|$notification_digest" \
+            "moodride-frontend|$frontend_digest"; do
+            IFS='|' read -r repository expected_digest <<< "$entry"
+            printf '%s' "$expected_digest" | grep -Eq '^sha256:[0-9a-f]{64}$' || {
+              echo "Release image did not resolve to an exact sha256 digest." >&2
+              exit 1
+            }
+            tag_ref="ghcr.io/${NAMESPACE}/${repository}:${IMAGE_TAG}"
+            index_digest="$(docker buildx imagetools inspect "$tag_ref" \
+              | sed -n 's/^Digest:[[:space:]]*//p')"
+            [ "$index_digest" = "$expected_digest" ] || {
+              echo "Published image-index digest for $tag_ref diverges from the accepted build/preflight digest." >&2
+              exit 1
+            }
+            docker pull "$tag_ref" >/dev/null
+            [ "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$tag_ref")" = "$SOURCE_SHA" ] || {
+              echo "Published image $tag_ref has a divergent OCI revision." >&2
+              exit 1
+            }
+            [ "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.source" }}' "$tag_ref")" = \
+              "https://github.com/${GITHUB_REPOSITORY}" ] || {
+              echo "Published image $tag_ref has a divergent OCI source." >&2
+              exit 1
+            }
+          done
+          mkdir -p release-lock
+          jq -n \
+            --arg namespace "$NAMESPACE" --arg source_sha "$SOURCE_SHA" --arg image_tag "$IMAGE_TAG" \
+            --arg source_url "https://github.com/${GITHUB_REPOSITORY}" \
+            --arg api_tag "ghcr.io/${NAMESPACE}/moodride-route-api:${IMAGE_TAG}" \
+            --arg api_ref "ghcr.io/${NAMESPACE}/moodride-route-api@${route_api_digest}" \
+            --arg worker_tag "ghcr.io/${NAMESPACE}/moodride-route-worker:${IMAGE_TAG}" \
+            --arg worker_ref "ghcr.io/${NAMESPACE}/moodride-route-worker@${route_worker_digest}" \
+            --arg notification_tag "ghcr.io/${NAMESPACE}/moodride-notification-service:${IMAGE_TAG}" \
+            --arg notification_ref "ghcr.io/${NAMESPACE}/moodride-notification-service@${notification_digest}" \
+            --arg frontend_tag "ghcr.io/${NAMESPACE}/moodride-frontend:${IMAGE_TAG}" \
+            --arg frontend_ref "ghcr.io/${NAMESPACE}/moodride-frontend@${frontend_digest}" \
+            '{schema_version: 2, ghcr_namespace: $namespace, source_sha: $source_sha, source_url: $source_url, image_tag: $image_tag, images: {
+              route_api: {tag: $api_tag, ref: $api_ref, index_digest: ($api_ref | split("@")[1]), revision: $source_sha},
+              route_worker: {tag: $worker_tag, ref: $worker_ref, index_digest: ($worker_ref | split("@")[1]), revision: $source_sha},
+              notification_service: {tag: $notification_tag, ref: $notification_ref, index_digest: ($notification_ref | split("@")[1]), revision: $source_sha},
+              frontend: {tag: $frontend_tag, ref: $frontend_ref, index_digest: ($frontend_ref | split("@")[1]), revision: $source_sha}
+            }}' > release-lock/release-lock.json
+          sha256sum release-lock/release-lock.json > release-lock/release-lock.json.sha256
+
+      - name: Upload immutable release lock
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-lock-${{ needs.release-values.outputs.image_tag }}
+          path: release-lock/
+          if-no-files-found: error
+          retention-days: 90
+
+  deploy:
+    name: Deploy Immutable Images
+    needs:
+      - release-values
+      - verify
+      - publish
+    if: >-
+      always() &&
+      needs.release-values.outputs.should_deploy == 'true' &&
+      needs.verify.result == 'success' &&
+      (needs.publish.result == 'success' || needs.publish.result == 'skipped')
+    runs-on: ubuntu-latest
+    environment: production
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: false
+    steps:
+      - name: Checkout exact locked source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release-values.outputs.source_sha }}
+          persist-credentials: false
+
+      - name: Verify exact locked checkout
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ needs.release-values.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          [ "$(git rev-parse HEAD)" = "$SOURCE_SHA" ] || {
+            echo "Deploy checkout does not equal the accepted release-lock source SHA." >&2
+            exit 1
+          }
+          frozen_scenarios="scripts/monitoring/route-quality-release-scenarios.json"
+          frozen_sha="$(sha256sum "$frozen_scenarios")"
+          frozen_sha="${frozen_sha%% *}"
+          [ "$frozen_sha" = "2fc22496f3ee42bfcc298fd06a3aa1e3a126822fe0b51513b0034342b0d27c00" ] || {
+            echo "Exact locked checkout does not contain the frozen 27-scenario acceptance manifest." >&2
+            exit 1
+          }
+
+      - name: Stage checksum-pinned deployment evidence and control bundle
+        id: bundle
+        shell: bash
+        env:
+          RELEASE_LOCK: ${{ inputs.release_lock }}
+          RELEASE_LOCK_SHA256: ${{ inputs.release_lock_sha256 }}
+          QUALITY_ACCEPTANCE_B64: ${{ inputs.quality_acceptance_b64 }}
+          QUALITY_ACCEPTANCE_SHA256: ${{ inputs.quality_acceptance_sha256 }}
+          SOURCE_SHA: ${{ needs.release-values.outputs.source_sha }}
+          IMAGE_TAG: ${{ needs.release-values.outputs.image_tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p deploy-evidence release-bundle/.staging/scripts/deploy
+          printf '%s' "$RELEASE_LOCK" > deploy-evidence/accepted-release-lock.json
+          printf '%s' "$QUALITY_ACCEPTANCE_B64" | base64 --decode > deploy-evidence/quality-acceptance.json
+          printf '%s\n' "$RELEASE_LOCK_SHA256  accepted-release-lock.json" > deploy-evidence/accepted-release-lock.json.sha256
+          printf '%s\n' "$QUALITY_ACCEPTANCE_SHA256  quality-acceptance.json" > deploy-evidence/quality-acceptance.json.sha256
+          printf '%s\n' "$SOURCE_SHA" > deploy-evidence/source-sha
+          printf '%s\n' "$IMAGE_TAG" > deploy-evidence/image-tag
+          cp scripts/monitoring/route-quality-release-scenarios.json \
+            deploy-evidence/route-quality-release-scenarios.json
+          printf '%s\n' \
+            "2fc22496f3ee42bfcc298fd06a3aa1e3a126822fe0b51513b0034342b0d27c00  route-quality-release-scenarios.json" \
+            > deploy-evidence/route-quality-release-scenarios.json.sha256
+          (cd deploy-evidence && sha256sum --check \
+            accepted-release-lock.json.sha256 \
+            quality-acceptance.json.sha256 \
+            route-quality-release-scenarios.json.sha256)
+
+          cp docker-compose.prod.yml Caddyfile release-bundle/.staging/
+          cp scripts/deploy/deploy_prod.sh scripts/deploy/rollback_prod.sh \
+            scripts/deploy/database_recovery.sh \
+            scripts/deploy/rollback_v41_v40_v39_to_v38.sql \
+            scripts/deploy/deploy_scenic_release.sh \
+            scripts/deploy/capture_prod_runtime.py \
+            release-bundle/.staging/scripts/deploy/
+          cp deploy-evidence/accepted-release-lock.json \
+            release-bundle/.staging/accepted-release-lock.json
+          cp deploy-evidence/quality-acceptance.json \
+            release-bundle/.staging/quality-acceptance.json
+          (
+            cd release-bundle/.staging
+            LC_ALL=C sha256sum docker-compose.prod.yml Caddyfile \
+              accepted-release-lock.json quality-acceptance.json scripts/deploy/* \
+              > bundle.sha256
+            sha256sum --check bundle.sha256
+          )
+          bundle_manifest_sha="$(sha256sum release-bundle/.staging/bundle.sha256)"
+          bundle_manifest_sha="${bundle_manifest_sha%% *}"
+          bundle_id="${IMAGE_TAG}-${QUALITY_ACCEPTANCE_SHA256}-${bundle_manifest_sha}"
+          if [ "${#bundle_id}" -gt 255 ]; then
+            echo "Checksum-versioned control-bundle basename exceeds 255 bytes." >&2
+            exit 1
+          fi
+          mv release-bundle/.staging "release-bundle/${bundle_id}"
+          printf '%s\n' "$bundle_manifest_sha" > deploy-evidence/control-bundle-manifest.sha256
+          {
+            echo "bundle_id=$bundle_id"
+            echo "bundle_manifest_sha256=$bundle_manifest_sha"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Configure SSH key
         shell: bash
@@ -176,7 +1077,7 @@ jobs:
       - name: Ensure server directories
         shell: bash
         run: |
-          ssh "${{ secrets.PROD_SSH_USER }}@${{ secrets.PROD_SSH_HOST }}" "mkdir -p /opt/moodride/scripts/deploy /opt/moodride/data/osrm"
+          ssh "${{ secrets.PROD_SSH_USER }}@${{ secrets.PROD_SSH_HOST }}" "mkdir -p /opt/moodride/data/osrm /opt/moodride/.deploy/bundles"
 
       - name: Log in to GHCR on server
         env:
@@ -184,13 +1085,41 @@ jobs:
           GHCR_TOKEN: ${{ secrets.GHCR_PAT != '' && secrets.GHCR_PAT || secrets.GITHUB_TOKEN }}
         shell: bash
         run: |
-          printf '%s' "$GHCR_TOKEN" | ssh "${{ secrets.PROD_SSH_USER }}@${{ secrets.PROD_SSH_HOST }}" "docker login ghcr.io -u '$GHCR_USER' --password-stdin"
+          printf '%s' "$GHCR_TOKEN" | ssh "${{ secrets.PROD_SSH_USER }}@${{ secrets.PROD_SSH_HOST }}" docker login ghcr.io -u "$GHCR_USER" --password-stdin
 
-      - name: Upload deployment files
+      - name: Upload immutable checksum-versioned control bundle
         shell: bash
+        env:
+          BUNDLE_ID: ${{ steps.bundle.outputs.bundle_id }}
+          BUNDLE_MANIFEST_SHA256: ${{ steps.bundle.outputs.bundle_manifest_sha256 }}
         run: |
-          scp docker-compose.prod.yml docker-compose.admin.yml Caddyfile "${{ secrets.PROD_SSH_USER }}@${{ secrets.PROD_SSH_HOST }}:/opt/moodride/"
-          scp scripts/deploy/deploy_prod.sh scripts/deploy/rollback_prod.sh scripts/deploy/deploy_data_release.sh scripts/deploy/manage_admin_tools.sh "${{ secrets.PROD_SSH_USER }}@${{ secrets.PROD_SSH_HOST }}:/opt/moodride/scripts/deploy/"
+          set -euo pipefail
+          remote_stage="/opt/moodride/.deploy/bundles/.incoming-${{ github.run_id }}-${{ github.run_attempt }}"
+          ssh "${{ secrets.PROD_SSH_USER }}@${{ secrets.PROD_SSH_HOST }}" "\
+            set -euo pipefail; \
+            stage='${remote_stage}'; \
+            if [ -e \"\$stage\" ] || [ -L \"\$stage\" ]; then \
+              echo 'Refusing non-fresh remote control-bundle staging path.' >&2; \
+              exit 1; \
+            fi; \
+            umask 077; \
+            mkdir \"\$stage\""
+          scp -r "release-bundle/${BUNDLE_ID}/." \
+            "${{ secrets.PROD_SSH_USER }}@${{ secrets.PROD_SSH_HOST }}:${remote_stage}/"
+          ssh "${{ secrets.PROD_SSH_USER }}@${{ secrets.PROD_SSH_HOST }}" "\
+            set -euo pipefail; \
+            stage='${remote_stage}'; \
+            final='/opt/moodride/.deploy/bundles/${BUNDLE_ID}'; \
+            cd \"\$stage\"; \
+            sha256sum --check bundle.sha256; \
+            [ \"\$(sha256sum bundle.sha256 | cut -d' ' -f1)\" = '${BUNDLE_MANIFEST_SHA256}' ]; \
+            chmod +x scripts/deploy/*.sh; \
+            if [ -d \"\$final\" ]; then \
+              [ \"\$(sha256sum \"\$final/bundle.sha256\" | cut -d' ' -f1)\" = '${BUNDLE_MANIFEST_SHA256}' ]; \
+              cd \"\$final\"; sha256sum --check bundle.sha256; rm -rf \"\$stage\"; \
+            else \
+              mv \"\$stage\" \"\$final\"; \
+            fi"
 
       - name: Upload .env.prod when secret is configured
         env:
@@ -203,11 +1132,240 @@ jobs:
           rm -f /tmp/moodride.env.prod
           ssh "${{ secrets.PROD_SSH_USER }}@${{ secrets.PROD_SSH_HOST }}" "if [ ! -f /opt/moodride/.env.prod ]; then install -m 600 /tmp/moodride.env.prod /opt/moodride/.env.prod; fi; rm -f /tmp/moodride.env.prod"
 
-      - name: Run remote deploy
+      - name: Run remote digest-pinned deploy
+        shell: bash
+        env:
+          BUNDLE_ID: ${{ steps.bundle.outputs.bundle_id }}
+        run: |
+          ssh "${{ secrets.PROD_SSH_USER }}@${{ secrets.PROD_SSH_HOST }}" "\
+            set -euo pipefail; \
+            bundle='/opt/moodride/.deploy/bundles/${BUNDLE_ID}'; \
+            DEPLOYMENT_ATTEMPT_ID='${{ github.run_id }}-${{ github.run_attempt }}' \
+            EXPECTED_GITHUB_SOURCE_URL='https://github.com/${{ github.repository }}' \
+            CONTROL_BUNDLE=\"\$bundle\" \
+            \"\$bundle/scripts/deploy/deploy_prod.sh\" \
+              --release-lock \"\$bundle/accepted-release-lock.json\" \
+              --release-lock-sha256 '${{ inputs.release_lock_sha256 }}' \
+              --quality-acceptance \"\$bundle/quality-acceptance.json\" \
+              --quality-acceptance-sha256 '${{ inputs.quality_acceptance_sha256 }}'"
+
+      - name: Collect remote live-identity comparison
+        if: always()
+        shell: bash
+        env:
+          DEPLOYMENT_ATTEMPT_ID: ${{ github.run_id }}-${{ github.run_attempt }}
+          CANDIDATE_IMAGE_TAG: ${{ needs.release-values.outputs.image_tag }}
+          CANDIDATE_SOURCE_SHA: ${{ needs.release-values.outputs.source_sha }}
+          CANDIDATE_RELEASE_LOCK_SHA256: ${{ inputs.release_lock_sha256 }}
+          QUALITY_ACCEPTANCE_SHA256: ${{ inputs.quality_acceptance_sha256 }}
+        run: |
+          set -uo pipefail
+          status=0
+          remote="${{ secrets.PROD_SSH_USER }}@${{ secrets.PROD_SSH_HOST }}:/opt/moodride/.deploy"
+          quality_file="deploy-evidence/quality-acceptance.json"
+          mkdir -p deploy-evidence
+
+          fetch_evidence() {
+            local remote_name="$1"
+            local local_name="$2"
+            if ! scp "${remote}/${remote_name}" "deploy-evidence/${local_name}"; then
+              echo "::error::Current deployment evidence is missing: ${remote_name}"
+              status=1
+            fi
+          }
+
+          for identity in control candidate; do
+            fetch_evidence \
+              "last-quality-comparison-${identity}.json" \
+              "live-quality-comparison-${identity}.json"
+            fetch_evidence \
+              "last-osrm-files-${identity}.sha256" \
+              "live-osrm-files-${identity}.sha256"
+            fetch_evidence \
+              "last-osrm-files-${identity}.metadata.json" \
+              "live-osrm-files-${identity}.metadata.json"
+          done
+
+          if [ ! -f "$quality_file" ]; then
+            echo "::error::Staged quality acceptance is unavailable for runtime-evidence validation."
+            status=1
+          else
+            for identity in control candidate; do
+              comparison_file="deploy-evidence/live-quality-comparison-${identity}.json"
+              manifest_file="deploy-evidence/live-osrm-files-${identity}.sha256"
+              metadata_file="deploy-evidence/live-osrm-files-${identity}.metadata.json"
+              if [ ! -f "$comparison_file" ] || [ ! -f "$manifest_file" ] || [ ! -f "$metadata_file" ]; then
+                continue
+              fi
+
+              if ! expected_artifact_sha="$(
+                jq -er --arg identity "$identity" \
+                  '.artifacts[$identity].sha256' "$quality_file"
+              )" || ! expected_artifact_source="$(
+                jq -er --arg identity "$identity" \
+                  '.artifacts[$identity].source_sha' "$quality_file"
+              )" || ! expected_osrm_manifest="$(
+                jq -er --arg identity "$identity" \
+                  '.artifacts[$identity].runtime_identity.osrm.file_manifest_sha256' "$quality_file"
+              )" || ! expected_algorithm="$(
+                jq -er --arg identity "$identity" \
+                  '.artifacts[$identity].runtime_identity.runtime_algorithm_mode.algorithm' "$quality_file"
+              )" || ! expected_mode="$(
+                jq -er --arg identity "$identity" \
+                  '.artifacts[$identity].runtime_identity.runtime_algorithm_mode.mode' "$quality_file"
+              )"; then
+                echo "::error::Quality acceptance cannot resolve ${identity} runtime-evidence identity."
+                status=1
+                continue
+              fi
+
+              case "$identity" in
+                control)
+                  expected_phase="control-pre-drain"
+                  expected_source="$expected_artifact_source"
+                  expected_image_tag="sha-${expected_source}"
+                  if ! expected_release_lock="$(
+                    jq -er '.artifacts.control.release_lock_sha256' "$quality_file"
+                  )"; then
+                    echo "::error::Quality acceptance cannot resolve control release-lock identity."
+                    status=1
+                    continue
+                  fi
+                  ;;
+                candidate)
+                  expected_phase="candidate-pre-ingress"
+                  expected_source="$CANDIDATE_SOURCE_SHA"
+                  expected_image_tag="$CANDIDATE_IMAGE_TAG"
+                  expected_release_lock="$CANDIDATE_RELEASE_LOCK_SHA256"
+                  ;;
+              esac
+
+              manifest_sha="$(sha256sum "$manifest_file")"
+              manifest_sha="${manifest_sha%% *}"
+              if [ "$manifest_sha" != "$expected_osrm_manifest" ]; then
+                echo "::error::${identity} OSRM manifest does not match its accepted runtime identity."
+                status=1
+              fi
+
+              if ! jq -e \
+                --arg attempt "$DEPLOYMENT_ATTEMPT_ID" \
+                --arg phase "$expected_phase" \
+                --arg image_tag "$expected_image_tag" \
+                --arg source_sha "$expected_source" \
+                --arg lock_sha "$expected_release_lock" \
+                --arg quality_sha "$QUALITY_ACCEPTANCE_SHA256" \
+                --arg artifact_sha "$expected_artifact_sha" \
+                --arg artifact_source "$expected_artifact_source" \
+                --arg identity "$identity" \
+                --arg expected_algorithm "$expected_algorithm" \
+                --arg expected_mode "$expected_mode" \
+                --arg osrm_sha "$manifest_sha" '
+                  .schema_version == 1
+                  and .attempt_id == $attempt
+                  and .phase == $phase
+                  and .image_tag == $image_tag
+                  and .source_sha == $source_sha
+                  and .release_lock_sha256 == $lock_sha
+                  and .quality_acceptance_sha256 == $quality_sha
+                  and .artifact_sha256 == $artifact_sha
+                  and .artifact_source_sha == $artifact_source
+                  and .runtime_identity == $identity
+                  and .executed_route_identity.algorithm.expected == $expected_algorithm
+                  and .executed_route_identity.algorithm.actual == $expected_algorithm
+                  and .executed_route_identity.mode.expected == $expected_mode
+                  and .executed_route_identity.mode.actual == $expected_mode
+                  and .executed_route_identity.job.algorithm_version == $expected_algorithm
+                  and .executed_route_identity.job.route_mode == $expected_mode
+                  and .executed_route_identity.primary.route_mode == $expected_mode
+                  and .osrm_file_manifest_sha256 == $osrm_sha
+                  and .osrm.file_manifest_sha256.expected == $osrm_sha
+                  and .osrm.file_manifest_sha256.actual == $osrm_sha
+                ' "$comparison_file" >/dev/null; then
+                echo "::error::${identity} runtime comparison is stale or not bound to this deployment attempt."
+                status=1
+              fi
+
+              if ! jq -e \
+                --arg attempt "$DEPLOYMENT_ATTEMPT_ID" \
+                --arg phase "$expected_phase" \
+                --arg image_tag "$expected_image_tag" \
+                --arg source_sha "$expected_source" \
+                --arg lock_sha "$expected_release_lock" \
+                --arg quality_sha "$QUALITY_ACCEPTANCE_SHA256" \
+                --arg artifact_sha "$expected_artifact_sha" \
+                --arg artifact_source "$expected_artifact_source" \
+                --arg osrm_sha "$manifest_sha" '
+                  .schema_version == 1
+                  and .evidence_type == "osrm-file-manifest"
+                  and .attempt_id == $attempt
+                  and .phase == $phase
+                  and .image_tag == $image_tag
+                  and .source_sha == $source_sha
+                  and .release_lock_sha256 == $lock_sha
+                  and .quality_acceptance_sha256 == $quality_sha
+                  and .artifact_sha256 == $artifact_sha
+                  and .artifact_source_sha == $artifact_source
+                  and .osrm_file_manifest_sha256 == $osrm_sha
+                ' "$metadata_file" >/dev/null; then
+                echo "::error::${identity} OSRM metadata is stale or not bound to its fetched manifest."
+                status=1
+              fi
+            done
+          fi
+
+          exit "$status"
+
+      - name: Archive accepted deployment evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: deploy-evidence-${{ needs.release-values.outputs.image_tag }}-${{ github.run_id }}
+          path: deploy-evidence/
+          if-no-files-found: error
+          retention-days: 90
+
+  rollback-current:
+    name: Roll Back Current Production Release
+    needs:
+      - release-values
+      - verify
+    if: >-
+      always() &&
+      needs.release-values.outputs.should_rollback == 'true' &&
+      needs.verify.result == 'success'
+    runs-on: ubuntu-latest
+    environment: production
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: false
+    steps:
+      - name: Configure SSH key
+        shell: bash
+        run: |
+          set -euo pipefail
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "${{ secrets.PROD_SSH_PRIVATE_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H "${{ secrets.PROD_SSH_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Run fenced rollback from captured predeploy snapshot
         shell: bash
         run: |
           ssh "${{ secrets.PROD_SSH_USER }}@${{ secrets.PROD_SSH_HOST }}" "\
-            chmod +x /opt/moodride/scripts/deploy/*.sh && \
-            /opt/moodride/scripts/deploy/deploy_prod.sh \
-              --tag '${{ steps.release.outputs.image_tag }}' \
-              --namespace '${{ steps.release.outputs.ghcr_namespace }}'"
+            set -euo pipefail; \
+            current_link='/opt/moodride/.deploy/current'; \
+            [ -L \"\$current_link\" ]; \
+            bundle=\"\$(readlink -f \"\$current_link\")\"; \
+            case \"\$bundle\" in \
+              /opt/moodride/.deploy/bundles/*) ;; \
+              *) echo 'Current control bundle resolves outside the immutable bundle root.' >&2; exit 1 ;; \
+            esac; \
+            cd \"\$bundle\"; \
+            sha256sum --check bundle.sha256; \
+            manifest_sha=\"\$(sha256sum bundle.sha256 | cut -d' ' -f1)\"; \
+            expected_manifest=\"\${bundle##*-}\"; \
+            [ \"\$manifest_sha\" = \"\$expected_manifest\" ]; \
+            EXPECTED_GITHUB_SOURCE_URL='https://github.com/${{ github.repository }}' \
+            \"\$bundle/scripts/deploy/rollback_prod.sh\" \
+              --expected-current-tag '${{ needs.release-values.outputs.image_tag }}' \
+              --expected-current-release-lock-sha256 '${{ inputs.release_lock_sha256 }}'"

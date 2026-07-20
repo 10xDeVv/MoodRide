@@ -1,5 +1,6 @@
 package com.moodride.routeworker.config;
 
+import com.moodride.datamodels.ScenicScoreTile;
 import com.moodride.routeworker.cache.CacheNames;
 import com.moodride.routeworker.cache.CachePolicy;
 import org.springframework.cache.CacheManager;
@@ -9,6 +10,7 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.data.redis.cache.RedisCacheConfiguration;
 import org.springframework.data.redis.cache.RedisCacheManager;
 import org.springframework.data.redis.connection.RedisConnectionFactory;
+import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.data.redis.serializer.JdkSerializationRedisSerializer;
 import org.springframework.data.redis.serializer.RedisSerializationContext;
 import org.springframework.data.redis.serializer.StringRedisSerializer;
@@ -26,16 +28,43 @@ import java.util.Map;
 public class CacheConfig {
 
     @Bean
-    public CacheManager cacheManager(RedisConnectionFactory connectionFactory) {
+    public StringRedisSerializer cacheKeySerializer() {
+        return new StringRedisSerializer();
+    }
+
+    @Bean
+    public JdkSerializationRedisSerializer cacheValueSerializer() {
+        return new JdkSerializationRedisSerializer();
+    }
+
+    @Bean
+    public RedisTemplate<String, ScenicScoreTile> scenicTileRedisTemplate(
+        RedisConnectionFactory connectionFactory,
+        StringRedisSerializer cacheKeySerializer,
+        JdkSerializationRedisSerializer cacheValueSerializer
+    ) {
+        RedisTemplate<String, ScenicScoreTile> redisTemplate = new RedisTemplate<>();
+        redisTemplate.setConnectionFactory(connectionFactory);
+        redisTemplate.setKeySerializer(cacheKeySerializer);
+        redisTemplate.setValueSerializer(cacheValueSerializer);
+        redisTemplate.afterPropertiesSet();
+        return redisTemplate;
+    }
+
+    @Bean
+    public CacheManager cacheManager(
+        RedisConnectionFactory connectionFactory,
+        StringRedisSerializer cacheKeySerializer,
+        JdkSerializationRedisSerializer cacheValueSerializer
+    ) {
         // Default cache configuration
         RedisCacheConfiguration defaultConfig = RedisCacheConfiguration.defaultCacheConfig()
             .entryTtl(Duration.ofHours(1))
             .serializeKeysWith(
-                RedisSerializationContext.SerializationPair.fromSerializer(new StringRedisSerializer())
+                RedisSerializationContext.SerializationPair.fromSerializer(cacheKeySerializer)
             )
             .serializeValuesWith(
-                RedisSerializationContext.SerializationPair.fromSerializer(
-                    new JdkSerializationRedisSerializer())
+                RedisSerializationContext.SerializationPair.fromSerializer(cacheValueSerializer)
             )
             .disableCachingNullValues();
 

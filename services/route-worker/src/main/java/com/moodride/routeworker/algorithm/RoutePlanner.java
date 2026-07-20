@@ -66,7 +66,6 @@ public class RoutePlanner {
     private static final int TARGET_ANCHOR_LIMIT = 14;
     private static final int TARGET_ANCHOR_PAIR_LIMIT = 24;
     private static final double TARGET_ANCHOR_MIN_SEPARATION_KM = 2.0;
-    private static final String HYBRID_OSRM_V2 = "hybrid_osrm_v2";
     private static final double V2_LANDSCAPE_WEIGHT = 0.38;
     private static final double V2_VIBE_FIT_WEIGHT = 0.24;
     private static final double V2_DRIVE_QUALITY_WEIGHT = 0.14;
@@ -146,7 +145,19 @@ public class RoutePlanner {
         return generateRouteOptions(job).getFirst();
     }
 
+    private void validateConfiguredRouteMode(RouteJob job) {
+        String requestedMode = job.getRouteMode().apiValue();
+        String configuredMode = config.getMode();
+        if (!requestedMode.equals(configuredMode)) {
+            throw new IllegalArgumentException(
+                "Route job mode '" + requestedMode
+                    + "' does not match configured worker mode '" + configuredMode + "'"
+            );
+        }
+    }
+
     public List<RouteCandidate> generateRouteOptions(RouteJob job) {
+        validateConfiguredRouteMode(job);
         long generationStartedNanos = System.nanoTime();
         RoadNode start = new RoadNode(job.getStartLatitude(), job.getStartLongitude());
         List<String> requestVibes = resolveJobVibes(job);
@@ -452,7 +463,7 @@ public class RoutePlanner {
             routeScore.finalScore(),
             trip.totalDistanceKm(),
             trip.durationMinutes(),
-            HYBRID_OSRM_V2,
+            config.getProfile(),
             null,
             scoreBreakdown
         );

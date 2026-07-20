@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, type MutableRefObject } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type MutableRefObject } from "react";
 import mapboxgl, { type GeoJSONSource, type Map as MapboxMap, type MapLayerMouseEvent } from "mapbox-gl";
 import "mapbox-gl/dist/mapbox-gl.css";
 import { Minus, Plus } from "lucide-react";
@@ -14,6 +14,7 @@ interface RouteMapProps {
   centerLng?: number;
   theme?: "day" | "night";
   onRouteSelect?: (routeId: string) => void;
+  onRouteMapPainted?: (jobId: string, routeId: string, optionRevision: number) => boolean;
 }
 
 const MAPBOX_TOKEN = process.env.NEXT_PUBLIC_MAPBOX_ACCESS_TOKEN;
@@ -27,6 +28,9 @@ const MAPBOX_STYLES = {
   day: "mapbox://styles/mapbox/outdoors-v12",
   night: "mapbox://styles/mapbox/dark-v11"
 } as const;
+
+const MAPBOX_INITIAL_LOAD_TIMEOUT_MS = 10_000;
+const MAPBOX_STYLE_LOAD_TIMEOUT_MS = 10_000;
 
 const PROFILE_COLORS: Record<string, string> = {
   most_scenic: ROUTE_BLUE,
@@ -48,6 +52,61 @@ type RouteWaypointProperties = {
   label: string;
   order: number;
 };
+type RoutePaintTarget = {
+  jobId: string;
+  routeId: string;
+  optionRevision: number;
+  key: string;
+};
+
+type PendingMapPaint = {
+  map: MapboxMap;
+  listener: () => void;
+};
+
+type LatestSourceUpdate = {
+  map: MapboxMap;
+  styleEpoch: number;
+  updateToken: number;
+  target: RoutePaintTarget;
+};
+
+type MapboxRuntimeStatus = "unavailable" | "loading" | "ready" | "failed";
+
+type MapboxRuntimeError = {
+  error?: { message?: string };
+  source?: unknown;
+  sourceId?: string;
+  tile?: unknown;
+};
+
+function isFatalMapboxRuntimeError(event: MapboxRuntimeError): boolean {
+  if (event.source || event.sourceId || event.tile) return false;
+  const message = event.error?.message?.toLowerCase() ?? "";
+  return message.includes("webgl")
+    || message.includes("web gl")
+    || message.includes("context lost")
+    || message.includes("failed to initialize")
+    || message.includes("failed to load style")
+    || message.includes("unable to load style")
+    || message.includes("style failed")
+    || message.includes("style could not")
+    || message.includes("/styles/v1/")
+    || message.includes("access token")
+    || message.includes("unauthorized");
+}
+
+function getRoutePaintTarget(route: RouteDetailResponse): RoutePaintTarget | null {
+  if (!Number.isSafeInteger(route.optionRevision) || route.optionRevision < 0) return null;
+  if ((route.geometry?.geometry?.coordinates?.length ?? 0) < 2) return null;
+  return {
+    jobId: route.jobId,
+    routeId: route.routeId,
+    optionRevision: route.optionRevision,
+    key: `${route.jobId}:${route.routeId}:${route.optionRevision}`
+  };
+}
+
 
 function TopoBackground({ theme }: { theme: "day" | "night" }) {
   const topoStroke = theme === "night" ? "#e8f04a" : "#1a3020";
@@ -399,90 +458,344 @@ function renderAllRoutes(map: MapboxMap, route: RouteDetailResponse, selectedRou
   }
 }
 
-export function RouteMap({ route, selectedRouteId, centerLat = 49.28, centerLng = -123.12, theme = "day", onRouteSelect }: RouteMapProps) {
+export function RouteMap({
+  route,
+  selectedRouteId,
+  centerLat = 49.28,
+  centerLng = -123.12,
+  theme = "day",
+  onRouteSelect,
+  onRouteMapPainted
+}: RouteMapProps) {
+  const hasToken = Boolean(MAPBOX_TOKEN);
+  const [mapboxRuntimeStatus, setMapboxRuntimeStatus] = useState<MapboxRuntimeStatus>(
+    hasToken ? "loading" : "unavailable"
+  );
   const mapContainerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<MapboxMap | null>(null);
+  const initialLoadCompleteMapRef = useRef<MapboxMap | null>(null);
+  const failMapboxRef = useRef<((map: MapboxMap) => void) | null>(null);
   const onRouteSelectRef = useRef(onRouteSelect);
+  const onRouteMapPaintedRef = useRef(onRouteMapPainted);
   const routeRef = useRef(route);
   const selectedRouteIdRef = useRef(selectedRouteId);
   const themeRef = useRef(theme);
+  const mapThemeRef = useRef<"day" | "night" | null>(null);
+  const styleEpochRef = useRef(0);
+  const styleReadyEpochRef = useRef(0);
+  const sourceUpdateTokenRef = useRef(0);
+  const lastSourceRenderKeyRef = useRef<string | null>(null);
+  const latestSourceUpdateRef = useRef<LatestSourceUpdate | null>(null);
+  const pendingMapPaintRef = useRef<PendingMapPaint | null>(null);
+  const schematicPaintTokenRef = useRef(0);
+  const paintedRouteRevisionsRef = useRef(new Set<string>());
   const lastFitRouteIdRef = useRef<string | null>(null);
-  const hasToken = Boolean(MAPBOX_TOKEN);
+  const useSchematicMap = !hasToken || mapboxRuntimeStatus === "failed";
+  const shouldUseMapbox = hasToken && !useSchematicMap;
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     onRouteSelectRef.current = onRouteSelect;
-  }, [onRouteSelect]);
-
-  useEffect(() => {
+    onRouteMapPaintedRef.current = onRouteMapPainted;
     routeRef.current = route;
     selectedRouteIdRef.current = selectedRouteId;
     themeRef.current = theme;
-  }, [route, selectedRouteId, theme]);
+  }, [onRouteMapPainted, onRouteSelect, route, selectedRouteId, theme]);
+
+  const isCurrentPaintTarget = useCallback((target: RoutePaintTarget) => {
+    const currentRoute = routeRef.current;
+    if (!currentRoute) return false;
+    const currentTarget = getRoutePaintTarget(currentRoute);
+    return currentTarget?.key === target.key;
+  }, []);
+
+  const reportCurrentPaint = useCallback((target: RoutePaintTarget) => {
+    if (!isCurrentPaintTarget(target) || paintedRouteRevisionsRef.current.has(target.key)) return;
+    const callback = onRouteMapPaintedRef.current;
+    if (!callback) return;
+    if (callback(target.jobId, target.routeId, target.optionRevision)) {
+      paintedRouteRevisionsRef.current.add(target.key);
+    }
+  }, [isCurrentPaintTarget]);
+
+  const cancelPendingMapPaint = useCallback(() => {
+    const pending = pendingMapPaintRef.current;
+    if (!pending) return;
+    pending.map.off("idle", pending.listener);
+    pendingMapPaintRef.current = null;
+  }, []);
+
+  const commitCurrentRouteToMap = useCallback((map: MapboxMap, forceFitRoute: boolean) => {
+    if (mapRef.current !== map || styleReadyEpochRef.current !== styleEpochRef.current) return;
+
+    const currentRoute = routeRef.current;
+    if (!currentRoute) return;
+    const target = getRoutePaintTarget(currentRoute);
+    const currentTheme = themeRef.current;
+    const sourceRenderKey = target
+      ? [
+          styleEpochRef.current,
+          target.key,
+          selectedRouteIdRef.current ?? "",
+          currentTheme
+        ].join("|")
+      : null;
+    if (sourceRenderKey && lastSourceRenderKeyRef.current === sourceRenderKey) return;
+
+    cancelPendingMapPaint();
+    const shouldFitRoute = forceFitRoute || lastFitRouteIdRef.current !== currentRoute.routeId;
+    renderAllRoutes(map, currentRoute, selectedRouteIdRef.current, currentTheme, shouldFitRoute);
+    ensureRouteInteractions(map, onRouteSelectRef);
+    if (shouldFitRoute) lastFitRouteIdRef.current = currentRoute.routeId;
+    lastSourceRenderKeyRef.current = sourceRenderKey;
+
+    if (!target) {
+      latestSourceUpdateRef.current = null;
+      return;
+    }
+
+    const styleEpoch = styleEpochRef.current;
+    const updateToken = ++sourceUpdateTokenRef.current;
+    latestSourceUpdateRef.current = { map, styleEpoch, updateToken, target };
+    const handleIdle = () => {
+      if (pendingMapPaintRef.current?.listener !== handleIdle) return;
+      pendingMapPaintRef.current = null;
+
+      const latestUpdate = latestSourceUpdateRef.current;
+      if (
+        mapRef.current !== map
+        || styleEpochRef.current !== styleEpoch
+        || latestUpdate?.map !== map
+        || latestUpdate.styleEpoch !== styleEpoch
+        || latestUpdate.updateToken !== updateToken
+        || latestUpdate.target.key !== target.key
+      ) {
+        return;
+      }
+      reportCurrentPaint(target);
+    };
+
+    pendingMapPaintRef.current = { map, listener: handleIdle };
+    map.once("idle", handleIdle);
+  }, [cancelPendingMapPaint, reportCurrentPaint]);
 
   useEffect(() => {
     const mapboxToken = MAPBOX_TOKEN;
-    if (!mapboxToken || !mapContainerRef.current) return;
-    mapboxgl.accessToken = mapboxToken;
-    const map = new mapboxgl.Map({
-      container: mapContainerRef.current,
-      style: MAPBOX_STYLES[themeRef.current],
-      center: [centerLng, centerLat],
-      zoom: 10,
-      attributionControl: false
-    });
+    const container = mapContainerRef.current;
+    if (!mapboxToken || !container) return;
 
-    mapRef.current = map;
-    map.on("load", () => {
-      const currentRoute = routeRef.current;
-      if (currentRoute) {
-        renderAllRoutes(map, currentRoute, selectedRouteIdRef.current, themeRef.current, true);
-        lastFitRouteIdRef.current = currentRoute.routeId;
-        ensureRouteInteractions(map, onRouteSelectRef);
+    let map: MapboxMap | null = null;
+    let canvas: HTMLCanvasElement | null = null;
+    let initialLoadTimer = 0;
+    let disposed = false;
+    let failed = false;
+    let cleaned = false;
+
+    function clearInitialLoadTimer() {
+      window.clearTimeout(initialLoadTimer);
+      initialLoadTimer = 0;
+    }
+
+    function cleanupMap() {
+      if (cleaned) return;
+      cleaned = true;
+      clearInitialLoadTimer();
+      map?.off("load", handleInitialLoad);
+      map?.off("error", handleMapError);
+      canvas?.removeEventListener("webglcontextlost", handleWebGLContextLost);
+      cancelPendingMapPaint();
+
+      if (mapRef.current === map) {
+        mapRef.current = null;
+        initialLoadCompleteMapRef.current = null;
+        mapThemeRef.current = null;
+        styleEpochRef.current += 1;
+        styleReadyEpochRef.current = 0;
+        sourceUpdateTokenRef.current += 1;
+        lastSourceRenderKeyRef.current = null;
+        latestSourceUpdateRef.current = null;
+        lastFitRouteIdRef.current = null;
       }
+      if (failMapboxRef.current === requestCurrentMapFailure) {
+        failMapboxRef.current = null;
+      }
+
+      if (map) {
+        try {
+          map.remove();
+        } catch {
+          // A failed WebGL context can make Mapbox cleanup throw.
+        }
+      }
+    }
+
+    function failCurrentMap() {
+      if (disposed || failed) return;
+      failed = true;
+      cleanupMap();
+      setMapboxRuntimeStatus("failed");
+    }
+
+    function requestCurrentMapFailure(candidate: MapboxMap) {
+      if (candidate === map) failCurrentMap();
+    }
+
+    function handleMapError(event: MapboxRuntimeError) {
+      if (isFatalMapboxRuntimeError(event)) {
+        failCurrentMap();
+      }
+    }
+
+    function handleWebGLContextLost(event: Event) {
+      event.preventDefault();
+      failCurrentMap();
+    }
+
+    function handleInitialLoad() {
+      if (!map || disposed || failed || mapRef.current !== map) return;
+      try {
+        styleReadyEpochRef.current = styleEpochRef.current;
+        commitCurrentRouteToMap(map, true);
+        initialLoadCompleteMapRef.current = map;
+        clearInitialLoadTimer();
+        setMapboxRuntimeStatus("ready");
+      } catch {
+        failCurrentMap();
+      }
+    }
+
+    setMapboxRuntimeStatus("loading");
+    try {
+      mapboxgl.accessToken = mapboxToken;
+      map = new mapboxgl.Map({
+        container,
+        style: MAPBOX_STYLES[themeRef.current],
+        center: [centerLng, centerLat],
+        zoom: 10,
+        attributionControl: false
+      });
+
+      mapRef.current = map;
+      mapThemeRef.current = themeRef.current;
+      styleEpochRef.current += 1;
+      styleReadyEpochRef.current = 0;
+      lastSourceRenderKeyRef.current = null;
+      latestSourceUpdateRef.current = null;
+      failMapboxRef.current = requestCurrentMapFailure;
+
+      canvas = map.getCanvas();
+      canvas.addEventListener("webglcontextlost", handleWebGLContextLost);
+      map.on("error", handleMapError);
+      map.once("load", handleInitialLoad);
+      initialLoadTimer = window.setTimeout(failCurrentMap, MAPBOX_INITIAL_LOAD_TIMEOUT_MS);
+    } catch {
+      failCurrentMap();
+    }
+
+    return () => {
+      disposed = true;
+      cleanupMap();
+    };
+  }, [cancelPendingMapPaint, centerLat, centerLng, commitCurrentRouteToMap, hasToken]);
+
+  useEffect(() => {
+    if (!shouldUseMapbox || !mapRef.current || mapThemeRef.current === theme) return;
+    const map = mapRef.current;
+    mapThemeRef.current = theme;
+    setMapboxRuntimeStatus("loading");
+    const styleEpoch = ++styleEpochRef.current;
+    lastSourceRenderKeyRef.current = null;
+    latestSourceUpdateRef.current = null;
+    cancelPendingMapPaint();
+
+    let styleLoadTimer = 0;
+    const clearStyleLoadTimer = () => {
+      window.clearTimeout(styleLoadTimer);
+      styleLoadTimer = 0;
+    };
+    const failStyleLoad = () => {
+      if (
+        mapRef.current === map
+        && styleEpochRef.current === styleEpoch
+        && themeRef.current === theme
+      ) {
+        failMapboxRef.current?.(map);
+      }
+    };
+    const handleStyleLoad = () => {
+      if (
+        mapRef.current !== map
+        || styleEpochRef.current !== styleEpoch
+        || themeRef.current !== theme
+      ) {
+        return;
+      }
+
+      clearStyleLoadTimer();
+      try {
+        styleReadyEpochRef.current = styleEpoch;
+        commitCurrentRouteToMap(map, true);
+        if (initialLoadCompleteMapRef.current === map) {
+          setMapboxRuntimeStatus("ready");
+        }
+      } catch {
+        failMapboxRef.current?.(map);
+      }
+    };
+    map.once("style.load", handleStyleLoad);
+    styleLoadTimer = window.setTimeout(failStyleLoad, MAPBOX_STYLE_LOAD_TIMEOUT_MS);
+    try {
+      map.setStyle(MAPBOX_STYLES[theme]);
+    } catch {
+      clearStyleLoadTimer();
+      map.off("style.load", handleStyleLoad);
+      failMapboxRef.current?.(map);
+    }
+
+    return () => {
+      clearStyleLoadTimer();
+      map.off("style.load", handleStyleLoad);
+    };
+  }, [cancelPendingMapPaint, commitCurrentRouteToMap, shouldUseMapbox, theme]);
+
+  useEffect(() => {
+    if (!shouldUseMapbox || !mapRef.current) return;
+    if (!route) {
+      cancelPendingMapPaint();
+      latestSourceUpdateRef.current = null;
+      lastSourceRenderKeyRef.current = null;
+      return;
+    }
+    const map = mapRef.current;
+    try {
+      commitCurrentRouteToMap(map, false);
+    } catch {
+      failMapboxRef.current?.(map);
+    }
+  }, [cancelPendingMapPaint, commitCurrentRouteToMap, route, selectedRouteId, shouldUseMapbox, theme]);
+
+  useEffect(() => {
+    if (!useSchematicMap || !route) return;
+    const target = getRoutePaintTarget(route);
+    if (!target || paintedRouteRevisionsRef.current.has(target.key)) return;
+
+    const paintToken = ++schematicPaintTokenRef.current;
+    let secondFrame = 0;
+    const firstFrame = window.requestAnimationFrame(() => {
+      secondFrame = window.requestAnimationFrame(() => {
+        if (schematicPaintTokenRef.current !== paintToken) return;
+        reportCurrentPaint(target);
+      });
     });
 
     return () => {
-      map.remove();
-      mapRef.current = null;
-      lastFitRouteIdRef.current = null;
+      schematicPaintTokenRef.current += 1;
+      window.cancelAnimationFrame(firstFrame);
+      window.cancelAnimationFrame(secondFrame);
     };
-  }, [centerLat, centerLng, hasToken]);
+  }, [onRouteMapPainted, reportCurrentPaint, route, useSchematicMap]);
 
   useEffect(() => {
-    if (!hasToken || !mapRef.current) return;
-    const map = mapRef.current;
-
-    map.setStyle(MAPBOX_STYLES[theme]);
-    map.once("style.load", () => {
-      const currentRoute = routeRef.current;
-      if (currentRoute) {
-        renderAllRoutes(map, currentRoute, selectedRouteIdRef.current, theme, true);
-        lastFitRouteIdRef.current = currentRoute.routeId;
-        ensureRouteInteractions(map, onRouteSelectRef);
-      }
-    });
-  }, [theme, hasToken]);
-
-  useEffect(() => {
-    if (!hasToken || !mapRef.current || !route) return;
-    const map = mapRef.current;
-    const shouldFitRoute = lastFitRouteIdRef.current !== route.routeId;
-
-    if (map.loaded()) {
-      renderAllRoutes(map, route, selectedRouteId, theme, shouldFitRoute);
-      if (shouldFitRoute) lastFitRouteIdRef.current = route.routeId;
-      ensureRouteInteractions(map, onRouteSelectRef);
-    } else {
-      map.once("load", () => {
-        renderAllRoutes(map, route, selectedRouteId, theme, true);
-        lastFitRouteIdRef.current = route.routeId;
-        ensureRouteInteractions(map, onRouteSelectRef);
-      });
-    }
-  }, [route, selectedRouteId, theme, hasToken]);
-
-  useEffect(() => {
-    if (!hasToken || !mapContainerRef.current) return;
+    if (!shouldUseMapbox || !mapContainerRef.current) return;
 
     let resizeFrame = 0;
     const resizeMap = () => {
@@ -502,9 +815,9 @@ export function RouteMap({ route, selectedRouteId, centerLat = 49.28, centerLng 
       window.removeEventListener("resize", resizeMap);
       window.visualViewport?.removeEventListener("resize", resizeMap);
     };
-  }, [hasToken]);
+  }, [shouldUseMapbox]);
 
-  if (!hasToken) {
+  if (useSchematicMap) {
     return <SchematicMap route={route} theme={theme} />;
   }
 

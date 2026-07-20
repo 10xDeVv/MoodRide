@@ -29,7 +29,7 @@ import com.moodride.routeapi.cache.CachePolicy;
  * Redis-based cache configuration for multi-layer caching strategy.
  *
  * Cache Layers:
- * - Layer 1: Route Results (24-hour TTL)
+ * - Layer 1: Complete rich route details v2 (24-hour TTL)
  * - Layer 2: Scenic Tile Scores (8-day TTL)
  * - Layer 3: Road Segment Metadata (7-day TTL)
  * - Layer 4: Regional Popularity (24-hour TTL)
@@ -57,9 +57,9 @@ public class CacheConfig {
         // Per-cache TTL configurations
         Map<String, RedisCacheConfiguration> cacheConfigurations = new HashMap<>();
 
-        // Layer 1: Route Results (24-hour TTL)
-        cacheConfigurations.put(CacheNames.ROUTE_RESULTS,
-            defaultConfig.entryTtl(CachePolicy.ROUTE_RESULTS_TTL));
+        // Layer 1: Complete rich route details v2 (24-hour TTL)
+        cacheConfigurations.put(CacheNames.ROUTE_DETAILS_V2,
+            defaultConfig.entryTtl(CachePolicy.ROUTE_DETAILS_V2_TTL));
 
         // Layer 2: Scenic Tile Scores (8-day TTL)
         cacheConfigurations.put(CacheNames.SCENIC_TILES,

@@ -393,11 +393,35 @@ function RouteDetailsSignals({ option }: { option?: RouteOptionResponse | null }
   );
 }
 
+function ResultsNotice({
+  message,
+  onRetry
+}: {
+  message?: string;
+  onRetry?: () => void;
+}) {
+  if (!message) return null;
+  return (
+    <div className="route-summary-card" role="status" aria-live="polite">
+      <p className="route-summary-text">{message}</p>
+      {onRetry && (
+        <button className="route-details-toggle" type="button" onClick={onRetry}>
+          <RefreshCw size={13} />
+          Retry details
+        </button>
+      )}
+    </div>
+  );
+}
+
 interface MobileResultsPanelProps {
   route: RouteDetailResponse;
   selectedOptionId: string;
+  pendingOptionId?: string;
+  notice?: string;
   sheetState: BottomSheetState;
   onOptionSelect: (id: string) => void;
+  onRetryDetails?: () => void;
   onStartDrive: () => void;
   onPlanNewRoute: () => void;
   onExpand: () => void;
@@ -405,8 +429,8 @@ interface MobileResultsPanelProps {
 }
 
 export function MobileResultsPanel({
-  route, selectedOptionId, sheetState,
-  onOptionSelect, onStartDrive, onPlanNewRoute, onExpand, onMinimize
+  route, selectedOptionId, pendingOptionId, notice, sheetState,
+  onOptionSelect, onRetryDetails, onStartDrive, onPlanNewRoute, onExpand, onMinimize
 }: MobileResultsPanelProps) {
   const selectedOption = getSelectedRouteOption(route, selectedOptionId);
   const routeOptions = route.routeOptions?.length ? route.routeOptions : selectedOption ? [selectedOption] : [];
@@ -421,14 +445,25 @@ export function MobileResultsPanel({
         if (event.key === "Enter" || event.key === " ") onExpand();
       }}>
         <div className="mobile-peek-hint">
-          {routeOptions.length} Scenic Route{routeOptions.length !== 1 ? "s" : ""} - Tap to explore
+          {notice ?? `${routeOptions.length} Scenic Route${routeOptions.length !== 1 ? "s" : ""} - Tap to explore`}
         </div>
+        {notice && onRetryDetails && (
+          <button className="route-details-toggle" type="button" onClick={(event) => {
+            event.stopPropagation();
+            onRetryDetails();
+          }}>
+            <RefreshCw size={13} />
+            Retry details
+          </button>
+        )}
         <div className="mobile-peek-routes">
           {routeOptions.map((opt) => (
             <button
               key={opt.routeId}
               className={`mobile-peek-route${selectedOptionId === opt.routeId ? " active" : ""}`}
               type="button"
+              disabled={pendingOptionId === opt.routeId}
+              aria-busy={pendingOptionId === opt.routeId}
               onClick={(event) => {
                 event.stopPropagation();
                 onOptionSelect(opt.routeId);
@@ -466,6 +501,7 @@ export function MobileResultsPanel({
       </div>
 
       <div className="results-body">
+        <ResultsNotice message={notice} onRetry={onRetryDetails} />
         {routeOptions.length > 0 && (
           <div>
             <div className="section-heading">Route Options</div>
@@ -476,6 +512,8 @@ export function MobileResultsPanel({
                   className={`route-option-card${selectedOptionId === opt.routeId ? " active" : ""}`}
                   onClick={() => onOptionSelect(opt.routeId)}
                   type="button"
+                  disabled={pendingOptionId === opt.routeId}
+                  aria-busy={pendingOptionId === opt.routeId}
                 >
                   <div className="route-option-header">
                     <div>
@@ -541,15 +579,18 @@ export function MobileResultsPanel({
 interface ResultsPanelProps {
   route: RouteDetailResponse;
   selectedOptionId: string;
+  pendingOptionId?: string;
+  notice?: string;
   onOptionSelect: (id: string) => void;
+  onRetryDetails?: () => void;
   onStartDrive: () => void;
   onPlanNewRoute: () => void;
   onMinimize?: () => void;
 }
 
 export function ResultsPanel({
-  route, selectedOptionId,
-  onOptionSelect, onStartDrive, onPlanNewRoute, onMinimize
+  route, selectedOptionId, pendingOptionId, notice,
+  onOptionSelect, onRetryDetails, onStartDrive, onPlanNewRoute, onMinimize
 }: ResultsPanelProps) {
   const selectedOption = route.routeOptions?.find((o) => o.routeId === selectedOptionId)
     ?? route.routeOptions?.[0];
@@ -579,6 +620,7 @@ export function ResultsPanel({
       </div>
 
       <div className="results-body">
+        <ResultsNotice message={notice} onRetry={onRetryDetails} />
 
         {/* ── Route Options ── */}
         {route.routeOptions && route.routeOptions.length > 0 && (
@@ -591,6 +633,8 @@ export function ResultsPanel({
                   className={`route-option-card${selectedOptionId === opt.routeId ? " active" : ""}`}
                   onClick={() => onOptionSelect(opt.routeId)}
                   type="button"
+                  disabled={pendingOptionId === opt.routeId}
+                  aria-busy={pendingOptionId === opt.routeId}
                 >
                   <div className="route-option-header">
                     <div>
@@ -653,12 +697,14 @@ export function ResultsPanel({
 // ─── Handoff Modal ────────────────────────────────────────────────────────────
 export function HandoffModal({
   route,
+  selectedOptionId,
   routeMode,
   onClose,
   onNavigationOpen,
   onGpxExport
 }: {
   route: RouteDetailResponse;
+  selectedOptionId: string;
   routeMode: RouteMode;
   onClose: () => void;
   onNavigationOpen: (provider: "google" | "apple") => void;
@@ -667,10 +713,8 @@ export function HandoffModal({
   const coords = route.geometry?.geometry?.coordinates ?? [];
   const gmapsUrl = buildGoogleMapsUrl(coords, routeMode);
   const appleMapsUrl = buildAppleMapsUrl(coords, routeMode);
-  const routeName = route.routeOptions?.[0]?.profile
-    ? route.routeOptions[0].profile.split("_").map((w) => w[0].toUpperCase() + w.slice(1)).join(" ")
-    : "Wayward Route";
-  const handoffOption = route.routeOptions?.[0];
+  const handoffOption = getSelectedRouteOption(route, selectedOptionId);
+  const routeName = handoffOption?.profile ? formatProfileName(handoffOption.profile) : "Wayward Route";
 
   return (
     <div
@@ -816,7 +860,11 @@ function vibeLabel(vibe: string): string {
 }
 
 export function guidanceFromStatus(status: RouteJobStatusResponse): FailureGuidance | null {
-  if (!status.failureCode && (!status.suggestedVibes || status.suggestedVibes.length === 0)) {
+  if (
+    !status.failureCode
+    && (!status.suggestedVibes || status.suggestedVibes.length === 0)
+    && (!status.suggestedActions || status.suggestedActions.length === 0)
+  ) {
     return null;
   }
   return {

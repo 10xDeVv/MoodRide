@@ -75,6 +75,28 @@ public class RouteJob {
 
     private UUID routeId;
 
+    private Instant primaryReadyAt;
+
+    @Column(nullable = false)
+    private long stateRevision = 0L;
+
+    @Column(nullable = false)
+    private long optionRevision = 0L;
+
+    @Column(nullable = false)
+    private int optionCount = 0;
+
+    @Column(nullable = false)
+    private boolean optionsComplete = false;
+
+    private UUID leaseToken;
+
+    private Instant leaseExpiresAt;
+
+    @Version
+    @Column(nullable = false)
+    private long rowVersion = 0L;
+
     // Constructors
     public RouteJob() {}
 
@@ -94,17 +116,31 @@ public class RouteJob {
      * Marks the job as started and records the start time.
      */
     public void markStarted() {
+        boolean changed = this.status != JobStatus.PROCESSING;
         this.status = JobStatus.PROCESSING;
         this.startedAt = Instant.now();
+        this.failureReason = null;
+        if (changed) {
+            incrementStateRevision();
+        }
     }
 
     /**
      * Marks the job as having a primary route ready while alternatives continue.
      */
     public void markPrimaryReady(UUID routeId) {
+        boolean changed = this.status != JobStatus.PRIMARY_READY
+            || this.routeId == null
+            || this.primaryReadyAt == null;
+        preservePrimaryRoute(routeId);
         this.status = JobStatus.PRIMARY_READY;
-        this.routeId = routeId;
+        if (this.primaryReadyAt == null) {
+            this.primaryReadyAt = Instant.now();
+        }
         this.failureReason = null;
+        if (changed) {
+            incrementStateRevision();
+        }
     }
 
 
@@ -112,38 +148,92 @@ public class RouteJob {
      * Marks the job as completed successfully.
      */
     public void markCompleted(UUID routeId) {
+        boolean changed = this.status != JobStatus.COMPLETED || !this.optionsComplete;
+        preservePrimaryRoute(routeId);
         this.status = JobStatus.COMPLETED;
-        this.routeId = routeId;
         this.completedAt = Instant.now();
         this.failureReason = null;
+        this.optionsComplete = true;
+        clearLease();
+        if (changed) {
+            incrementStateRevision();
+        }
     }
 
     /**
      * Marks the job as failed with a reason.
      */
     public void markFailed(String reason) {
+        boolean changed = this.status != JobStatus.FAILED || !java.util.Objects.equals(this.failureReason, reason);
         this.status = JobStatus.FAILED;
         this.failureReason = reason;
         this.failedAt = Instant.now();
         this.completedAt = this.failedAt;
+        clearLease();
+        if (changed) {
+            incrementStateRevision();
+        }
     }
 
     public void markTimeout(String reason) {
+        boolean changed = this.status != JobStatus.TIMEOUT || !java.util.Objects.equals(this.failureReason, reason);
         this.status = JobStatus.TIMEOUT;
         this.failureReason = reason;
         this.failedAt = Instant.now();
         this.completedAt = this.failedAt;
+        clearLease();
+        if (changed) {
+            incrementStateRevision();
+        }
     }
 
     public void requeueForRetry() {
+        boolean changed = this.status != JobStatus.QUEUED;
         this.status = JobStatus.QUEUED;
         this.startedAt = null;
         this.completedAt = null;
         this.failedAt = null;
+        clearLease();
+        if (changed) {
+            incrementStateRevision();
+        }
     }
 
     public boolean canRetry() {
         return retryCount < maxRetries;
+    }
+
+    public void claimLease(UUID token, Instant expiresAt) {
+        this.leaseToken = java.util.Objects.requireNonNull(token, "token");
+        this.leaseExpiresAt = java.util.Objects.requireNonNull(expiresAt, "expiresAt");
+    }
+
+    public void clearLease() {
+        this.leaseToken = null;
+        this.leaseExpiresAt = null;
+    }
+
+    public boolean leaseMatches(UUID expectedToken) {
+        return expectedToken != null && expectedToken.equals(this.leaseToken);
+    }
+
+    public void recordVisibleOption(int committedOptionCount) {
+        this.optionRevision++;
+        this.optionCount = committedOptionCount;
+    }
+
+    public void incrementStateRevision() {
+        this.stateRevision++;
+    }
+
+    private void preservePrimaryRoute(UUID candidateRouteId) {
+        UUID requiredRouteId = java.util.Objects.requireNonNull(candidateRouteId, "routeId");
+        if (this.routeId != null && !this.routeId.equals(requiredRouteId)) {
+            throw new IllegalStateException(
+                "Primary route " + this.routeId + " cannot be replaced by " + requiredRouteId
+            );
+        }
+        this.routeId = requiredRouteId;
     }
 
     // Job status enumeration
@@ -216,6 +306,30 @@ public class RouteJob {
 
     public UUID getRouteId() { return routeId; }
     public void setRouteId(UUID routeId) { this.routeId = routeId; }
+
+    public Instant getPrimaryReadyAt() { return primaryReadyAt; }
+    public void setPrimaryReadyAt(Instant primaryReadyAt) { this.primaryReadyAt = primaryReadyAt; }
+
+    public long getStateRevision() { return stateRevision; }
+    public void setStateRevision(long stateRevision) { this.stateRevision = stateRevision; }
+
+    public long getOptionRevision() { return optionRevision; }
+    public void setOptionRevision(long optionRevision) { this.optionRevision = optionRevision; }
+
+    public int getOptionCount() { return optionCount; }
+    public void setOptionCount(int optionCount) { this.optionCount = optionCount; }
+
+    public boolean isOptionsComplete() { return optionsComplete; }
+    public void setOptionsComplete(boolean optionsComplete) { this.optionsComplete = optionsComplete; }
+
+    public UUID getLeaseToken() { return leaseToken; }
+    public void setLeaseToken(UUID leaseToken) { this.leaseToken = leaseToken; }
+
+    public Instant getLeaseExpiresAt() { return leaseExpiresAt; }
+    public void setLeaseExpiresAt(Instant leaseExpiresAt) { this.leaseExpiresAt = leaseExpiresAt; }
+
+    public long getRowVersion() { return rowVersion; }
+    public void setRowVersion(long rowVersion) { this.rowVersion = rowVersion; }
 
     public void incrementRetryCount() { this.retryCount++; }
 

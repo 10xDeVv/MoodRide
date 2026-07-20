@@ -44,7 +44,9 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.atMost;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.lenient;
+import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
@@ -151,6 +153,17 @@ class RoutePlannerTest {
     }
 
     @Test
+    void generateRouteRejectsModeDifferentFromConfiguredWorkerBeforeRouting() {
+        RouteJob job = sampleJob(45);
+        job.setRouteMode(RouteMode.WALK);
+
+        assertThatThrownBy(() -> routePlanner.generateRoute(job))
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessage("Route job mode 'walk' does not match configured worker mode 'drive'");
+        verifyNoInteractions(scenicTileLookupService, osrmTripClient);
+    }
+
+    @Test
     void generateRouteRejectsOverBudgetHybridCandidatesWhenNoInBudgetOptionExists() {
         when(scenicTileLookupService.findByH3Indexes(anyCollection())).thenReturn(highScenicTilesAroundStart());
         when(osrmTripClient.requestRoundTrip(anyList(), eq(RouteMode.DRIVE))).thenReturn(Optional.of(defaultTrip(22)));
@@ -172,6 +185,8 @@ class RoutePlannerTest {
 
     @Test
     void generateRouteOptionsReturnsThreeDistinctProfilesWhenCandidatesExist() {
+        ApplicationConfiguration config = spy(testConfiguration());
+        routePlanner = routePlanner(config);
         when(scenicTileLookupService.findByH3Indexes(anyCollection())).thenReturn(highScenicTilesAroundStart());
         when(osrmTripClient.requestRoundTrip(anyList(), eq(RouteMode.DRIVE))).thenAnswer(invocation -> {
             @SuppressWarnings("unchecked")
@@ -186,6 +201,7 @@ class RoutePlannerTest {
         assertThat(options).hasSize(3);
         assertThat(options.stream().map(RouteCandidate::getAlgorithmVersion).collect(Collectors.toSet()))
             .containsExactly("hybrid_osrm_v2");
+        verify(config, atLeastOnce()).getProfile();
         assertThat(options.getFirst().getScoreBreakdown())
             .containsKeys(
                 "final_score",

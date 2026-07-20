@@ -2,6 +2,7 @@ package com.moodride.routeworker.service;
 
 import com.moodride.routeworker.cache.CacheKeySchema;
 import com.moodride.routeworker.cache.CacheNames;
+import com.moodride.routeworker.config.ScenicCacheConfiguration;
 import org.springframework.cache.Cache;
 import org.springframework.cache.CacheManager;
 import org.springframework.stereotype.Service;
@@ -16,19 +17,26 @@ public class CacheInvalidationHookService {
     private final ScenicTileLookupService scenicTileLookupService;
     private final RoadSegmentAnchorService roadSegmentAnchorService;
     private final WorkerCacheMetricsService metricsService;
+    private final String scenicScoringVersion;
+    private final String roadDatasetRevision;
+    private final String anchorCacheSchema;
 
     public CacheInvalidationHookService(
             CacheManager cacheManager,
             GraphService graphService,
             ScenicTileLookupService scenicTileLookupService,
             RoadSegmentAnchorService roadSegmentAnchorService,
-            WorkerCacheMetricsService metricsService
+            WorkerCacheMetricsService metricsService,
+            ScenicCacheConfiguration cacheConfiguration
     ) {
         this.cacheManager = cacheManager;
         this.graphService = graphService;
         this.scenicTileLookupService = scenicTileLookupService;
         this.roadSegmentAnchorService = roadSegmentAnchorService;
         this.metricsService = metricsService;
+        this.scenicScoringVersion = cacheConfiguration.getScenicScoringVersion();
+        this.roadDatasetRevision = cacheConfiguration.getRoadDatasetRevision();
+        this.anchorCacheSchema = cacheConfiguration.getRoadAnchorCacheSchema();
     }
 
     public void invalidateTiles(List<String> h3Indexes) {
@@ -38,11 +46,16 @@ public class CacheInvalidationHookService {
         if (h3Indexes != null) {
             for (String h3 : h3Indexes) {
                 if (scenic != null) {
-                    scenic.evict(CacheKeySchema.scenicTile(h3));
+                    scenic.evict(CacheKeySchema.scenicTile(scenicScoringVersion, h3));
                 }
                 if (segments != null) {
                     segments.evict(CacheKeySchema.segmentMeta(h3));
-                    segments.evict(CacheKeySchema.roadAnchor(h3));
+                    segments.evict(CacheKeySchema.roadAnchor(
+                        scenicScoringVersion,
+                        roadDatasetRevision,
+                        anchorCacheSchema,
+                        h3
+                    ));
                 }
                 count++;
             }

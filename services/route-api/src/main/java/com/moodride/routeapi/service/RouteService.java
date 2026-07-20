@@ -17,14 +17,17 @@ import java.util.UUID;
 import java.util.Comparator;
 import java.util.stream.Collectors;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.locationtech.jts.geom.Coordinate;
 import org.springframework.cache.annotation.CacheEvict;
 import org.springframework.cache.annotation.Cacheable;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Isolation;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
-import org.springframework.transaction.annotation.Transactional;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
@@ -38,10 +41,11 @@ import com.moodride.datamodels.ScenicScoreTile;
 import com.moodride.datamodels.scoring.ComponentScores;
 import com.moodride.datamodels.scoring.ScenicScoreCalculator;
 import com.moodride.eventmodels.DriveCompletedEvent;
-import com.moodride.eventmodels.RouteJobEvent;
 import com.moodride.eventmodels.RouteRatedEvent;
 import com.moodride.geo.H3Utils;
 import com.moodride.geo.VibeCatalog;
+import com.moodride.routeapi.cache.CacheNames;
+import com.moodride.routeapi.config.ScenicCacheConfiguration;
 import com.moodride.routeapi.dto.RouteDetailResponse;
 import com.moodride.routeapi.dto.RouteJobStatusResponse;
 import com.moodride.routeapi.dto.RouteOptionExplanationResponse;
@@ -60,6 +64,8 @@ import com.moodride.routeapi.repository.ScenicScoreTileRepository;
 @Service
 @Transactional
 public class RouteService {
+
+    private static final Logger logger = LoggerFactory.getLogger(RouteService.class);
 
     private static final Set<String> ALLOWED_VIBES = VibeCatalog.supportedVibes();
 
@@ -81,11 +87,7 @@ public class RouteService {
         Map.entry("bridge_coastal", "bridge_coastal")
     );
 
-    private static final List<String> ROUTE_OPTION_PROFILES = List.of(
-        "most_scenic",
-        "balanced",
-        "shorter"
-    );
+    private static final List<String> ROUTE_OPTION_PROFILES = RouteProfileAssignments.PROFILES;
 
     private static final List<String> SUPPORTED_PREFERENCE_KEYS = List.of(
         "water",
@@ -143,8 +145,10 @@ public class RouteService {
     private final RouteRepository routeRepository;
     private final RouteWeightCalibrationRepository calibrationRepository;
     private final ScenicScoreTileRepository scenicScoreTileRepository;
+    private final String scenicScoringVersion;
     private final RouteFailureGuidanceService routeFailureGuidanceService;
     private final KafkaTemplate<String, String> kafkaTemplate;
+    private final RouteJobDispatchService dispatchService;
     private final ObjectMapper objectMapper;
     private final ScenicScoreCalculator scenicScoreCalculator = new ScenicScoreCalculator();
     
@@ -152,15 +156,19 @@ public class RouteService {
                         RouteRepository routeRepository,
                         RouteWeightCalibrationRepository calibrationRepository,
                         ScenicScoreTileRepository scenicScoreTileRepository,
+                        ScenicCacheConfiguration scenicCacheConfiguration,
                         RouteFailureGuidanceService routeFailureGuidanceService,
                         KafkaTemplate<String, String> kafkaTemplate,
+                        RouteJobDispatchService dispatchService,
                         ObjectMapper objectMapper) {
         this.jobRepository = jobRepository;
         this.routeRepository = routeRepository;
         this.calibrationRepository = calibrationRepository;
         this.scenicScoreTileRepository = scenicScoreTileRepository;
+        this.scenicScoringVersion = scenicCacheConfiguration.getScenicScoringVersion();
         this.routeFailureGuidanceService = routeFailureGuidanceService;
         this.kafkaTemplate = kafkaTemplate;
+        this.dispatchService = dispatchService;
         this.objectMapper = objectMapper.copy().findAndRegisterModules();
     }
     
@@ -181,6 +189,7 @@ public class RouteService {
         Map<String, Double> requestedPreferenceVector = normalizePreferenceVector(request.preferenceVector());
         job.setPreferenceVector(serializePreferenceVector(applyRouteWeightCalibrations(resolvedVibes, requestedPreferenceVector)));
         jobRepository.save(job);
+        dispatchService.enqueue(job.getId(), job.getSubmittedAt());
 
         publishRouteJobAfterCommit(job.getId());
 
@@ -195,10 +204,10 @@ public class RouteService {
             job.getMaxRetries()
         );
     }
-
     private void publishRouteJobAfterCommit(UUID jobId) {
-        Runnable publish = () -> kafkaTemplate.send(RouteJobEvent.TOPIC, jobId.toString(), jobId.toString());
-        if (!TransactionSynchronizationManager.isActualTransactionActive()) {
+        Runnable publish = () -> publishCommittedDispatch(jobId);
+        if (!TransactionSynchronizationManager.isActualTransactionActive()
+                || !TransactionSynchronizationManager.isSynchronizationActive()) {
             publish.run();
             return;
         }
@@ -211,22 +220,35 @@ public class RouteService {
         });
     }
 
+    private void publishCommittedDispatch(UUID jobId) {
+        try {
+            dispatchService.publishCommitted(jobId);
+        } catch (RuntimeException exception) {
+            logger.error(
+                "Route job {} remains pending after publication failed; recovery will retry it",
+                jobId,
+                exception
+            );
+        }
+    }
+
+
+
     public RouteJobStatusResponse getRouteJobStatus(UUID jobId) {
         RouteJob job = jobRepository.findById(jobId)
             .orElseThrow(() -> new JobNotFoundException(jobId));
 
-        List<Route> jobRoutes = routeRepository.findByJobIdOrderByGeneratedAtAsc(jobId);
-        List<RouteOptionResponse> routeOptions = buildRouteOptions(jobRoutes, job);
-
-        UUID routeId = job.getRouteId();
-        if (routeId == null) {
-            routeId = resolvePrimaryRouteId(jobRoutes).orElse(null);
-        }
-        if (routeId == null && !routeOptions.isEmpty()) {
-            routeId = routeOptions.getFirst().routeId();
-        }
-
+        boolean publishesRoutes = job.getStatus() == RouteJob.JobStatus.PRIMARY_READY
+            || job.getStatus() == RouteJob.JobStatus.COMPLETED;
+        List<Route> publishedRoutes = publishesRoutes
+            ? routeRepository.findByJobIdOrderByGeneratedAtAsc(jobId)
+            : List.of();
+        UUID routeId = resolveRouteIdForStatus(job, publishedRoutes);
         String routeUrl = routeId == null ? null : "/routes/route/" + routeId;
+        List<RouteOptionResponse> routeOptions = buildStatusRouteOptions(
+            publishedRoutes,
+            job.getOptionCount()
+        );
         Integer estimatedRemaining = job.getStatus() == RouteJob.JobStatus.QUEUED
                 || job.getStatus() == RouteJob.JobStatus.PROCESSING
                 || job.getStatus() == RouteJob.JobStatus.PRIMARY_READY
@@ -240,6 +262,11 @@ public class RouteService {
             routeId,
             routeUrl,
             routeOptions,
+            job.getPrimaryReadyAt(),
+            job.getStateRevision(),
+            job.getOptionRevision(),
+            job.getOptionCount(),
+            job.isOptionsComplete(),
             job.getFailureReason(),
             job.getSubmittedAt(),
             job.getStartedAt(),
@@ -256,7 +283,23 @@ public class RouteService {
         );
     }
 
-    @Cacheable(cacheNames = "routeResults", key = "#routeId.toString()")
+    private UUID resolveRouteIdForStatus(RouteJob job, List<Route> publishedRoutes) {
+        if (job.getStatus() != RouteJob.JobStatus.PRIMARY_READY
+                && job.getStatus() != RouteJob.JobStatus.COMPLETED) {
+            return null;
+        }
+        if (job.getRouteId() != null) {
+            return job.getRouteId();
+        }
+        return RouteProfileAssignments.resolvePrimary(publishedRoutes).orElse(null);
+    }
+
+    @Cacheable(
+        cacheNames = CacheNames.ROUTE_DETAILS_V2,
+        key = "T(com.moodride.routeapi.cache.CacheKeySchema).routeDetailV2(#p0)",
+        unless = "#result == null || !#result.optionsComplete() || #result.routeOptions().size() != #result.optionCount()"
+    )
+    @Transactional(readOnly = true, isolation = Isolation.REPEATABLE_READ)
     public RouteDetailResponse getRoute(UUID routeId) {
         Route route = routeRepository.findById(routeId)
             .orElseThrow(() -> new RouteNotFoundException(routeId));
@@ -269,7 +312,10 @@ public class RouteService {
             .orElseGet(() -> getRouteJobStatus(id));
     }
 
-    @CacheEvict(cacheNames = "routeResults", key = "#routeId.toString()")
+    @CacheEvict(
+        cacheNames = CacheNames.ROUTE_DETAILS_V2,
+        key = "T(com.moodride.routeapi.cache.CacheKeySchema).routeDetailV2(#p0)"
+    )
     public RouteRatingResponse rateRoute(UUID routeId, RouteRatingRequest request) {
         Route route = routeRepository.findById(routeId)
             .orElseThrow(() -> new RouteNotFoundException(routeId));
@@ -345,6 +391,9 @@ public class RouteService {
             feature,
             scenicHighlights,
             routeOptions,
+            routeJob == null ? 0L : routeJob.getOptionRevision(),
+            routeJob == null ? 0 : routeJob.getOptionCount(),
+            routeJob != null && routeJob.isOptionsComplete(),
             algorithmVersion,
             beamCandidates,
             computationTimeMs,
@@ -662,25 +711,21 @@ public class RouteService {
     }
 
     private List<RouteOptionResponse> buildRouteOptions(List<Route> routes, RouteJob routeJob) {
-        if (routes == null || routes.isEmpty()) {
+        List<RouteProfileAssignments.Profiled<Route>> profiledRoutes = profileRoutes(routes);
+        if (profiledRoutes.isEmpty()) {
             return List.of();
         }
 
-        List<Route> chronologicallyOrdered = routes.stream()
-            .sorted(Comparator.comparing(Route::getGeneratedAt, Comparator.nullsLast(Comparator.naturalOrder())))
+        List<Route> orderedRoutes = profiledRoutes.stream()
+            .map(RouteProfileAssignments.Profiled::value)
             .toList();
-        List<Route> profileOrdered = orderByProfileWithFallback(chronologicallyOrdered);
-        ComponentAccumulator baselineAccumulator = buildBaselineAccumulator(routeJob, profileOrdered);
+        ComponentAccumulator baselineAccumulator = buildBaselineAccumulator(routeJob, orderedRoutes);
 
-        List<RouteOptionResponse> options = new ArrayList<>(profileOrdered.size());
-        for (int i = 0; i < profileOrdered.size(); i++) {
-            Route route = profileOrdered.get(i);
-            String profile = normalizeRouteProfile(route.getRouteProfile());
-            if (profile == null && i < ROUTE_OPTION_PROFILES.size()) {
-                profile = ROUTE_OPTION_PROFILES.get(i);
-            }
+        List<RouteOptionResponse> options = new ArrayList<>(profiledRoutes.size());
+        for (RouteProfileAssignments.Profiled<Route> profiledRoute : profiledRoutes) {
+            Route route = profiledRoute.value();
             options.add(new RouteOptionResponse(
-                profile == null ? "option_" + (i + 1) : profile,
+                profiledRoute.profile(),
                 route.getId(),
                 "/routes/route/" + route.getId(),
                 route.getScenicScore() * 100.0,
@@ -692,6 +737,32 @@ public class RouteService {
         }
 
         return diversifyRouteOptionExplanations(options);
+    }
+
+    private List<RouteOptionResponse> buildStatusRouteOptions(
+        List<Route> routes,
+        int committedOptionCount
+    ) {
+        List<RouteProfileAssignments.Profiled<Route>> profiledRoutes = profileRoutes(routes);
+        int visibleOptionCount = committedOptionCount > 0
+            ? Math.min(committedOptionCount, profiledRoutes.size())
+            : profiledRoutes.size();
+        return profiledRoutes.stream()
+            .limit(visibleOptionCount)
+            .map(profiledRoute -> {
+                Route route = profiledRoute.value();
+                return new RouteOptionResponse(
+                    profiledRoute.profile(),
+                    route.getId(),
+                    "/routes/route/" + route.getId(),
+                    route.getScenicScore() * 100.0,
+                    parseScoreBreakdown(route.getScoreBreakdownJson()),
+                    route.getTotalDistanceKm(),
+                    route.getEstimatedDurationMinutes(),
+                    null
+                );
+            })
+            .toList();
     }
 
     private List<RouteOptionResponse> diversifyRouteOptionExplanations(List<RouteOptionResponse> options) {
@@ -815,7 +886,10 @@ public class RouteService {
             return null;
         }
 
-        List<ScenicScoreTile> tiles = scenicScoreTileRepository.findByH3IndexIn(h3Indexes);
+        List<ScenicScoreTile> tiles = scenicScoreTileRepository.findByH3IndexInAndScoringVersion(
+            h3Indexes,
+            scenicScoringVersion
+        );
         if (tiles == null || tiles.isEmpty()) {
             return null;
         }
@@ -886,6 +960,7 @@ public class RouteService {
         }
 
         List<ScenicScoreTile> baselineTiles = scenicScoreTileRepository.findScenicTilesNearPoint(
+            scenicScoringVersion,
             origin.getY(),
             origin.getX(),
             ROUTE_EXPLANATION_BASELINE_RADIUS_METERS,
@@ -1489,54 +1564,15 @@ public class RouteService {
         return text.substring(0, 1).toUpperCase(Locale.ROOT) + text.substring(1);
     }
 
-    private List<Route> orderByProfileWithFallback(List<Route> routes) {
-        Map<String, Route> byProfile = new LinkedHashMap<>();
-        List<Route> unprofiled = new ArrayList<>();
-
-        for (Route route : routes) {
-            String profile = normalizeRouteProfile(route.getRouteProfile());
-            if (profile == null) {
-                unprofiled.add(route);
-                continue;
-            }
-            byProfile.putIfAbsent(profile, route);
-        }
-
-        List<Route> ordered = new ArrayList<>();
-        Set<UUID> includedIds = new java.util.HashSet<>();
-        for (String profile : ROUTE_OPTION_PROFILES) {
-            Route route = byProfile.get(profile);
-            if (route != null) {
-                ordered.add(route);
-                includedIds.add(route.getId());
-            }
-        }
-
-        for (Route route : unprofiled) {
-            if (ordered.size() >= ROUTE_OPTION_PROFILES.size()) {
-                break;
-            }
-            if (includedIds.add(route.getId())) {
-                ordered.add(route);
-            }
-        }
-
-        return List.copyOf(ordered);
+    private List<RouteProfileAssignments.Profiled<Route>> profileRoutes(List<Route> routes) {
+        return RouteProfileAssignments.assign(
+            routes,
+            Route::getRouteProfile,
+            Route::getGeneratedAt,
+            Route::getId
+        );
     }
 
-    private java.util.Optional<UUID> resolvePrimaryRouteId(List<Route> routes) {
-        if (routes == null || routes.isEmpty()) {
-            return java.util.Optional.empty();
-        }
-
-        return routes.stream()
-            .filter(route -> "most_scenic".equals(normalizeRouteProfile(route.getRouteProfile())))
-            .min(Comparator.comparing(Route::getGeneratedAt, Comparator.nullsLast(Comparator.naturalOrder())))
-            .map(Route::getId)
-            .or(() -> routes.stream()
-                .min(Comparator.comparing(Route::getGeneratedAt, Comparator.nullsLast(Comparator.naturalOrder())))
-                .map(Route::getId));
-    }
 
     private List<String> resolveRouteVibes(RouteJob routeJob, Route route) {
         if (routeJob != null) {
@@ -1592,14 +1628,7 @@ public class RouteService {
     }
 
     private String normalizeRouteProfile(String routeProfile) {
-        if (routeProfile == null || routeProfile.isBlank()) {
-            return null;
-        }
-
-        String normalized = routeProfile.trim().toLowerCase(Locale.ROOT)
-            .replace('-', '_')
-            .replace(' ', '_');
-        return ROUTE_OPTION_PROFILES.contains(normalized) ? normalized : null;
+        return RouteProfileAssignments.normalizeProfile(routeProfile);
     }
 
     private double clamp01(double value) {
