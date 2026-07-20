@@ -220,21 +220,80 @@ SELECT 'release-invariants-ok';
     || fail "Recovery invariant validation returned an unexpected marker for database $database."
 }
 
+sync_recovery_path() {
+  local path="$1"
+
+  command -v sync >/dev/null 2>&1 || return 0
+  if sync -f "$path" 2>/dev/null; then
+    return 0
+  fi
+  sync
+}
+
 create_recovery_backup() {
   local env_file="$1"
   local destination="$2"
-  local temp_dump="${destination}.tmp"
-  local checksum
+  local destination_directory destination_name temp_dump temp_checksum checksum
 
-  rm -f "$temp_dump"
-  compose_env "$env_file" exec -T postgres \
-    pg_dump --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" \
-      --format=custom --no-owner --no-privileges > "$temp_dump"
-  [ -s "$temp_dump" ] || fail "Database backup is empty."
+  case "$destination" in
+    */*)
+      destination_directory="${destination%/*}"
+      [ -n "$destination_directory" ] || destination_directory="/"
+      ;;
+    *)
+      destination_directory="."
+      ;;
+  esac
+  destination_name="${destination##*/}"
+  temp_dump="$(mktemp "$destination_directory/.${destination_name}.dump.tmp.XXXXXX")" || {
+    fail "Could not allocate a unique temporary database backup."
+    return 1
+  }
+  temp_checksum="$(mktemp "$destination_directory/.${destination_name}.cksum.tmp.XXXXXX")" || {
+    rm -f "$temp_dump"
+    fail "Could not allocate a unique temporary database backup checksum."
+    return 1
+  }
+
+  if ! compose_env "$env_file" exec -T postgres \
+      pg_dump --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" \
+        --format=custom --no-owner --no-privileges > "$temp_dump"; then
+    rm -f "$temp_dump" "$temp_checksum"
+    fail "Could not create the database backup."
+    return 1
+  fi
+  if [ ! -s "$temp_dump" ]; then
+    rm -f "$temp_dump" "$temp_checksum"
+    fail "Database backup is empty."
+    return 1
+  fi
   checksum="$(cksum < "$temp_dump")"
-  [ -n "$checksum" ] || fail "Could not checksum the database backup."
-  mv "$temp_dump" "$destination"
-  printf '%s\n' "$checksum" > "${destination}.cksum"
+  if [ -z "$checksum" ]; then
+    rm -f "$temp_dump" "$temp_checksum"
+    fail "Could not checksum the database backup."
+    return 1
+  fi
+  if ! printf '%s\n' "$checksum" > "$temp_checksum" \
+     || ! sync_recovery_path "$temp_dump" \
+     || ! sync_recovery_path "$temp_checksum"; then
+    rm -f "$temp_dump" "$temp_checksum"
+    fail "Could not durably stage the database backup and checksum."
+    return 1
+  fi
+  if ! mv "$temp_dump" "$destination"; then
+    rm -f "$temp_dump" "$temp_checksum"
+    fail "Could not publish the database backup."
+    return 1
+  fi
+  if ! mv "$temp_checksum" "${destination}.cksum"; then
+    rm -f "$temp_checksum"
+    fail "Could not publish the database backup checksum; the backup is not valid for recovery."
+    return 1
+  fi
+  if ! sync_recovery_path "$destination_directory"; then
+    fail "Could not durably publish the database backup and checksum."
+    return 1
+  fi
   echo "Pre-migration database backup created at $destination"
 }
 
@@ -484,13 +543,54 @@ SELECT pg_catalog.format(
 \gexec
 SQL
 }
+database_identity_is_named() {
+  local env_file="$1"
+  local database="$2"
+  local expected_oid="$3"
+  local actual_oid
+
+  actual_oid="$(database_oid "$env_file" "$database")" || return 1
+  [ "$actual_oid" = "$expected_oid" ]
+}
+
+database_identity_has_connection_state() {
+  local env_file="$1"
+  local database="$2"
+  local expected_oid="$3"
+  local allow_connections="$4"
+  local result
+
+  result="$(printf '%s\n' "
+SELECT CASE WHEN EXISTS (
+  SELECT 1
+  FROM pg_catalog.pg_database
+  WHERE datname = :'target_database'
+    AND oid::text = :'expected_oid'
+    AND datallowconn = (:'allow_connections' = 'true')
+) THEN 1 ELSE 0 END;" | compose_env "$env_file" exec -T postgres \
+    psql --username "$POSTGRES_USER" --dbname postgres --no-psqlrc --quiet \
+      --tuples-only --no-align --set ON_ERROR_STOP=1 \
+      --set "target_database=$database" \
+      --set "expected_oid=$expected_oid" \
+      --set "allow_connections=$allow_connections" \
+      --file=-)" || return 1
+  result="$(printf '%s' "$result" | tr -d '[:space:]')"
+  [ "$result" = "1" ]
+}
+
 retry_database_rename() {
   local env_file="$1"
   local old_name="$2"
   local new_name="$3"
+  local expected_oid="$4"
   local attempt
+
+  if database_identity_is_named "$env_file" "$new_name" "$expected_oid"; then
+    return 0
+  fi
   for attempt in 1 2 3; do
-    if run_database_rename "$env_file" "$old_name" "$new_name"; then
+    run_database_rename "$env_file" "$old_name" "$new_name" || true
+    if database_identity_is_named "$env_file" "$new_name" "$expected_oid"; then
       return 0
     fi
     compose_env "$env_file" exec -T postgres \
@@ -519,20 +619,80 @@ SELECT pg_catalog.format(
 SQL
 }
 
+quiesce_database() {
+  local env_file="$1"
+  local database="$2"
+  local expected_oid="$3"
+  local attempt
+
+  if database_identity_has_connection_state \
+      "$env_file" "$database" "$expected_oid" false; then
+    return 0
+  fi
+  database_identity_is_named "$env_file" "$database" "$expected_oid" || return 1
+  for attempt in 1 2 3; do
+    compose_env "$env_file" exec -T postgres \
+      psql --username "$POSTGRES_USER" --dbname postgres --no-psqlrc --quiet \
+        --set ON_ERROR_STOP=1 --set "target_database=$database" --file=- <<'SQL' || true
+SELECT pg_catalog.format(
+    'ALTER DATABASE %I WITH ALLOW_CONNECTIONS false',
+    :'target_database'
+)
+\gexec
+SELECT pg_catalog.pg_terminate_backend(pid)
+FROM pg_catalog.pg_stat_activity
+WHERE datname = :'target_database' AND pid <> pg_catalog.pg_backend_pid();
+SQL
+    if database_identity_has_connection_state \
+        "$env_file" "$database" "$expected_oid" false; then
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+stop_database_service_fail_closed() {
+  local env_file="$1"
+  local running_postgres
+
+  while :; do
+    compose_env "$env_file" stop postgres >/dev/null 2>&1 \
+      || compose_env "$env_file" kill postgres >/dev/null 2>&1 \
+      || true
+    if running_postgres="$(compose_env "$env_file" \
+        ps --status running --quiet postgres 2>/dev/null)"; then
+      running_postgres="$(printf '%s' "$running_postgres" | tr -d '[:space:]')"
+      if [ -z "$running_postgres" ]; then
+        return 0
+      fi
+    fi
+    echo "CRITICAL FAIL-CLOSED: retrying PostgreSQL service shutdown; recovery promotion will not return while the unvalidated canonical database can accept connections." >&2
+    sleep 1
+  done
+}
+
+
 reclaim_database_name() {
   local env_file="$1"
   local old_name="$2"
   local new_name="$3"
+  local expected_oid="$4"
 
-  database_exists "$env_file" "$old_name" || return 1
+  if database_identity_is_named "$env_file" "$new_name" "$expected_oid"; then
+    allow_database_connections "$env_file" "$new_name" || return 1
+    database_identity_has_connection_state \
+      "$env_file" "$new_name" "$expected_oid" true
+    return
+  fi
+  database_identity_is_named "$env_file" "$old_name" "$expected_oid" || return 1
   if database_exists "$env_file" "$new_name"; then
     return 1
   fi
 
-  if ! compose_env "$env_file" exec -T postgres \
-      psql --username "$POSTGRES_USER" --dbname postgres --no-psqlrc --quiet \
-        --set ON_ERROR_STOP=1 --set "old_database=$old_name" \
-        --set "new_database=$new_name" --file=- <<'SQL'
+  compose_env "$env_file" exec -T postgres \
+    psql --username "$POSTGRES_USER" --dbname postgres --no-psqlrc --quiet \
+      --set ON_ERROR_STOP=1 --set "old_database=$old_name" \
+      --set "new_database=$new_name" --file=- <<'SQL' || true
 SELECT pg_catalog.format(
     'ALTER DATABASE %I WITH ALLOW_CONNECTIONS false',
     :'old_database'
@@ -553,20 +713,78 @@ SELECT pg_catalog.format(
 )
 \gexec
 SQL
-  then
-    if database_exists "$env_file" "$new_name" \
-       && ! database_exists "$env_file" "$old_name"; then
-      allow_database_connections "$env_file" "$new_name" || return 1
-      return 0
+
+  database_identity_is_named "$env_file" "$new_name" "$expected_oid" || return 1
+  allow_database_connections "$env_file" "$new_name" || return 1
+  database_identity_has_connection_state \
+    "$env_file" "$new_name" "$expected_oid" true
+}
+
+restore_prior_database_to_canonical() {
+  local env_file="$1"
+  local quarantine_database="$2"
+  local prior_database_oid="$3"
+
+  if database_identity_is_named "$env_file" "$POSTGRES_DB" "$prior_database_oid"; then
+    allow_database_connections "$env_file" "$POSTGRES_DB" || return 1
+  elif database_identity_is_named \
+      "$env_file" "$quarantine_database" "$prior_database_oid"; then
+    if ! retry_database_rename "$env_file" \
+        "$quarantine_database" "$POSTGRES_DB" "$prior_database_oid"; then
+      echo "Ordinary restore rename did not succeed after retries; quiescing connections and reclaiming the canonical name." >&2
+      reclaim_database_name "$env_file" \
+        "$quarantine_database" "$POSTGRES_DB" "$prior_database_oid" || return 1
     fi
-    if database_exists "$env_file" "$old_name"; then
-      allow_database_connections "$env_file" "$old_name" || true
-    fi
+  else
     return 1
   fi
 
-  database_exists "$env_file" "$new_name" \
-    && ! database_exists "$env_file" "$old_name"
+  database_identity_has_connection_state \
+    "$env_file" "$POSTGRES_DB" "$prior_database_oid" true
+}
+
+verify_unpromoted_rollback_invariant() {
+  local env_file="$1"
+  local recovery_database="$2"
+  local quarantine_database="$3"
+  local prior_database_oid="$4"
+  local recovery_database_oid="$5"
+  local result
+
+  result="$(printf '%s\n' "
+SELECT CASE WHEN
+  EXISTS (
+    SELECT 1
+    FROM pg_catalog.pg_database
+    WHERE datname = :'canonical_database'
+      AND oid::text = :'prior_database_oid'
+      AND datallowconn
+  )
+  AND EXISTS (
+    SELECT 1
+    FROM pg_catalog.pg_database
+    WHERE datname = :'recovery_database'
+      AND oid::text = :'recovery_database_oid'
+      AND datallowconn
+  )
+  AND NOT EXISTS (
+    SELECT 1
+    FROM pg_catalog.pg_database
+    WHERE datname = :'quarantine_database'
+  )
+THEN 'unpromoted-rollback-ok'
+ELSE 'unpromoted-rollback-divergent'
+END;" | compose_env "$env_file" exec -T postgres \
+    psql --username "$POSTGRES_USER" --dbname postgres --no-psqlrc --quiet \
+      --tuples-only --no-align --set ON_ERROR_STOP=1 \
+      --set "canonical_database=$POSTGRES_DB" \
+      --set "recovery_database=$recovery_database" \
+      --set "quarantine_database=$quarantine_database" \
+      --set "prior_database_oid=$prior_database_oid" \
+      --set "recovery_database_oid=$recovery_database_oid" \
+      --file=-)" || return 1
+  result="$(printf '%s' "$result" | tr -d '[:space:]')"
+  [ "$result" = "unpromoted-rollback-ok" ]
 }
 
 verify_failed_promotion_rollback_invariant() {
@@ -624,33 +842,83 @@ promote_validated_recovery_database() {
   local failed_suffix=0
   local prior_database_oid recovery_database_oid
 
-  verify_recovery_backup "$backup" || fail "Recovery backup checksum no longer verifies."
-  validate_recovery_database "$env_file" "$recovery_database" \
-    "$expected_history" "$expected_catalog" \
-    || fail "Validated recovery database no longer passes Flyway/catalog/invariant checks."
-  database_exists "$env_file" "$POSTGRES_DB" \
-    || fail "Current database $POSTGRES_DB is unavailable; refusing recovery promotion."
-  prior_database_oid="$(database_oid "$env_file" "$POSTGRES_DB")" \
-    || fail "Could not identify the current database before recovery promotion."
-  recovery_database_oid="$(database_oid "$env_file" "$recovery_database")" \
-    || fail "Could not identify the recovery database before promotion."
-  [ "$prior_database_oid" != "$recovery_database_oid" ] \
-    || fail "Current and recovery database identities unexpectedly match."
+  if ! verify_recovery_backup "$backup"; then
+    fail "Recovery backup checksum no longer verifies."
+    return 1
+  fi
+  if ! validate_recovery_database "$env_file" "$recovery_database" \
+      "$expected_history" "$expected_catalog"; then
+    fail "Validated recovery database no longer passes Flyway/catalog/invariant checks."
+    return 1
+  fi
+  if ! database_exists "$env_file" "$POSTGRES_DB"; then
+    fail "Current database $POSTGRES_DB is unavailable; refusing recovery promotion."
+    return 1
+  fi
+  prior_database_oid="$(database_oid "$env_file" "$POSTGRES_DB")" || {
+    fail "Could not identify the current database before recovery promotion."
+    return 1
+  }
+  recovery_database_oid="$(database_oid "$env_file" "$recovery_database")" || {
+    fail "Could not identify the recovery database before promotion."
+    return 1
+  }
+  if [ "$prior_database_oid" = "$recovery_database_oid" ]; then
+    fail "Current and recovery database identities unexpectedly match."
+    return 1
+  fi
   if database_exists "$env_file" "$quarantine_database"; then
     fail "Quarantine database already exists and will not be overwritten: $quarantine_database"
+    return 1
   fi
   while database_exists "$env_file" "$failed_recovery_database"; do
     failed_suffix=$((failed_suffix + 1))
-    [ "$failed_suffix" -le 100 ] \
-      || fail "Could not allocate a unique quarantine name for failed recovery."
+    if [ "$failed_suffix" -gt 100 ]; then
+      fail "Could not allocate a unique quarantine name for failed recovery."
+      return 1
+    fi
     failed_recovery_database="${quarantine_database}_failed_${failed_suffix}"
   done
 
-  retry_database_rename "$env_file" "$POSTGRES_DB" "$quarantine_database" || return 1
-  if ! retry_database_rename "$env_file" "$recovery_database" "$POSTGRES_DB"; then
+  if ! retry_database_rename "$env_file" \
+      "$POSTGRES_DB" "$quarantine_database" "$prior_database_oid"; then
+    echo "Current database quarantine rename failed; reconciling the original database identity at the canonical name." >&2
+    if ! restore_prior_database_to_canonical \
+        "$env_file" "$quarantine_database" "$prior_database_oid"; then
+      if database_identity_is_named \
+          "$env_file" "$POSTGRES_DB" "$recovery_database_oid"; then
+        quiesce_database "$env_file" "$POSTGRES_DB" "$recovery_database_oid" || true
+      fi
+      echo "CRITICAL FAIL-CLOSED: could not restore or verify the original database at the canonical name; the recovery candidate was not accepted for service." >&2
+      return 1
+    fi
+    if ! verify_unpromoted_rollback_invariant "$env_file" \
+        "$recovery_database" "$quarantine_database" \
+        "$prior_database_oid" "$recovery_database_oid"; then
+      echo "CRITICAL FAIL-CLOSED: initial quarantine rollback identity is divergent; the recovery candidate was not accepted for service." >&2
+      return 1
+    fi
+    return 1
+  fi
+
+  if ! retry_database_rename "$env_file" \
+      "$recovery_database" "$POSTGRES_DB" "$recovery_database_oid"; then
     echo "Recovery promotion failed after quarantine; restoring the untouched current database name." >&2
-    retry_database_rename "$env_file" "$quarantine_database" "$POSTGRES_DB" \
-      || fail "CRITICAL: could not restore quarantined database to canonical name after promotion failure."
+    if ! restore_prior_database_to_canonical \
+        "$env_file" "$quarantine_database" "$prior_database_oid"; then
+      if database_identity_is_named \
+          "$env_file" "$POSTGRES_DB" "$recovery_database_oid"; then
+        quiesce_database "$env_file" "$POSTGRES_DB" "$recovery_database_oid" || true
+      fi
+      echo "CRITICAL FAIL-CLOSED: could not restore the quarantined original database after promotion failure; the recovery candidate was not accepted for service." >&2
+      return 1
+    fi
+    if ! verify_unpromoted_rollback_invariant "$env_file" \
+        "$recovery_database" "$quarantine_database" \
+        "$prior_database_oid" "$recovery_database_oid"; then
+      echo "CRITICAL FAIL-CLOSED: promotion rollback identity is divergent; the recovery candidate was not accepted for service." >&2
+      return 1
+    fi
     return 1
   fi
 
@@ -659,24 +927,38 @@ promote_validated_recovery_database() {
     echo "Promoted recovery failed validation; returning the quarantined current database to service." >&2
     while database_exists "$env_file" "$failed_recovery_database"; do
       failed_suffix=$((failed_suffix + 1))
-      [ "$failed_suffix" -le 100 ] \
-        || fail "Could not allocate a unique quarantine name for failed recovery."
+      if [ "$failed_suffix" -gt 100 ]; then
+        fail "Could not allocate a unique quarantine name for failed recovery."
+        return 1
+      fi
       failed_recovery_database="${quarantine_database}_failed_${failed_suffix}"
     done
-    if ! retry_database_rename "$env_file" "$POSTGRES_DB" "$failed_recovery_database"; then
+    if ! retry_database_rename "$env_file" \
+        "$POSTGRES_DB" "$failed_recovery_database" "$recovery_database_oid"; then
       echo "Failed recovery rename did not succeed after retries; quiescing connections and reclaiming the canonical name." >&2
-      reclaim_database_name "$env_file" "$POSTGRES_DB" "$failed_recovery_database" \
-        || fail "CRITICAL: could not move the failed recovery away from the canonical database name."
+      if ! reclaim_database_name "$env_file" \
+          "$POSTGRES_DB" "$failed_recovery_database" "$recovery_database_oid"; then
+        if quiesce_database \
+            "$env_file" "$POSTGRES_DB" "$recovery_database_oid"; then
+          echo "CRITICAL FAIL-CLOSED: the unvalidated recovery database could not be quarantined and remains at the canonical name with connections disabled; the original database remains quarantined." >&2
+        else
+          stop_database_service_fail_closed "$env_file"
+          echo "CRITICAL FAIL-CLOSED: the unvalidated recovery database could not be quarantined or quiesced; the PostgreSQL service is verified stopped to prevent exposure." >&2
+        fi
+        return 1
+      fi
     fi
-    if ! retry_database_rename "$env_file" "$quarantine_database" "$POSTGRES_DB"; then
-      echo "Quarantine restore rename did not succeed after retries; quiescing connections and reclaiming the canonical name." >&2
-      reclaim_database_name "$env_file" "$quarantine_database" "$POSTGRES_DB" \
-        || fail "CRITICAL: could not restore the prior quarantined database to the canonical name."
+    if ! restore_prior_database_to_canonical \
+        "$env_file" "$quarantine_database" "$prior_database_oid"; then
+      echo "CRITICAL FAIL-CLOSED: the unvalidated recovery database is isolated, but the original database could not be restored at the canonical name." >&2
+      return 1
     fi
-    verify_failed_promotion_rollback_invariant "$env_file" \
-      "$prior_database_oid" "$recovery_database_oid" \
-      "$quarantine_database" "$failed_recovery_database" \
-      || fail "CRITICAL: failed recovery rollback invariant is divergent; refusing further database changes."
+    if ! verify_failed_promotion_rollback_invariant "$env_file" \
+        "$prior_database_oid" "$recovery_database_oid" \
+        "$quarantine_database" "$failed_recovery_database"; then
+      echo "CRITICAL FAIL-CLOSED: failed recovery rollback identity is divergent; refusing further database changes." >&2
+      return 1
+    fi
     return 1
   fi
 

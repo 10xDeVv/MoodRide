@@ -10,6 +10,7 @@ import com.moodride.datamodels.RouteWaypoint;
 import com.moodride.datamodels.RouteWeightCalibration;
 import com.moodride.datamodels.ScenicScoreTile;
 import com.moodride.geo.H3Utils;
+import com.moodride.routeapi.config.ScenicCacheConfiguration;
 import com.moodride.routeapi.dto.RouteDetailResponse;
 import com.moodride.routeapi.dto.RouteJobStatusResponse;
 import com.moodride.routeapi.dto.RouteRatingRequest;
@@ -69,6 +70,7 @@ import static org.mockito.ArgumentMatchers.anyCollection;
 import static org.mockito.ArgumentMatchers.anyDouble;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.lenient;
@@ -80,6 +82,8 @@ import static org.mockito.Mockito.verifyNoInteractions;
 
 @ExtendWith(MockitoExtension.class)
 class RouteServiceTest {
+    private static final String SCENIC_SCORING_VERSION = "3.7-route-api-test";
+
 
     @Mock
     private RouteJobRepository jobRepository;
@@ -115,8 +119,8 @@ class RouteServiceTest {
         });
         lenient().when(calibrationRepository.findByVibeIn(anyCollection())).thenReturn(List.of());
         lenient().when(calibrationRepository.saveAll(anyCollection())).thenAnswer(invocation -> invocation.getArgument(0));
-        lenient().when(scenicScoreTileRepository.findByH3IndexIn(anyCollection())).thenReturn(List.of());
-        lenient().when(scenicScoreTileRepository.findScenicTilesNearPoint(anyDouble(), anyDouble(), anyDouble(), anyInt()))
+        lenient().when(scenicScoreTileRepository.findByH3IndexInAndScoringVersion(anyCollection(), anyString())).thenReturn(List.of());
+        lenient().when(scenicScoreTileRepository.findScenicTilesNearPoint(anyString(), anyDouble(), anyDouble(), anyDouble(), anyInt()))
             .thenReturn(List.of());
         lenient().when(kafkaTemplate.send(anyString(), anyString(), anyString()))
             .thenReturn(CompletableFuture.completedFuture(null));
@@ -451,7 +455,7 @@ class RouteServiceTest {
 
         lenient().when(routeRepository.findById(routeId)).thenReturn(Optional.of(route));
         lenient().when(jobRepository.findById(jobId)).thenReturn(Optional.of(job));
-        lenient().when(routeRepository.findByJobIdAndRouteProfileIsNotNullOrderByGeneratedAtAsc(jobId)).thenReturn(List.of(route));
+        lenient().when(routeRepository.findByJobIdOrderByGeneratedAtAsc(jobId)).thenReturn(List.of(route));
 
         RouteDetailResponse response = routeService.getRoute(routeId);
 
@@ -474,6 +478,17 @@ class RouteServiceTest {
         assertThat(response.routeOptions().getFirst().scoreBreakdown())
             .containsEntry("vibe_fit_score", 0.81);
         assertThat(response.computationTimeMs()).isEqualTo(4000);
+        verify(scenicScoreTileRepository).findByH3IndexInAndScoringVersion(
+            anyCollection(),
+            eq(SCENIC_SCORING_VERSION)
+        );
+        verify(scenicScoreTileRepository).findScenicTilesNearPoint(
+            eq(SCENIC_SCORING_VERSION),
+            anyDouble(),
+            anyDouble(),
+            anyDouble(),
+            anyInt()
+        );
     }
 
     @Test
@@ -510,7 +525,7 @@ class RouteServiceTest {
 
         lenient().when(routeRepository.findById(routeId)).thenReturn(Optional.of(route));
         lenient().when(jobRepository.findById(jobId)).thenReturn(Optional.of(job));
-        lenient().when(routeRepository.findByJobIdAndRouteProfileIsNotNullOrderByGeneratedAtAsc(jobId)).thenReturn(List.of(route));
+        lenient().when(routeRepository.findByJobIdOrderByGeneratedAtAsc(jobId)).thenReturn(List.of(route));
 
         RouteDetailResponse response = routeService.getRoute(routeId);
 
@@ -521,7 +536,7 @@ class RouteServiceTest {
     }
 
     @Test
-    void getRouteExcludesLegacyNullProfileRowsFromRouteOptions() {
+    void getRouteInfersMissingProfileForLegacyNullProfileRows() {
         UUID jobId = UUID.randomUUID();
         UUID userId = UUID.randomUUID();
         GeometryFactory geometryFactory = new GeometryFactory();
@@ -529,8 +544,8 @@ class RouteServiceTest {
         RouteJob job = new RouteJob(userId, 45.5152, -122.6784, 60, "coastal");
         job.setId(jobId);
         job.setStatus(RouteJob.JobStatus.COMPLETED);
-        job.setOptionRevision(1);
-        job.setOptionCount(1);
+        job.setOptionRevision(2);
+        job.setOptionCount(2);
         job.setOptionsComplete(true);
 
         Route primary = route(
@@ -542,18 +557,19 @@ class RouteServiceTest {
 
         when(routeRepository.findById(primary.getId())).thenReturn(Optional.of(primary));
         when(jobRepository.findById(jobId)).thenReturn(Optional.of(job));
-        when(routeRepository.findByJobIdAndRouteProfileIsNotNullOrderByGeneratedAtAsc(jobId))
+        when(routeRepository.findByJobIdOrderByGeneratedAtAsc(jobId))
             .thenReturn(List.of(primary, legacyUnprofiled));
 
         RouteDetailResponse response = routeService.getRoute(primary.getId());
 
         assertThat(response.routeOptions())
             .extracting(option -> option.profile())
-            .containsExactly("most_scenic");
+            .containsExactly("most_scenic", "balanced");
         assertThat(response.routeOptions())
-            .noneMatch(option -> option.routeId().equals(legacyUnprofiled.getId()));
+            .extracting(option -> option.routeId())
+            .containsExactly(primary.getId(), legacyUnprofiled.getId());
         assertThat(response.routeOptions()).hasSize(response.optionCount());
-        verify(routeRepository).findByJobIdAndRouteProfileIsNotNullOrderByGeneratedAtAsc(jobId);
+        verify(routeRepository).findByJobIdOrderByGeneratedAtAsc(jobId);
     }
 
     @Test
@@ -604,7 +620,7 @@ class RouteServiceTest {
             assertThat(alternativeCommitted.await(5, TimeUnit.SECONDS)).isTrue();
             return Optional.of(jobAtSnapshot);
         });
-        when(routeRepository.findByJobIdAndRouteProfileIsNotNullOrderByGeneratedAtAsc(jobId))
+        when(routeRepository.findByJobIdOrderByGeneratedAtAsc(jobId))
             .thenAnswer(ignored -> transactionManager.currentSnapshot().options());
 
         TransactionInterceptor transactionInterceptor = new TransactionInterceptor(
@@ -656,7 +672,7 @@ class RouteServiceTest {
     }
 
     @Test
-    void getRouteJobStatusProjectsCommittedPrimaryLifecycleWithoutRouteLookups() {
+    void getRouteJobStatusPreservesLightweightRouteOptionsWithPrimaryLifecycle() {
         UUID jobId = UUID.randomUUID();
         UUID userId = UUID.randomUUID();
         UUID routeId = UUID.randomUUID();
@@ -676,8 +692,16 @@ class RouteServiceTest {
         job.setOptionCount(1);
         job.setOptionsComplete(false);
         job.setRetryCount(1);
+        Route publishedRoute = statusRoute(
+            jobId,
+            routeId,
+            "most_scenic",
+            Instant.parse("2026-04-02T14:30:05Z")
+        );
 
         lenient().when(jobRepository.findById(jobId)).thenReturn(Optional.of(job));
+        when(routeRepository.findByJobIdOrderByGeneratedAtAsc(jobId))
+            .thenReturn(List.of(publishedRoute));
 
         RouteJobStatusResponse response = routeService.getRouteJobStatus(jobId);
 
@@ -689,6 +713,11 @@ class RouteServiceTest {
         assertThat(response.optionRevision()).isEqualTo(1);
         assertThat(response.optionCount()).isEqualTo(1);
         assertThat(response.optionsComplete()).isFalse();
+        assertThat(response.routeOptions())
+            .extracting(option -> option.profile())
+            .containsExactly("most_scenic");
+        assertThat(response.routeOptions().getFirst().routeId()).isEqualTo(routeId);
+        assertThat(response.routeOptions().getFirst().explanation()).isNull();
         assertThat(response.queuedAt()).isEqualTo(queuedAt);
         assertThat(response.startedAt()).isEqualTo(startedAt);
         assertThat(response.completedAt()).isNull();
@@ -697,7 +726,8 @@ class RouteServiceTest {
         assertThat(response.retryCount()).isEqualTo(1);
         assertThat(response.maxRetries()).isEqualTo(2);
         assertThat(response.routeMode()).isEqualTo("drive");
-        verifyNoInteractions(routeRepository, scenicScoreTileRepository);
+        verify(routeRepository).findByJobIdOrderByGeneratedAtAsc(jobId);
+        verifyNoInteractions(scenicScoreTileRepository);
     }
 
     @Test
@@ -718,8 +748,28 @@ class RouteServiceTest {
         job.setOptionRevision(3);
         job.setOptionCount(3);
         job.setOptionsComplete(true);
+        Route primary = statusRoute(
+            jobId,
+            routeId,
+            "most_scenic",
+            Instant.parse("2026-04-02T14:30:05Z")
+        );
+        Route balanced = statusRoute(
+            jobId,
+            UUID.randomUUID(),
+            "balanced",
+            Instant.parse("2026-04-02T14:30:06Z")
+        );
+        Route shorter = statusRoute(
+            jobId,
+            UUID.randomUUID(),
+            "shorter",
+            Instant.parse("2026-04-02T14:30:07Z")
+        );
 
         lenient().when(jobRepository.findById(jobId)).thenReturn(Optional.of(job));
+        when(routeRepository.findByJobIdOrderByGeneratedAtAsc(jobId))
+            .thenReturn(List.of(primary, balanced, shorter));
 
         RouteJobStatusResponse response = routeService.getRouteJobStatus(jobId);
 
@@ -731,9 +781,14 @@ class RouteServiceTest {
         assertThat(response.optionRevision()).isEqualTo(3);
         assertThat(response.optionCount()).isEqualTo(3);
         assertThat(response.optionsComplete()).isTrue();
+        assertThat(response.routeOptions())
+            .extracting(option -> option.profile())
+            .containsExactly("most_scenic", "balanced", "shorter");
+        assertThat(response.routeOptions()).allMatch(option -> option.explanation() == null);
         assertThat(response.completedAt()).isEqualTo(completedAt);
         assertThat(response.estimatedRemainingSeconds()).isNull();
-        verifyNoInteractions(routeRepository, scenicScoreTileRepository);
+        verify(routeRepository).findByJobIdOrderByGeneratedAtAsc(jobId);
+        verifyNoInteractions(scenicScoreTileRepository);
     }
 
     @Test
@@ -757,10 +812,8 @@ class RouteServiceTest {
         legacyRoute.setGeneratedAt(Instant.parse("2026-04-02T14:30:05Z"));
 
         when(jobRepository.findById(jobId)).thenReturn(Optional.of(job));
-        when(routeRepository.findByJobIdAndRouteProfileIsNotNullOrderByGeneratedAtAsc(jobId))
-            .thenReturn(List.of());
-        when(routeRepository.findTopByJobIdOrderByGeneratedAtAsc(jobId))
-            .thenReturn(Optional.of(legacyRoute));
+        when(routeRepository.findByJobIdOrderByGeneratedAtAsc(jobId))
+            .thenReturn(List.of(legacyRoute));
 
         RouteJobStatusResponse response = routeService.getRouteJobStatus(jobId);
 
@@ -771,9 +824,11 @@ class RouteServiceTest {
         assertThat(response.optionRevision()).isEqualTo(1);
         assertThat(response.optionCount()).isEqualTo(1);
         assertThat(response.optionsComplete()).isTrue();
+        assertThat(response.routeOptions())
+            .extracting(option -> option.profile())
+            .containsExactly("most_scenic");
         assertThat(response.completedAt()).isEqualTo(completedAt);
-        verify(routeRepository).findByJobIdAndRouteProfileIsNotNullOrderByGeneratedAtAsc(jobId);
-        verify(routeRepository).findTopByJobIdOrderByGeneratedAtAsc(jobId);
+        verify(routeRepository).findByJobIdOrderByGeneratedAtAsc(jobId);
     }
 
     @Test
@@ -803,7 +858,7 @@ class RouteServiceTest {
         primary.setGeneratedAt(primaryReadyAt);
 
         when(jobRepository.findById(jobId)).thenReturn(Optional.of(job));
-        when(routeRepository.findByJobIdAndRouteProfileIsNotNullOrderByGeneratedAtAsc(jobId))
+        when(routeRepository.findByJobIdOrderByGeneratedAtAsc(jobId))
             .thenReturn(List.of(balanced, primary));
 
         RouteJobStatusResponse response = routeService.getRouteJobStatus(jobId);
@@ -816,12 +871,14 @@ class RouteServiceTest {
         assertThat(response.optionRevision()).isEqualTo(1);
         assertThat(response.optionCount()).isEqualTo(1);
         assertThat(response.optionsComplete()).isFalse();
-        verify(routeRepository).findByJobIdAndRouteProfileIsNotNullOrderByGeneratedAtAsc(jobId);
-        verify(routeRepository, never()).findTopByJobIdOrderByGeneratedAtAsc(jobId);
+        assertThat(response.routeOptions())
+            .extracting(option -> option.profile())
+            .containsExactly("most_scenic");
+        verify(routeRepository).findByJobIdOrderByGeneratedAtAsc(jobId);
     }
 
     @Test
-    void getRouteJobStatusUsesChronologicalFallbackWhenProfilesHaveNoPrimary() {
+    void getRouteJobStatusUsesInferredMostScenicProfileBeforeEarlierNamedAlternative() {
         UUID jobId = UUID.randomUUID();
         UUID legacyRouteId = UUID.randomUUID();
         Instant primaryReadyAt = Instant.parse("2026-04-02T14:30:05Z");
@@ -838,17 +895,15 @@ class RouteServiceTest {
         balanced.setId(UUID.randomUUID());
         balanced.setJobId(jobId);
         balanced.setRouteProfile("balanced");
-        balanced.setGeneratedAt(primaryReadyAt);
+        balanced.setGeneratedAt(primaryReadyAt.minusSeconds(2));
         Route legacyRoute = new Route();
         legacyRoute.setId(legacyRouteId);
         legacyRoute.setJobId(jobId);
         legacyRoute.setGeneratedAt(primaryReadyAt.minusSeconds(1));
 
         when(jobRepository.findById(jobId)).thenReturn(Optional.of(job));
-        when(routeRepository.findByJobIdAndRouteProfileIsNotNullOrderByGeneratedAtAsc(jobId))
-            .thenReturn(List.of(balanced));
-        when(routeRepository.findTopByJobIdOrderByGeneratedAtAsc(jobId))
-            .thenReturn(Optional.of(legacyRoute));
+        when(routeRepository.findByJobIdOrderByGeneratedAtAsc(jobId))
+            .thenReturn(List.of(balanced, legacyRoute));
 
         RouteJobStatusResponse response = routeService.getRouteJobStatus(jobId);
 
@@ -859,9 +914,11 @@ class RouteServiceTest {
         assertThat(response.optionRevision()).isEqualTo(1);
         assertThat(response.optionCount()).isEqualTo(1);
         assertThat(response.optionsComplete()).isFalse();
+        assertThat(response.routeOptions())
+            .extracting(option -> option.profile())
+            .containsExactly("most_scenic");
         assertThat(response.estimatedRemainingSeconds()).isEqualTo(3);
-        verify(routeRepository).findByJobIdAndRouteProfileIsNotNullOrderByGeneratedAtAsc(jobId);
-        verify(routeRepository).findTopByJobIdOrderByGeneratedAtAsc(jobId);
+        verify(routeRepository).findByJobIdOrderByGeneratedAtAsc(jobId);
     }
 
     @Test
@@ -928,9 +985,9 @@ class RouteServiceTest {
 
         lenient().when(jobRepository.findById(jobId)).thenReturn(Optional.of(job));
         lenient().when(routeRepository.findById(route.getId())).thenReturn(Optional.of(route));
-        lenient().when(routeRepository.findByJobIdAndRouteProfileIsNotNullOrderByGeneratedAtAsc(jobId)).thenReturn(List.of(route));
-        lenient().when(scenicScoreTileRepository.findByH3IndexIn(anyCollection())).thenReturn(routeTiles);
-        lenient().when(scenicScoreTileRepository.findScenicTilesNearPoint(anyDouble(), anyDouble(), anyDouble(), anyInt()))
+        lenient().when(routeRepository.findByJobIdOrderByGeneratedAtAsc(jobId)).thenReturn(List.of(route));
+        lenient().when(scenicScoreTileRepository.findByH3IndexInAndScoringVersion(anyCollection(), anyString())).thenReturn(routeTiles);
+        lenient().when(scenicScoreTileRepository.findScenicTilesNearPoint(anyString(), anyDouble(), anyDouble(), anyDouble(), anyInt()))
             .thenReturn(baselineTiles);
 
         RouteDetailResponse response = routeService.getRoute(route.getId());
@@ -996,9 +1053,9 @@ class RouteServiceTest {
 
         lenient().when(jobRepository.findById(jobId)).thenReturn(Optional.of(job));
         lenient().when(routeRepository.findById(route.getId())).thenReturn(Optional.of(route));
-        lenient().when(routeRepository.findByJobIdAndRouteProfileIsNotNullOrderByGeneratedAtAsc(jobId)).thenReturn(List.of(route));
-        lenient().when(scenicScoreTileRepository.findByH3IndexIn(anyCollection())).thenReturn(routeTiles);
-        lenient().when(scenicScoreTileRepository.findScenicTilesNearPoint(anyDouble(), anyDouble(), anyDouble(), anyInt()))
+        lenient().when(routeRepository.findByJobIdOrderByGeneratedAtAsc(jobId)).thenReturn(List.of(route));
+        lenient().when(scenicScoreTileRepository.findByH3IndexInAndScoringVersion(anyCollection(), anyString())).thenReturn(routeTiles);
+        lenient().when(scenicScoreTileRepository.findScenicTilesNearPoint(anyString(), anyDouble(), anyDouble(), anyDouble(), anyInt()))
             .thenReturn(routeTiles);
 
         RouteDetailResponse response = routeService.getRoute(route.getId());
@@ -1059,9 +1116,9 @@ class RouteServiceTest {
 
         lenient().when(jobRepository.findById(jobId)).thenReturn(Optional.of(job));
         lenient().when(routeRepository.findById(route.getId())).thenReturn(Optional.of(route));
-        lenient().when(routeRepository.findByJobIdAndRouteProfileIsNotNullOrderByGeneratedAtAsc(jobId)).thenReturn(List.of(route));
-        lenient().when(scenicScoreTileRepository.findByH3IndexIn(anyCollection())).thenReturn(routeTiles);
-        lenient().when(scenicScoreTileRepository.findScenicTilesNearPoint(anyDouble(), anyDouble(), anyDouble(), anyInt()))
+        lenient().when(routeRepository.findByJobIdOrderByGeneratedAtAsc(jobId)).thenReturn(List.of(route));
+        lenient().when(scenicScoreTileRepository.findByH3IndexInAndScoringVersion(anyCollection(), anyString())).thenReturn(routeTiles);
+        lenient().when(scenicScoreTileRepository.findScenicTilesNearPoint(anyString(), anyDouble(), anyDouble(), anyDouble(), anyInt()))
             .thenReturn(routeTiles);
 
         RouteDetailResponse response = routeService.getRoute(route.getId());
@@ -1121,9 +1178,9 @@ class RouteServiceTest {
 
         lenient().when(jobRepository.findById(jobId)).thenReturn(Optional.of(job));
         lenient().when(routeRepository.findById(route.getId())).thenReturn(Optional.of(route));
-        lenient().when(routeRepository.findByJobIdAndRouteProfileIsNotNullOrderByGeneratedAtAsc(jobId)).thenReturn(List.of(route));
-        lenient().when(scenicScoreTileRepository.findByH3IndexIn(anyCollection())).thenReturn(routeTiles);
-        lenient().when(scenicScoreTileRepository.findScenicTilesNearPoint(anyDouble(), anyDouble(), anyDouble(), anyInt()))
+        lenient().when(routeRepository.findByJobIdOrderByGeneratedAtAsc(jobId)).thenReturn(List.of(route));
+        lenient().when(scenicScoreTileRepository.findByH3IndexInAndScoringVersion(anyCollection(), anyString())).thenReturn(routeTiles);
+        lenient().when(scenicScoreTileRepository.findScenicTilesNearPoint(anyString(), anyDouble(), anyDouble(), anyDouble(), anyInt()))
             .thenReturn(routeTiles);
 
         RouteDetailResponse response = routeService.getRoute(route.getId());
@@ -1175,9 +1232,9 @@ class RouteServiceTest {
 
         lenient().when(jobRepository.findById(jobId)).thenReturn(Optional.of(job));
         lenient().when(routeRepository.findById(route.getId())).thenReturn(Optional.of(route));
-        lenient().when(routeRepository.findByJobIdAndRouteProfileIsNotNullOrderByGeneratedAtAsc(jobId)).thenReturn(List.of(route));
-        lenient().when(scenicScoreTileRepository.findByH3IndexIn(anyCollection())).thenReturn(routeTiles);
-        lenient().when(scenicScoreTileRepository.findScenicTilesNearPoint(anyDouble(), anyDouble(), anyDouble(), anyInt()))
+        lenient().when(routeRepository.findByJobIdOrderByGeneratedAtAsc(jobId)).thenReturn(List.of(route));
+        lenient().when(scenicScoreTileRepository.findByH3IndexInAndScoringVersion(anyCollection(), anyString())).thenReturn(routeTiles);
+        lenient().when(scenicScoreTileRepository.findScenicTilesNearPoint(anyString(), anyDouble(), anyDouble(), anyDouble(), anyInt()))
             .thenReturn(baselineTiles);
 
         RouteDetailResponse response = routeService.getRoute(route.getId());
@@ -1218,9 +1275,9 @@ class RouteServiceTest {
 
         lenient().when(jobRepository.findById(jobId)).thenReturn(Optional.of(job));
         lenient().when(routeRepository.findById(routes.getFirst().getId())).thenReturn(Optional.of(routes.getFirst()));
-        lenient().when(routeRepository.findByJobIdAndRouteProfileIsNotNullOrderByGeneratedAtAsc(jobId)).thenReturn(routes);
-        lenient().when(scenicScoreTileRepository.findByH3IndexIn(anyCollection())).thenReturn(routeTiles);
-        lenient().when(scenicScoreTileRepository.findScenicTilesNearPoint(anyDouble(), anyDouble(), anyDouble(), anyInt()))
+        lenient().when(routeRepository.findByJobIdOrderByGeneratedAtAsc(jobId)).thenReturn(routes);
+        lenient().when(scenicScoreTileRepository.findByH3IndexInAndScoringVersion(anyCollection(), anyString())).thenReturn(routeTiles);
+        lenient().when(scenicScoreTileRepository.findScenicTilesNearPoint(anyString(), anyDouble(), anyDouble(), anyDouble(), anyInt()))
             .thenReturn(baselineTiles);
 
         RouteDetailResponse response = routeService.getRoute(routes.getFirst().getId());
@@ -1260,7 +1317,7 @@ class RouteServiceTest {
         List<Route> visibleRoutes = new ArrayList<>(List.of(primary));
         when(routeRepository.findById(primary.getId())).thenReturn(Optional.of(primary));
         when(jobRepository.findById(jobId)).thenReturn(Optional.of(job));
-        when(routeRepository.findByJobIdAndRouteProfileIsNotNullOrderByGeneratedAtAsc(jobId)).thenAnswer(ignored -> List.copyOf(visibleRoutes));
+        when(routeRepository.findByJobIdOrderByGeneratedAtAsc(jobId)).thenAnswer(ignored -> List.copyOf(visibleRoutes));
 
         ConcurrentMapCacheManager cacheManager = new ConcurrentMapCacheManager(CacheNames.ROUTE_DETAILS_V2);
         CacheInterceptor cacheInterceptor = new CacheInterceptor();
@@ -1307,7 +1364,7 @@ class RouteServiceTest {
 
         assertThat(cachedRouteService.getRoute(primary.getId())).isSameAs(completed);
         verify(routeRepository, times(2)).findById(primary.getId());
-        verify(routeRepository, times(2)).findByJobIdAndRouteProfileIsNotNullOrderByGeneratedAtAsc(jobId);
+        verify(routeRepository, times(2)).findByJobIdOrderByGeneratedAtAsc(jobId);
     }
 
     @Test
@@ -1323,8 +1380,9 @@ class RouteServiceTest {
         uncommittedRoute.setId(UUID.randomUUID());
         uncommittedRoute.setJobId(jobId);
         uncommittedRoute.setRouteProfile("most_scenic");
+        job.setRouteId(uncommittedRoute.getId());
         lenient().when(jobRepository.findById(jobId)).thenReturn(Optional.of(job));
-        lenient().when(routeRepository.findByJobIdAndRouteProfileIsNotNullOrderByGeneratedAtAsc(jobId))
+        lenient().when(routeRepository.findByJobIdOrderByGeneratedAtAsc(jobId))
             .thenReturn(List.of(uncommittedRoute));
 
         RouteJobStatusResponse response = routeService.getRouteJobStatus(jobId);
@@ -1337,16 +1395,20 @@ class RouteServiceTest {
         assertThat(response.optionRevision()).isZero();
         assertThat(response.optionCount()).isZero();
         assertThat(response.optionsComplete()).isFalse();
+        assertThat(response.routeOptions()).isEmpty();
         assertThat(response.estimatedRemainingSeconds()).isEqualTo(3);
         verifyNoInteractions(routeRepository, scenicScoreTileRepository);
     }
 
     private RouteService newRouteService() {
+        ScenicCacheConfiguration scenicCacheConfiguration = new ScenicCacheConfiguration();
+        scenicCacheConfiguration.setScenicScoringVersion(SCENIC_SCORING_VERSION);
         return new RouteService(
             jobRepository,
             routeRepository,
             calibrationRepository,
             scenicScoreTileRepository,
+            scenicCacheConfiguration,
             new RouteFailureGuidanceService(new ObjectMapper()),
             kafkaTemplate,
             dispatchService,
@@ -1473,6 +1535,23 @@ class RouteServiceTest {
     @SuppressWarnings("unchecked")
     private static Map<String, Object> castMap(Object value) {
         return (Map<String, Object>) value;
+    }
+
+    private static Route statusRoute(
+        UUID jobId,
+        UUID routeId,
+        String profile,
+        Instant generatedAt
+    ) {
+        Route route = new Route();
+        route.setId(routeId);
+        route.setJobId(jobId);
+        route.setRouteProfile(profile);
+        route.setScenicScore(0.75);
+        route.setTotalDistanceKm(25.0);
+        route.setEstimatedDurationMinutes(55);
+        route.setGeneratedAt(generatedAt);
+        return route;
     }
 
     private static Route route(UUID jobId,

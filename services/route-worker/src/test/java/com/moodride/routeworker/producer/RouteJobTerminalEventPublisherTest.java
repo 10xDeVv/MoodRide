@@ -130,6 +130,44 @@ class RouteJobTerminalEventPublisherTest {
     }
 
     @Test
+    void duplicateTerminalDeliveryCannotBypassScheduledBackoff() {
+        RouteJob job = failedJob();
+        RouteJobTerminalEvent event = terminalEvent(
+            job,
+            RouteJobTerminalEvent.EventType.COMPLETION,
+            null
+        );
+        when(eventRepository.lockPublishableForTerminal(
+            eq(job.getId()), eq(job.getStateRevision()), any(Instant.class)
+        )).thenAnswer(invocation -> {
+            Instant now = invocation.getArgument(2);
+            return event.getNextAttemptAt().isAfter(now) ? List.of() : List.of(event);
+        });
+        when(eventRepository.lockByEventId(event.getEventId())).thenReturn(Optional.of(event));
+        when(jobRepository.findById(job.getId())).thenReturn(Optional.of(job));
+        doThrow(new RouteCompletionProducer.PublicationException(
+            "notification unavailable",
+            new IllegalStateException("notification unavailable")
+        )).when(completionProducer).publishFailure(
+            any(RouteJobLifecycleService.LifecycleSnapshot.class),
+            eq(event.getEventId())
+        );
+        publisher = newPublisher(Duration.ofHours(1), Duration.ofHours(1));
+
+        publisher.publishPending(job.getId(), job.getStateRevision());
+        Instant retryAt = event.getNextAttemptAt();
+        publisher.publishPending(job.getId(), job.getStateRevision());
+
+        assertTrue(retryAt.isAfter(Instant.now()));
+        assertEquals(1, event.getAttemptCount());
+        assertNull(event.getDeliveredAt());
+        verify(completionProducer).publishFailure(
+            any(RouteJobLifecycleService.LifecycleSnapshot.class),
+            eq(event.getEventId())
+        );
+    }
+
+    @Test
     void failureNotificationAndDlqFailuresEachRetryWithStableBoundedIdentity() {
         RouteJob job = failedJob();
         Instant createdAt = job.getCompletedAt();
@@ -273,7 +311,15 @@ class RouteJobTerminalEventPublisherTest {
         assertNotNull(event.getDeliveredAt());
     }
 
+
     private RouteJobTerminalEventPublisher newPublisher() {
+        return newPublisher(Duration.ofSeconds(1), Duration.ofMinutes(1));
+    }
+
+    private RouteJobTerminalEventPublisher newPublisher(
+        Duration retryBaseDelay,
+        Duration retryMaxDelay
+    ) {
         return new RouteJobTerminalEventPublisher(
             eventRepository,
             jobRepository,
@@ -285,8 +331,8 @@ class RouteJobTerminalEventPublisherTest {
             Duration.ofSeconds(30),
             Duration.ofSeconds(1),
             10,
-            Duration.ofSeconds(1),
-            Duration.ofMinutes(1)
+            retryBaseDelay,
+            retryMaxDelay
         );
     }
 

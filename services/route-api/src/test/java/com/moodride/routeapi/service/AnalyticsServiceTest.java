@@ -126,7 +126,7 @@ class AnalyticsServiceTest {
                 1,
                 "COMPLETED",
                 9_000L,
-                null,
+                0.78,
                 Map.of("source", "test")
             ));
         }
@@ -143,11 +143,19 @@ class AnalyticsServiceTest {
             .allSatisfy(arguments -> {
                 assertThat(arguments[11]).isEqualTo(0.0);
                 assertThat(arguments[12]).isEqualTo(0L);
+                assertThat(arguments[13]).isEqualTo(0L);
+                assertThat(arguments[14]).isEqualTo(0L);
+                assertThat(arguments[15]).isEqualTo(0.0);
+                assertThat(arguments[16]).isEqualTo(0L);
             });
         assertThat(rollupArguments.getAllValues().subList(3, 5))
             .allSatisfy(arguments -> {
                 assertThat(arguments[11]).isEqualTo(9_000.0);
                 assertThat(arguments[12]).isEqualTo(1L);
+                assertThat(arguments[13]).isEqualTo(1L);
+                assertThat(arguments[14]).isEqualTo(1L);
+                assertThat(arguments[15]).isEqualTo(0.78);
+                assertThat(arguments[16]).isEqualTo(1L);
             });
     }
 

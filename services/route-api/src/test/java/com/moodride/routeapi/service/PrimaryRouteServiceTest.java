@@ -173,6 +173,61 @@ class PrimaryRouteServiceTest {
     }
 
     @Test
+    void completedLegacyJobWithoutStoredPrimaryIdUsesStatusCompatibleFallback() {
+        UUID routeId = UUID.randomUUID();
+        UUID jobId = UUID.randomUUID();
+        Route route = primaryRoute(
+            routeId,
+            jobId,
+            Instant.parse("2026-07-19T10:00:04Z"),
+            Instant.parse("2026-07-20T10:00:04Z")
+        );
+        route.setRouteProfile(null);
+        Route balanced = primaryRoute(
+            UUID.randomUUID(),
+            jobId,
+            Instant.parse("2026-07-19T10:00:03Z"),
+            Instant.parse("2026-07-20T10:00:03Z")
+        );
+        balanced.setRouteProfile("balanced");
+        RouteJob job = publishedJob(jobId, routeId, RouteJob.JobStatus.COMPLETED);
+        job.setRouteId(null);
+        RouteRepository.RouteOptionSummary legacySummary = optionSummary(
+            null,
+            routeId,
+            route.getScenicScore(),
+            route.getTotalDistanceKm(),
+            route.getEstimatedDurationMinutes()
+        );
+        RouteRepository.RouteOptionSummary balancedSummary = optionSummary(
+            "balanced",
+            balanced.getId(),
+            balanced.getScenicScore(),
+            balanced.getTotalDistanceKm(),
+            balanced.getEstimatedDurationMinutes()
+        );
+
+        when(routeRepository.findById(routeId)).thenReturn(Optional.of(route));
+        when(jobRepository.findById(jobId)).thenReturn(Optional.of(job));
+        when(routeRepository.findByJobIdOrderByGeneratedAtAsc(jobId))
+            .thenReturn(List.of(balanced, route));
+        when(routeRepository.findOptionSummariesByJobId(jobId))
+            .thenReturn(List.of(balancedSummary, legacySummary));
+
+        PrimaryRouteResponse response = primaryRouteService.getPrimaryRoute(routeId);
+
+        assertThat(response.routeId()).isEqualTo(routeId);
+        assertThat(response.jobId()).isEqualTo(jobId);
+        assertThat(response.routeUrl()).isEqualTo("/routes/route/" + routeId);
+        assertThat(response.profile()).isEqualTo("most_scenic");
+        assertThat(response.routeOptions())
+            .extracting(option -> option.profile())
+            .containsExactly("most_scenic", "balanced");
+        assertThat(response.routeOptions().getFirst().routeId()).isEqualTo(routeId);
+        verify(routeRepository).findByJobIdOrderByGeneratedAtAsc(jobId);
+    }
+
+    @Test
     void prePrimaryJobIsRejectedBeforeOptionLookup() {
         UUID routeId = UUID.randomUUID();
         UUID jobId = UUID.randomUUID();
@@ -375,6 +430,7 @@ class PrimaryRouteServiceTest {
         when(summary.getScenicScore()).thenReturn(scenicScore);
         when(summary.getTotalDistanceKm()).thenReturn(distanceKm);
         when(summary.getEstimatedDurationMinutes()).thenReturn(durationMinutes);
+        when(summary.getGeneratedAt()).thenReturn(Instant.EPOCH);
         return summary;
     }
 

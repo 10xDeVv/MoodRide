@@ -28,7 +28,7 @@ Environment variables:
   SYNTHETIC_JOB_TIMEOUT_SECONDS (default: 600)
   API_HEALTHCHECK_URL         (default: https://usewayward.app/api/scenic-regions?lat=45.94&lng=-66.63&radius=1)
   FRONTEND_HEALTHCHECK_URL    (default: https://usewayward.app/)
-  WS_HEALTHCHECK_URL          (default: https://usewayward.app/ws/info)
+  WS_HEALTHCHECK_URL          (default: https://usewayward.app/ws)
 EOF
 }
 
@@ -61,6 +61,26 @@ durable_copy() {
   cp -p "$source" "$temp"
   durable_replace "$temp" "$destination"
 }
+
+acquire_cutover_lock() {
+  local lock_file="$MOODRIDE_DIR/.deploy/prod-cutover.lock"
+  exec 9>>"$lock_file"
+  if ! flock -n 9; then
+    exec 9>&-
+    fail "Another production cutover holds $lock_file."
+    return 1
+  fi
+  CUTOVER_LOCK_HELD=1
+}
+
+release_cutover_lock() {
+  if [ "${CUTOVER_LOCK_HELD:-0}" -eq 1 ]; then
+    flock -u 9 >/dev/null 2>&1 || true
+    exec 9>&-
+    CUTOVER_LOCK_HELD=0
+  fi
+}
+
 clear_stale_runtime_evidence() {
   local deploy_dir="$MOODRIDE_DIR/.deploy"
   [ "${CUTOVER_LOCK_HELD:-0}" -eq 1 ] \
@@ -401,6 +421,49 @@ verify_control_bundle() {
     || fail "Control bundle manifest digest does not match its checksum-versioned path."
   (cd "$canonical_bundle" && LC_ALL=C sha256sum --check bundle.sha256)
 }
+
+require_adopted_control_prerequisite() {
+  local control_tag accepted_lock actual_sha256 runtime_identity
+  control_tag="sha-${EXPECTED_CONTROL_SOURCE_SHA}"
+  accepted_lock="$MOODRIDE_DIR/.deploy/releases/accepted-${control_tag}-${EXPECTED_CONTROL_RELEASE_LOCK_SHA256}.json"
+  if [ ! -L "$MOODRIDE_DIR/.deploy/current" ]; then
+    fail "Production deploy prerequisite failed: current V35 is not adopted. Run the separately approval-gated immutable control-adoption release, capture attributable Flyway >=V38 lineage and exact image/source/cache/algorithm identities, then install its checksum-qualified accepted control-lock and control-bundle pointer."
+    return 1
+  fi
+  PREVIOUS_CONTROL_BUNDLE="$(readlink -f "$MOODRIDE_DIR/.deploy/current")" \
+    || return 1
+  verify_control_bundle "$PREVIOUS_CONTROL_BUNDLE" || return 1
+  require_file "$PREVIOUS_CONTROL_BUNDLE/quality-acceptance.json" || return 1
+  require_file "$accepted_lock" || return 1
+  actual_sha256="$(sha256sum "$accepted_lock")" || return 1
+  actual_sha256="${actual_sha256%% *}"
+  if [ "$actual_sha256" != "$EXPECTED_CONTROL_RELEASE_LOCK_SHA256" ]; then
+    fail "Adopted control accepted-lock bytes do not match the checksum-qualified path."
+    return 1
+  fi
+  runtime_identity="$(jq -c '.artifacts.control.runtime_identity' "$QUALITY_ACCEPTANCE")" \
+    || return 1
+  if ! jq -e \
+      --arg source_sha "$EXPECTED_CONTROL_SOURCE_SHA" \
+      --arg source_url "$EXPECTED_GITHUB_SOURCE_URL" \
+      --argjson runtime_identity "$runtime_identity" '
+        .schema_version == 2
+        and .source_sha == $source_sha
+        and .source_url == $source_url
+        and .control_adoption.approval_gate == "production-control-adoption"
+        and (.control_adoption.flyway_schema_version | tonumber) >= 38
+        and (.control_adoption.flyway_history_sha256
+          | test("^[0-9a-f]{64}$"))
+        and .control_adoption.source_sha == .source_sha
+        and .control_adoption.images == .images
+        and .control_adoption.runtime_identity == $runtime_identity
+      ' "$accepted_lock" >/dev/null; then
+    fail "Current control lacks approval-gated attributable Flyway >=V38 adoption evidence."
+    return 1
+  fi
+  CONTROL_ACCEPTED_LOCK="$accepted_lock"
+}
+
 
 validate_candidate_control_bundle() {
   local env_file="$1"
@@ -820,6 +883,8 @@ assert_live_identity_value() {
     return 1
   fi
 }
+
+
 
 
 verify_live_quality_identity() {
@@ -1259,6 +1324,7 @@ verify_running_control_artifact_identity() {
         return 1
       }
   done
+  RUNNING_CONTROL_ARTIFACT_VERIFIED=1
   echo "Running application RepoDigests, revisions, and OCI source match the accepted control artifact."
 }
 verify_control_accepted_lock() {
@@ -1270,6 +1336,10 @@ verify_control_accepted_lock() {
       fail "Running control source does not select its accepted release-lock."
       return 1
     }
+  if [ "${LEGACY_CONTROL_BOOTSTRAP:-0}" -eq 1 ]; then
+    materialize_legacy_control_lock "$env_file" || return 1
+    return 0
+  fi
   lock_file="$MOODRIDE_DIR/.deploy/releases/accepted-${control_tag}-${EXPECTED_CONTROL_RELEASE_LOCK_SHA256}.json"
   require_file "$lock_file" || return 1
   require_file "${lock_file}.sha256" || return 1
@@ -1302,7 +1372,7 @@ verify_control_accepted_lock() {
       fail "Current accepted control release-lock does not bind its artifact source and images."
       return 1
     }
-  CURRENT_ACCEPTED_CONTROL_LOCK="$lock_file"
+  CURRENT_CONTROL_EVIDENCE="$lock_file"
 }
 
 
@@ -1641,6 +1711,64 @@ run_http_healthcheck() {
   done
 }
 
+run_sockjs_healthcheck() {
+  local name="$1"
+  local base_url="${2%/}"
+  local timeout_seconds="$3"
+  local start_ts now response
+  start_ts="$(date +%s)"
+  while true; do
+    response="$(curl --fail --silent --show-error --connect-timeout 10 --max-time 20 \
+      "${base_url}/info?t=$(date +%s)" 2>/dev/null || true)"
+    if printf '%s' "$response" | jq -e '
+        type == "object"
+        and .websocket == true
+        and (.cookie_needed | type == "boolean")
+        and (.origins | type == "array")
+        and (.entropy | type == "number")
+      ' >/dev/null 2>&1; then
+      echo "$name SockJS/WebSocket readiness passed."
+      return 0
+    fi
+    now="$(date +%s)"
+    if [ $((now - start_ts)) -ge "$timeout_seconds" ]; then
+      echo "$name SockJS/WebSocket readiness failed after ${timeout_seconds}s." >&2
+      return 1
+    fi
+    sleep 5
+  done
+}
+
+run_internal_sockjs_healthcheck() {
+  local name="$1"
+  local env_file="$2"
+  local service="$3"
+  local base_url="${4%/}"
+  local timeout_seconds="$5"
+  local start_ts now response
+  start_ts="$(date +%s)"
+  while true; do
+    response="$(compose_env "$env_file" exec -T "$service" \
+      wget -q -T 20 -O - "${base_url}/info?t=$(date +%s)" 2>/dev/null || true)"
+    if printf '%s' "$response" | jq -e '
+        type == "object"
+        and .websocket == true
+        and (.cookie_needed | type == "boolean")
+        and (.origins | type == "array")
+        and (.entropy | type == "number")
+      ' >/dev/null 2>&1; then
+      echo "$name internal SockJS/WebSocket readiness passed."
+      return 0
+    fi
+    now="$(date +%s)"
+    if [ $((now - start_ts)) -ge "$timeout_seconds" ]; then
+      echo "$name internal SockJS/WebSocket readiness failed after ${timeout_seconds}s." >&2
+      return 1
+    fi
+    sleep 5
+  done
+}
+
 run_internal_http_healthcheck() {
   local name="$1"
   local env_file="$2"
@@ -1953,8 +2081,8 @@ restore_predeploy_release() {
      || ! verify_service_running "$ENV_FILE" frontend \
      || ! run_internal_http_healthcheck "Restored frontend" "$ENV_FILE" frontend \
           http://127.0.0.1:3000/ "$HEALTHCHECK_TIMEOUT_SECONDS" \
-     || ! run_internal_http_healthcheck "Restored WebSocket handshake" "$ENV_FILE" notification-service \
-          http://127.0.0.1:8084/ws/info "$HEALTHCHECK_TIMEOUT_SECONDS"; then
+     || ! run_internal_sockjs_healthcheck "Restored WebSocket handshake" "$ENV_FILE" \
+          notification-service http://127.0.0.1:8084/ws "$HEALTHCHECK_TIMEOUT_SECONDS"; then
     compose_env "$ENV_FILE" stop caddy route-api route-worker notification-service frontend >/dev/null 2>&1 || true
     return 1
   fi
@@ -1972,7 +2100,8 @@ restore_predeploy_release() {
      || ! verify_running_caddy_image "$ENV_FILE" \
      || ! run_http_healthcheck "Restored API" "$API_HEALTHCHECK_URL" "$HEALTHCHECK_TIMEOUT_SECONDS" \
      || ! run_http_healthcheck "Restored frontend" "$FRONTEND_HEALTHCHECK_URL" "$HEALTHCHECK_TIMEOUT_SECONDS" \
-     || ! run_http_healthcheck "Restored WebSocket handshake" "$WS_HEALTHCHECK_URL" "$HEALTHCHECK_TIMEOUT_SECONDS"; then
+     || ! run_sockjs_healthcheck "Restored WebSocket handshake" "$WS_HEALTHCHECK_URL" \
+          "$HEALTHCHECK_TIMEOUT_SECONDS"; then
     compose_env "$ENV_FILE" stop caddy route-api route-worker notification-service frontend >/dev/null 2>&1 || true
     return 1
   fi
@@ -1980,11 +2109,7 @@ restore_predeploy_release() {
 }
 
 cleanup() {
-  if [ "${CUTOVER_LOCK_HELD:-0}" -eq 1 ]; then
-    flock -u 9 >/dev/null 2>&1 || true
-    exec 9>&-
-    CUTOVER_LOCK_HELD=0
-  fi
+  release_cutover_lock
 }
 
 deployment_error() {
@@ -2073,7 +2198,7 @@ SYNTHETIC_JOB_TIMEOUT_SECONDS=${SYNTHETIC_JOB_TIMEOUT_SECONDS:-600}
 SYNTHETIC_USER_ID=00000000-0000-0000-0000-000000000037
 API_HEALTHCHECK_URL=${API_HEALTHCHECK_URL:-https://usewayward.app/api/scenic-regions?lat=45.94\&lng=-66.63\&radius=1}
 FRONTEND_HEALTHCHECK_URL=${FRONTEND_HEALTHCHECK_URL:-https://usewayward.app/}
-WS_HEALTHCHECK_URL=${WS_HEALTHCHECK_URL:-https://usewayward.app/ws/info}
+WS_HEALTHCHECK_URL=${WS_HEALTHCHECK_URL:-https://usewayward.app/ws}
 DEPLOYMENT_ATTEMPT_ID=${DEPLOYMENT_ATTEMPT_ID:-}
 printf '%s' "$DEPLOYMENT_ATTEMPT_ID" \
   | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$' \
@@ -2133,19 +2258,18 @@ case "$BACKUP_DIR" in
     ;;
 esac
 
+require_adopted_control_prerequisite
+
 mkdir -p .deploy/releases .deploy/image-locks .deploy/bundles "$BACKUP_DIR"
 MAIN_PID="${BASHPID:-$$}"
 CUTOVER_LOCK_HELD=0
-exec 9>"$MOODRIDE_DIR/.deploy/prod-cutover.lock"
-if ! flock -n 9; then
-  fail "Another production cutover holds $MOODRIDE_DIR/.deploy/prod-cutover.lock."
-fi
-CUTOVER_LOCK_HELD=1
+acquire_cutover_lock
 clear_stale_runtime_evidence
 trap cleanup EXIT
 RECOVERY_ENABLED=0
 FAIL_CLOSED_ON_ERROR=0
 CURRENT_POINTER_SWITCHED=0
+RUNNING_CONTROL_ARTIFACT_VERIFIED=0
 
 ACCEPTED_LOCK="$MOODRIDE_DIR/.deploy/releases/accepted-${IMAGE_TAG}-${RELEASE_LOCK_SHA256}.json"
 if [ -e "$ACCEPTED_LOCK" ]; then
@@ -2199,44 +2323,7 @@ fi
 RECOVERY_DATABASE="wayward_recovery_$(date -u +'%Y%m%d%H%M%S')_${MAIN_PID}"
 RECOVERY_QUARANTINE_DATABASE="wayward_quarantine_$(date -u +'%Y%m%d%H%M%S')_${MAIN_PID}"
 
-if [ -L "$MOODRIDE_DIR/.deploy/current" ]; then
-  PREVIOUS_CONTROL_BUNDLE="$(readlink -f "$MOODRIDE_DIR/.deploy/current")"
-  RUNNING_CADDYFILE_EXPECTED="$PREVIOUS_CONTROL_BUNDLE/Caddyfile"
-elif [ -e "$MOODRIDE_DIR/.deploy/current" ]; then
-  fail "The current control-bundle pointer exists but is not a symbolic link."
-else
-  PREVIOUS_CONTROL_BUNDLE="$MOODRIDE_DIR"
-  RUNNING_CADDYFILE_EXPECTED="$MOODRIDE_DIR/Caddyfile"
-fi
-require_file "$PREVIOUS_CONTROL_BUNDLE/docker-compose.prod.yml"
-if [ "$PREVIOUS_CONTROL_BUNDLE" = "$MOODRIDE_DIR" ]; then
-  legacy_stage="$MOODRIDE_DIR/.deploy/bundles/.legacy-${MAIN_PID}.tmp"
-  rm -rf "$legacy_stage"
-  mkdir -p "$legacy_stage/scripts/deploy"
-  cp -p "$MOODRIDE_DIR/docker-compose.prod.yml" "$legacy_stage/"
-  cp -p "$MOODRIDE_DIR/Caddyfile" "$legacy_stage/"
-  for control_file in deploy_prod.sh rollback_prod.sh database_recovery.sh \
-      rollback_v41_v40_v39_to_v38.sql deploy_scenic_release.sh capture_prod_runtime.py; do
-    cp -p "$MOODRIDE_DIR/scripts/deploy/$control_file" "$legacy_stage/scripts/deploy/"
-  done
-  (
-    cd "$legacy_stage"
-    LC_ALL=C sha256sum docker-compose.prod.yml Caddyfile scripts/deploy/* > bundle.sha256
-    sha256sum --check bundle.sha256
-    sync -f bundle.sha256
-  )
-  legacy_bundle_sha="$(sha256sum "$legacy_stage/bundle.sha256")"
-  legacy_bundle_sha="${legacy_bundle_sha%% *}"
-  PREVIOUS_CONTROL_BUNDLE="$MOODRIDE_DIR/.deploy/bundles/${PREDEPLOY_TAG}-legacy-${legacy_bundle_sha}"
-  if [ -d "$PREVIOUS_CONTROL_BUNDLE" ]; then
-    verify_control_bundle "$PREVIOUS_CONTROL_BUNDLE"
-    rm -rf "$legacy_stage"
-  else
-    mv "$legacy_stage" "$PREVIOUS_CONTROL_BUNDLE"
-    sync -f "$MOODRIDE_DIR/.deploy/bundles"
-  fi
-fi
-verify_control_bundle "$PREVIOUS_CONTROL_BUNDLE"
+RUNNING_CADDYFILE_EXPECTED="$PREVIOUS_CONTROL_BUNDLE/Caddyfile"
 PREVIOUS_COMPOSE_FILE="$PREVIOUS_CONTROL_BUNDLE/docker-compose.prod.yml"
 PREVIOUS_CADDYFILE_PATH="$PREVIOUS_CONTROL_BUNDLE/Caddyfile"
 select_previous_control_bundle
@@ -2246,10 +2333,10 @@ chmod 600 "$PREDEPLOY_ENV"
 capture_running_image_refs "$PREDEPLOY_ENV" "$PREDEPLOY_ENV"
 capture_running_caddyfile_path "$PREDEPLOY_ENV" "$RUNNING_CADDYFILE_EXPECTED" \
   "$PREVIOUS_CONTROL_BUNDLE"
-verify_running_control_artifact_identity "$PREDEPLOY_ENV"
-verify_control_accepted_lock "$PREDEPLOY_ENV"
 ACTUAL_PREDEPLOY_TAG="$(get_env_var IMAGE_TAG "$PREDEPLOY_ENV")"
 validate_configured_running_tag "$PREDEPLOY_TAG" "$ACTUAL_PREDEPLOY_TAG"
+verify_running_control_artifact_identity "$PREDEPLOY_ENV"
+verify_control_accepted_lock "$PREDEPLOY_ENV"
 [ "$IMAGE_TAG" != "$ACTUAL_PREDEPLOY_TAG" ] \
   || fail "Candidate release equals the actual running source revision; no cutover is required."
 PREDEPLOY_TAG="$ACTUAL_PREDEPLOY_TAG"
@@ -2315,7 +2402,7 @@ wait_for_drain "$PREDEPLOY_ENV"
 
 echo "Stopping old application services before the image/schema boundary."
 select_previous_control_bundle
-compose_env "$PREDEPLOY_ENV" stop route-api route-worker notification-service
+compose_env "$PREDEPLOY_ENV" stop route-api route-worker notification-service frontend
 assert_no_active_jobs "$PREDEPLOY_ENV"
 evict_scenic_anchor_cache_namespaces "$PREDEPLOY_ENV"
 
@@ -2348,8 +2435,8 @@ verify_service_running "$ENV_FILE" notification-service
 verify_service_running "$ENV_FILE" frontend
 run_internal_http_healthcheck "Candidate frontend" "$ENV_FILE" frontend \
   http://127.0.0.1:3000/ "$HEALTHCHECK_TIMEOUT_SECONDS"
-run_internal_http_healthcheck "Candidate WebSocket handshake" "$ENV_FILE" notification-service \
-  http://127.0.0.1:8084/ws/info "$HEALTHCHECK_TIMEOUT_SECONDS"
+run_internal_sockjs_healthcheck "Candidate WebSocket handshake" "$ENV_FILE" \
+  notification-service http://127.0.0.1:8084/ws "$HEALTHCHECK_TIMEOUT_SECONDS"
 run_synthetic_route_smoke "$ENV_FILE" v41 candidate
 verify_live_quality_identity "$ENV_FILE" "$POSTGRES_DB" candidate
 
@@ -2364,6 +2451,8 @@ PREVIOUS_BUNDLE_MANIFEST_SHA256="$(sha256sum "$PREVIOUS_CONTROL_BUNDLE/bundle.sh
 PREVIOUS_BUNDLE_MANIFEST_SHA256="${PREVIOUS_BUNDLE_MANIFEST_SHA256%% *}"
 CURRENT_BUNDLE_MANIFEST_SHA256="$(sha256sum "$CONTROL_BUNDLE/bundle.sha256")"
 CURRENT_BUNDLE_MANIFEST_SHA256="${CURRENT_BUNDLE_MANIFEST_SHA256%% *}"
+PREVIOUS_CONTROL_EVIDENCE_SHA256="$(sha256sum "$CURRENT_CONTROL_EVIDENCE")"
+PREVIOUS_CONTROL_EVIDENCE_SHA256="${PREVIOUS_CONTROL_EVIDENCE_SHA256%% *}"
 {
   printf 'CURRENT_TAG=%s\n' "$IMAGE_TAG"
   printf 'CURRENT_RELEASE_LOCK_SHA256=%s\n' "$RELEASE_LOCK_SHA256"
@@ -2374,6 +2463,8 @@ CURRENT_BUNDLE_MANIFEST_SHA256="${CURRENT_BUNDLE_MANIFEST_SHA256%% *}"
   printf 'PREVIOUS_IMAGE_LOCK_SHA256=%s\n' "$PREVIOUS_IMAGE_LOCK_SHA256"
   printf 'PREVIOUS_CONTROL_BUNDLE=%s\n' "$PREVIOUS_CONTROL_BUNDLE"
   printf 'PREVIOUS_BUNDLE_MANIFEST_SHA256=%s\n' "$PREVIOUS_BUNDLE_MANIFEST_SHA256"
+  printf 'PREVIOUS_CONTROL_EVIDENCE=%s\n' "$CURRENT_CONTROL_EVIDENCE"
+  printf 'PREVIOUS_CONTROL_EVIDENCE_SHA256=%s\n' "$PREVIOUS_CONTROL_EVIDENCE_SHA256"
 } > "${ROLLBACK_SNAPSHOT}.tmp"
 chmod 600 "${ROLLBACK_SNAPSHOT}.tmp"
 durable_replace "${ROLLBACK_SNAPSHOT}.tmp" "$ROLLBACK_SNAPSHOT"
@@ -2402,6 +2493,7 @@ verify_service_running "$ENV_FILE" caddy
 verify_running_caddy_image "$ENV_FILE"
 run_http_healthcheck "Production API" "$API_HEALTHCHECK_URL" "$HEALTHCHECK_TIMEOUT_SECONDS"
 run_http_healthcheck "Production frontend" "$FRONTEND_HEALTHCHECK_URL" "$HEALTHCHECK_TIMEOUT_SECONDS"
-run_http_healthcheck "Production WebSocket handshake" "$WS_HEALTHCHECK_URL" "$HEALTHCHECK_TIMEOUT_SECONDS"
+run_sockjs_healthcheck "Production WebSocket handshake" "$WS_HEALTHCHECK_URL" \
+  "$HEALTHCHECK_TIMEOUT_SECONDS"
 FAIL_CLOSED_ON_ERROR=0
 echo "Deployment completed with immutable image tag: $IMAGE_TAG"

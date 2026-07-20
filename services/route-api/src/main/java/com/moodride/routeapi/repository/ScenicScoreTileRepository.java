@@ -15,7 +15,8 @@ public interface ScenicScoreTileRepository extends JpaRepository<ScenicScoreTile
         value = """
             SELECT *
             FROM scenic_score_tiles
-            WHERE ST_DWithin(
+            WHERE scoring_version = :scoringVersion
+              AND ST_DWithin(
                 geometry::geography,
                 ST_SetSRID(ST_MakePoint(:longitude, :latitude), 4326)::geography,
                 :radiusMeters
@@ -26,6 +27,7 @@ public interface ScenicScoreTileRepository extends JpaRepository<ScenicScoreTile
         nativeQuery = true
     )
     List<ScenicScoreTile> findTopScenicRegionsNearPoint(
+        @Param("scoringVersion") String scoringVersion,
         @Param("latitude") double latitude,
         @Param("longitude") double longitude,
         @Param("radiusMeters") double radiusMeters,
@@ -51,7 +53,8 @@ public interface ScenicScoreTileRepository extends JpaRepository<ScenicScoreTile
         value = """
             SELECT *
             FROM scenic_score_tiles
-            WHERE ST_DWithin(
+            WHERE scoring_version = :scoringVersion
+              AND ST_DWithin(
                 geometry::geography,
                 ST_SetSRID(ST_MakePoint(:longitude, :latitude), 4326)::geography,
                 :radiusMeters
@@ -62,11 +65,15 @@ public interface ScenicScoreTileRepository extends JpaRepository<ScenicScoreTile
         nativeQuery = true
     )
     List<ScenicScoreTile> findScenicTilesNearPoint(
+        @Param("scoringVersion") String scoringVersion,
         @Param("latitude") double latitude,
         @Param("longitude") double longitude,
         @Param("radiusMeters") double radiusMeters,
         @Param("limit") int limit
     );
 
-    List<ScenicScoreTile> findByH3IndexIn(Collection<String> h3Indexes);
+    List<ScenicScoreTile> findByH3IndexInAndScoringVersion(
+        Collection<String> h3Indexes,
+        String scoringVersion
+    );
 }

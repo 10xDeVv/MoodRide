@@ -122,6 +122,11 @@ type LifecycleCursor = {
   routeId: string | null;
 };
 
+type RouteResponseFlight = {
+  optionRevision: number;
+  promise: Promise<RouteDetailResponse>;
+};
+
 type DisplayedRouteRevision = {
   epoch: number;
   jobId: string;
@@ -644,7 +649,7 @@ export function RoutePlanner() {
   const selectionRequestRef = useRef(0);
   const pendingOptionIdRef = useRef("");
   const routeResponseCacheRef = useRef<Map<string, RouteDetailResponse>>(new Map());
-  const routeRequestFlightsRef = useRef<Map<string, Promise<RouteDetailResponse>>>(new Map());
+  const routeRequestFlightsRef = useRef<Map<string, RouteResponseFlight>>(new Map());
   const primaryFallbacksRef = useRef<Map<string, RouteDetailResponse>>(new Map());
   const richDetailsRef = useRef<Map<string, RouteDetailResponse>>(new Map());
   const milestoneKeysRef = useRef<Set<string>>(new Set());
@@ -866,13 +871,14 @@ export function RoutePlanner() {
     setSelectedOptionId(routeId);
   }, []);
 
-  const resolveRouteResponse = useCallback((
+  const resolveRouteResponse = useCallback(async (
     jobId: string,
     routeId: string,
     optionRevision: number,
     kind: RouteResponseKind,
     requireComplete: boolean,
-    signal: AbortSignal
+    signal: AbortSignal,
+    retryAfterLowerRevisionFailure = false
   ) => {
     const requestEpoch = activeEpochRef.current;
     const completenessKey = requireComplete ? "complete" : "partial";
@@ -901,13 +907,30 @@ export function RoutePlanner() {
         && cached.optionRevision >= optionRevision
         && (!requireComplete || cached.optionsComplete)
       ) {
-        return Promise.resolve(cached);
+        return cached;
       }
       routeResponseCacheRef.current.delete(requestKey);
     }
 
     const inFlight = routeRequestFlightsRef.current.get(requestKey);
-    if (inFlight) return inFlight.then(validateResponse);
+    if (inFlight) {
+      try {
+        return validateResponse(await inFlight.promise);
+      } catch (error) {
+        if (
+          !retryAfterLowerRevisionFailure
+          || inFlight.optionRevision >= optionRevision
+          || signal.aborted
+        ) {
+          throw error;
+        }
+      }
+
+      const replacementFlight = routeRequestFlightsRef.current.get(requestKey);
+      if (replacementFlight && replacementFlight !== inFlight) {
+        return validateResponse(await replacementFlight.promise);
+      }
+    }
 
     const request = (kind === "primary"
       ? getPrimaryRoute(routeId, signal).then(adaptPrimaryRoute)
@@ -950,14 +973,13 @@ export function RoutePlanner() {
       return detail;
     });
 
-
     const trackedRequest = request.finally(() => {
-      if (routeRequestFlightsRef.current.get(requestKey) === trackedRequest) {
+      if (routeRequestFlightsRef.current.get(requestKey)?.promise === trackedRequest) {
         routeRequestFlightsRef.current.delete(requestKey);
       }
     });
-    routeRequestFlightsRef.current.set(requestKey, trackedRequest);
-    return trackedRequest.then(validateResponse);
+    routeRequestFlightsRef.current.set(requestKey, { optionRevision, promise: trackedRequest });
+    return validateResponse(await trackedRequest);
   }, []);
 
   const applyDisplayedRoute = useCallback((
@@ -1228,7 +1250,8 @@ export function RoutePlanner() {
         source: LifecycleSource,
         stateRevision: number,
         statusRank: number,
-        optionRevision: number
+        optionRevision: number,
+        retryAfterLowerRevisionFailure = false
       ) => {
         if (!update.routeId) return null;
 
@@ -1249,7 +1272,8 @@ export function RoutePlanner() {
           optionRevision,
           alternativeSelected ? "detail" : "primary",
           false,
-          controller.signal
+          controller.signal,
+          retryAfterLowerRevisionFailure
         );
         const cursor = lifecycleCursorRef.current;
         if (
@@ -1385,6 +1409,10 @@ export function RoutePlanner() {
           rearmWsGrace();
         }
 
+        if (status === "primary_ready" && !lifecycleUpdate.routeId) {
+          return;
+        }
+
         const cursor = lifecycleCursorRef.current;
         const displayed = displayedRevisionRef.current;
         const retryingUnrenderedPrimary = (
@@ -1437,7 +1465,6 @@ export function RoutePlanner() {
         }
 
         if (status === "primary_ready") {
-          if (!lifecycleUpdate.routeId) return;
           try {
             await renderPrimary(lifecycleUpdate, source, stateRevision, statusRank, optionRevision);
           } catch (error) {
@@ -1513,7 +1540,8 @@ export function RoutePlanner() {
                 source,
                 stateRevision,
                 statusRank,
-                optionRevision
+                optionRevision,
+                true
               );
             } catch (error) {
               if (!isAbortError(error)) {

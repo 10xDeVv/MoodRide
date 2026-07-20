@@ -420,10 +420,14 @@ public class AnalyticsService {
         };
         double generationMsTotal = !firstLatencyMilestone && event.getDurationMs() != null ? event.getDurationMs() : 0.0;
         long generationMsCount = !firstLatencyMilestone && event.getDurationMs() != null ? 1L : 0L;
-        long routeOptionsTotal = event.getRouteCount() == null ? 0L : event.getRouteCount();
-        long routeOptionsCount = event.getRouteCount() == null ? 0L : 1L;
-        double scenicScoreTotal = event.getScenicScore() == null ? 0.0 : event.getScenicScore();
-        long scenicScoreCount = event.getScenicScore() == null ? 0L : 1L;
+        long routeOptionsTotal = !firstLatencyMilestone && event.getRouteCount() != null
+            ? event.getRouteCount()
+            : 0L;
+        long routeOptionsCount = !firstLatencyMilestone && event.getRouteCount() != null ? 1L : 0L;
+        double scenicScoreTotal = !firstLatencyMilestone && event.getScenicScore() != null
+            ? event.getScenicScore()
+            : 0.0;
+        long scenicScoreCount = !firstLatencyMilestone && event.getScenicScore() != null ? 1L : 0L;
 
         String sql = """
             INSERT INTO route_analytics_daily (

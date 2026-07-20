@@ -1,4 +1,5 @@
 package com.moodride.routeapi.cache;
+import com.moodride.routeapi.config.RouteApiSchedulingConfiguration;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -25,7 +26,11 @@ public class CacheWarmupScheduler {
         this.limit = limit;
     }
 
-    @Scheduled(fixedDelayString = "${moodride.cache.warmup.interval-ms:3600000}", initialDelayString = "${moodride.cache.warmup.initial-delay-ms:30000}")
+    @Scheduled(
+        fixedDelayString = "${moodride.cache.warmup.interval-ms:3600000}",
+        initialDelayString = "${moodride.cache.warmup.initial-delay-ms:30000}",
+        scheduler = RouteApiSchedulingConfiguration.CACHE_WARMUP_TASK_SCHEDULER
+    )
     public void warmCachesOnSchedule() {
         if (!enabled) {
             return;

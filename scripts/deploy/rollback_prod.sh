@@ -25,7 +25,7 @@ Environment variables:
   SYNTHETIC_JOB_TIMEOUT_SECONDS (default: 600)
   API_HEALTHCHECK_URL         (default: https://usewayward.app/api/scenic-regions?lat=45.94&lng=-66.63&radius=1)
   FRONTEND_HEALTHCHECK_URL    (default: https://usewayward.app/)
-  WS_HEALTHCHECK_URL          (default: https://usewayward.app/ws/info)
+  WS_HEALTHCHECK_URL          (default: https://usewayward.app/ws)
 EOF
 }
 
@@ -40,6 +40,54 @@ require_file() {
 
 require_command() {
   command -v "$1" >/dev/null 2>&1 || fail "Required command not found: $1"
+}
+
+durable_replace() {
+  local temp="$1"
+  local destination="$2"
+  sync -f "$temp"
+  mv -f "$temp" "$destination"
+  sync -f "$destination"
+  sync -f "$(dirname "$destination")"
+}
+
+durable_copy() {
+  local source="$1"
+  local destination="$2"
+  local temp="${destination}.${MAIN_PID:-$$}.tmp"
+  rm -f "$temp"
+  cp -p "$source" "$temp"
+  durable_replace "$temp" "$destination"
+}
+
+acquire_cutover_lock() {
+  local lock_file="$MOODRIDE_DIR/.deploy/prod-cutover.lock"
+  exec 9>>"$lock_file"
+  if ! flock -n 9; then
+    exec 9>&-
+    fail "Another production cutover holds $lock_file."
+    return 1
+  fi
+  CUTOVER_LOCK_HELD=1
+}
+
+release_cutover_lock() {
+  if [ "${CUTOVER_LOCK_HELD:-0}" -eq 1 ]; then
+    flock -u 9 >/dev/null 2>&1 || true
+    exec 9>&-
+    CUTOVER_LOCK_HELD=0
+  fi
+}
+
+switch_control_bundle_pointer() {
+  local bundle="$1"
+  local pointer="$MOODRIDE_DIR/.deploy/current"
+  local temp="${pointer}.${MAIN_PID:-$$}.tmp"
+  verify_control_bundle "$bundle"
+  rm -f "$temp"
+  ln -s "$bundle" "$temp"
+  mv -Tf "$temp" "$pointer"
+  sync -f "$MOODRIDE_DIR/.deploy"
 }
 
 require_positive_integer() {
@@ -99,6 +147,85 @@ validate_configured_running_tag() {
       ;;
     *) fail "Configured IMAGE_TAG does not equal the actual running source revision." ;;
   esac
+}
+
+reject_template_placeholder() {
+  local key="$1"
+  local value="$2"
+  case "$value" in
+    replace-with-*|*placeholder*)
+      fail "Rollback environment value is still a template placeholder: $key"
+      return 1
+      ;;
+  esac
+}
+
+validate_rollback_env() {
+  local env_file="$1"
+  local control_bundle="$2"
+  local key value namespace
+  for key in POSTGRES_DB POSTGRES_USER POSTGRES_PASSWORD REDIS_PASSWORD \
+      MOODRIDE_ANALYTICS_HASH_SECRET MOODRIDE_SCENIC_SCORING_VERSION \
+      MOODRIDE_ROAD_DATASET_REVISION MOODRIDE_ROAD_DATASET_FINGERPRINT \
+      MOODRIDE_ROAD_ANCHOR_CACHE_SCHEMA GHCR_NAMESPACE OSRM_IMAGE_REF \
+      OSRM_DATASET_BASENAME OSRM_FILE_MANIFEST_SHA256 SPRING_PROFILES_ACTIVE \
+      MOODRIDE_ALGORITHM_PROFILE MOODRIDE_ALGORITHM_MODE \
+      MOODRIDE_CACHE_GRAPH_WARMUP_ENABLED IMAGE_TAG ROUTE_API_IMAGE_REF \
+      ROUTE_WORKER_IMAGE_REF NOTIFICATION_SERVICE_IMAGE_REF FRONTEND_IMAGE_REF \
+      CADDY_IMAGE_REF CADDYFILE_PATH; do
+    value="$(get_env_var "$key" "$env_file")"
+    [ -n "$value" ] \
+      || {
+        fail "Required rollback environment value is missing: $key"
+        return 1
+      }
+    reject_template_placeholder "$key" "$value" || return 1
+  done
+  printf '%s' "$(get_env_var IMAGE_TAG "$env_file")" | grep -Eq '^sha-[0-9a-f]{40}$' \
+    || {
+      fail "Rollback IMAGE_TAG must identify an exact source revision."
+      return 1
+    }
+  printf '%s' "$(get_env_var MOODRIDE_ROAD_DATASET_FINGERPRINT "$env_file")" \
+    | grep -Eq '^[0-9a-f]{64}$' \
+    || {
+      fail "Rollback road dataset fingerprint must be a sha256 value."
+      return 1
+    }
+  printf '%s' "$(get_env_var OSRM_FILE_MANIFEST_SHA256 "$env_file")" \
+    | grep -Eq '^[0-9a-f]{64}$' \
+    || {
+      fail "Rollback OSRM dataset manifest identity must be a sha256 value."
+      return 1
+    }
+  namespace="$(get_env_var GHCR_NAMESPACE "$env_file")"
+  printf '%s' "$namespace" | grep -Eq '^[a-z0-9][a-z0-9._-]*$' \
+    || {
+      fail "Rollback GHCR namespace is invalid."
+      return 1
+    }
+  validate_image_reference "$namespace" moodride-route-api \
+    "$(get_env_var ROUTE_API_IMAGE_REF "$env_file")" || return 1
+  validate_image_reference "$namespace" moodride-route-worker \
+    "$(get_env_var ROUTE_WORKER_IMAGE_REF "$env_file")" || return 1
+  validate_image_reference "$namespace" moodride-notification-service \
+    "$(get_env_var NOTIFICATION_SERVICE_IMAGE_REF "$env_file")" || return 1
+  validate_image_reference "$namespace" moodride-frontend \
+    "$(get_env_var FRONTEND_IMAGE_REF "$env_file")" || return 1
+  printf '%s' "$(get_env_var OSRM_IMAGE_REF "$env_file")" \
+    | grep -Eq '^ghcr\.io/project-osrm/osrm-backend@sha256:[0-9a-f]{64}$' \
+    || {
+      fail "Rollback OSRM image is not pinned to the exact repository digest."
+      return 1
+    }
+  validate_caddy_image_reference "$(get_env_var CADDY_IMAGE_REF "$env_file")" \
+    || return 1
+  [ "$(get_env_var CADDYFILE_PATH "$env_file")" = "$control_bundle/Caddyfile" ] \
+    || {
+      fail "Rollback Caddyfile path does not select the verified control bundle."
+      return 1
+    }
+  require_file "$control_bundle/Caddyfile"
 }
 
 
@@ -318,6 +445,72 @@ verify_local_caddy_image() {
   actual_ref="$(resolve_repo_digest "$image_id" caddy)"
   [ "$actual_ref" = "$expected_ref" ] \
     || { fail "Local Caddy RepoDigest does not equal the checksummed rollback image lock."; return 1; }
+}
+
+verify_local_osrm_image() {
+  local env_file="$1"
+  local expected_ref image_id actual_ref
+  expected_ref="$(get_env_var OSRM_IMAGE_REF "$env_file")"
+  printf '%s' "$expected_ref" \
+    | grep -Eq '^ghcr\.io/project-osrm/osrm-backend@sha256:[0-9a-f]{64}$' \
+    || {
+      fail "Rollback OSRM image reference is not an exact repository digest."
+      return 1
+    }
+  image_id="$(docker image inspect --format '{{.Id}}' "$expected_ref")" \
+    || {
+      fail "Exact OSRM rollback image is unavailable locally."
+      return 1
+    }
+  actual_ref="$(resolve_repo_digest "$image_id" ghcr.io/project-osrm/osrm-backend)"
+  [ "$actual_ref" = "$expected_ref" ] \
+    || {
+      fail "Local OSRM RepoDigest does not equal the checksummed rollback image lock."
+      return 1
+    }
+}
+
+verify_running_osrm_identity() {
+  local env_file="$1"
+  local container_id image_id configured_ref actual_ref expected_ref basename
+  local config_cmd args expected_config_cmd expected_args manifest_file manifest_hash
+  expected_ref="$(get_env_var OSRM_IMAGE_REF "$env_file")"
+  basename="$(get_env_var OSRM_DATASET_BASENAME "$env_file")"
+  container_id="$(running_container_for_service osrm)"
+  [ "$(docker inspect --format '{{.State.Running}}' "$container_id")" = "true" ] \
+    || {
+      fail "Rollback OSRM container is not running."
+      return 1
+    }
+  image_id="$(docker inspect --format '{{.Image}}' "$container_id")"
+  configured_ref="$(docker inspect --format '{{.Config.Image}}' "$container_id")"
+  actual_ref="$(resolve_repo_digest "$image_id" ghcr.io/project-osrm/osrm-backend)"
+  [ "$configured_ref" = "$expected_ref" ] && [ "$actual_ref" = "$expected_ref" ] \
+    || {
+      fail "Running OSRM does not use the exact checksummed rollback image."
+      return 1
+    }
+  config_cmd="$(docker inspect --format '{{json .Config.Cmd}}' "$container_id")"
+  args="$(docker inspect --format '{{json .Args}}' "$container_id")"
+  expected_config_cmd="$(jq -cn --arg path "/data/${basename}.osrm" \
+    '["osrm-routed", "--algorithm", "mld", $path]')"
+  expected_args="$(jq -cn --arg path "/data/${basename}.osrm" \
+    '["--algorithm", "mld", $path]')"
+  [ "$config_cmd" = "$expected_config_cmd" ] && [ "$args" = "$expected_args" ] \
+    || {
+      fail "Running OSRM command does not select the exact rollback MLD dataset."
+      return 1
+    }
+  manifest_file="${env_file}.running-osrm-files.tmp"
+  write_osrm_file_manifest "$MOODRIDE_DIR/data/osrm" "$basename" "$manifest_file"
+  manifest_hash="$(sha256sum "$manifest_file")"
+  manifest_hash="${manifest_hash%% *}"
+  rm -f "$manifest_file"
+  [ "$manifest_hash" = "$(get_env_var OSRM_FILE_MANIFEST_SHA256 "$env_file")" ] \
+    || {
+      fail "Running OSRM sidecar manifest differs from the checksummed rollback dataset."
+      return 1
+    }
 }
 
 verify_running_caddy_image() {
@@ -541,6 +734,7 @@ load_image_lock() {
     || fail "Rollback target OSRM canonical sidecar manifest differs from the checksummed image lock."
   set_env_var OSRM_IMAGE_REF "$osrm_ref" "$target_env"
   set_env_var OSRM_DATASET_BASENAME "$osrm_basename" "$target_env"
+  set_env_var OSRM_FILE_MANIFEST_SHA256 "$osrm_manifest" "$target_env"
   caddy_ref="$(get_env_var CADDY_IMAGE_REF "$lock_file")"
   validate_caddy_image_reference "$caddy_ref" \
     || { fail "Rollback image lock Caddy reference is invalid."; return 1; }
@@ -589,9 +783,13 @@ verify_current_release_fence() {
     || fail "Current quality acceptance source does not match expected-current SHA."
   [ "$(jq -er '.release_lock_sha256' "$quality_file")" = "$expected_checksum" ] \
     || fail "Current quality acceptance is not bound to expected-current release-lock bytes."
-  osrm_ref="$(jq -er '.osrm.image_ref' "$quality_file")"
-  osrm_basename="$(jq -er '.osrm.dataset_basename' "$quality_file")"
-  expected_manifest="$(jq -er '.osrm.file_manifest_sha256' "$quality_file")"
+  osrm_ref="$(jq -er '.artifacts.candidate.runtime_identity.osrm.image_ref' "$quality_file")"
+  osrm_basename="$(
+    jq -er '.artifacts.candidate.runtime_identity.osrm.dataset_basename' "$quality_file"
+  )"
+  expected_manifest="$(
+    jq -er '.artifacts.candidate.runtime_identity.osrm.file_manifest_sha256' "$quality_file"
+  )"
   [ "$(get_env_var OSRM_IMAGE_REF "$env_file")" = "$osrm_ref" ] \
     || fail "Running OSRM image differs from the expected-current quality fence."
   [ "$(get_env_var OSRM_DATASET_BASENAME "$env_file")" = "$osrm_basename" ] \
@@ -603,7 +801,58 @@ verify_current_release_fence() {
   rm -f "$manifest_file"
   [ "$actual_manifest" = "$expected_manifest" ] \
     || fail "Running OSRM canonical sidecar manifest differs from the expected-current quality fence."
+  set_env_var OSRM_FILE_MANIFEST_SHA256 "$expected_manifest" "$env_file"
   verify_running_caddy_image "$env_file" || return 1
+}
+
+load_expected_github_source_url() {
+  local expected_tag="$1"
+  local expected_checksum="$2"
+  local lock_file actual_checksum locked_source
+  lock_file="$MOODRIDE_DIR/.deploy/releases/accepted-${expected_tag}-${expected_checksum}.json"
+  require_file "$lock_file"
+  actual_checksum="$(sha256sum "$lock_file")"
+  actual_checksum="${actual_checksum%% *}"
+  [ "$actual_checksum" = "$expected_checksum" ] \
+    || fail "Current accepted release-lock checksum diverged before source attribution."
+  locked_source="$(jq -er '.source_url' "$lock_file")"
+  printf '%s' "$locked_source" \
+    | grep -Eq '^https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$' \
+    || fail "Current accepted release-lock contains an invalid source URL."
+  if [ -n "${EXPECTED_GITHUB_SOURCE_URL:-}" ] \
+      && [ "$EXPECTED_GITHUB_SOURCE_URL" != "$locked_source" ]; then
+    fail "Configured rollback source URL differs from the checksummed current release-lock."
+    return 1
+  fi
+  EXPECTED_GITHUB_SOURCE_URL="$locked_source"
+}
+
+verify_target_control_evidence() {
+  local evidence_file="$1"
+  local target_env="$2"
+  local target_tag="$3"
+  local repository key actual_ref locked_ref
+  [ "$(jq -er '.schema_version' "$evidence_file")" = "2" ] \
+    || fail "Rollback target control evidence schema is unsupported."
+  [ "$(jq -er '.source_sha' "$evidence_file")" = "${target_tag#sha-}" ] \
+    || fail "Rollback target control evidence source differs from the image lock."
+  [ "$(jq -er '.source_url' "$evidence_file")" = "$EXPECTED_GITHUB_SOURCE_URL" ] \
+    || fail "Rollback target control evidence repository differs from the current release."
+  [ "$(jq -er '.image_tag' "$evidence_file")" = "$target_tag" ] \
+    || fail "Rollback target control evidence tag differs from the image lock."
+  for repository in moodride-route-api moodride-route-worker \
+      moodride-notification-service moodride-frontend; do
+    case "$repository" in
+      moodride-route-api) key=route_api ;;
+      moodride-route-worker) key=route_worker ;;
+      moodride-notification-service) key=notification_service ;;
+      moodride-frontend) key=frontend ;;
+    esac
+    actual_ref="$(image_ref_for_repository "$target_env" "$repository")"
+    locked_ref="$(jq -er --arg key "$key" '.images[$key].ref' "$evidence_file")"
+    [ "$actual_ref" = "$locked_ref" ] \
+      || fail "Rollback target $repository differs from its checksummed control evidence."
+  done
 }
 
 verify_target_image_revisions() {
@@ -625,6 +874,7 @@ verify_target_image_revisions() {
       || fail "Rollback digest for $repository does not match the expected GitHub OCI source."
   done
   verify_local_caddy_image "$env_file" || return 1
+  verify_local_osrm_image "$env_file" || return 1
   echo "Rollback digest pins match recorded source revision $tag."
 }
 
@@ -734,6 +984,64 @@ run_http_healthcheck() {
       return 1
     fi
 
+    sleep 5
+  done
+}
+
+run_sockjs_healthcheck() {
+  local name="$1"
+  local base_url="${2%/}"
+  local timeout_seconds="$3"
+  local start_ts now response
+  start_ts="$(date +%s)"
+  while true; do
+    response="$(curl --fail --silent --show-error --connect-timeout 10 --max-time 20 \
+      "${base_url}/info?t=$(date +%s)" 2>/dev/null || true)"
+    if printf '%s' "$response" | jq -e '
+        type == "object"
+        and .websocket == true
+        and (.cookie_needed | type == "boolean")
+        and (.origins | type == "array")
+        and (.entropy | type == "number")
+      ' >/dev/null 2>&1; then
+      echo "$name SockJS/WebSocket readiness passed."
+      return 0
+    fi
+    now="$(date +%s)"
+    if [ $((now - start_ts)) -ge "$timeout_seconds" ]; then
+      echo "$name SockJS/WebSocket readiness failed after ${timeout_seconds}s." >&2
+      return 1
+    fi
+    sleep 5
+  done
+}
+
+run_internal_sockjs_healthcheck() {
+  local name="$1"
+  local env_file="$2"
+  local service="$3"
+  local base_url="${4%/}"
+  local timeout_seconds="$5"
+  local start_ts now response
+  start_ts="$(date +%s)"
+  while true; do
+    response="$(compose_env "$env_file" exec -T "$service" \
+      wget -q -T 20 -O - "${base_url}/info?t=$(date +%s)" 2>/dev/null || true)"
+    if printf '%s' "$response" | jq -e '
+        type == "object"
+        and .websocket == true
+        and (.cookie_needed | type == "boolean")
+        and (.origins | type == "array")
+        and (.entropy | type == "number")
+      ' >/dev/null 2>&1; then
+      echo "$name internal SockJS/WebSocket readiness passed."
+      return 0
+    fi
+    now="$(date +%s)"
+    if [ $((now - start_ts)) -ge "$timeout_seconds" ]; then
+      echo "$name internal SockJS/WebSocket readiness failed after ${timeout_seconds}s." >&2
+      return 1
+    fi
     sleep 5
   done
 }
@@ -912,7 +1220,8 @@ apply_coordinated_sql() {
 
 restore_pre_rollback_release() {
   echo "Rollback switch failed; stopping every target application service." >&2
-  compose_env "$ENV_FILE" stop caddy route-api route-worker notification-service frontend >/dev/null 2>&1 || true
+  compose_env "$ENV_FILE" stop caddy route-api route-worker notification-service frontend osrm \
+    >/dev/null 2>&1 || true
   select_current_control_bundle
 
   if ! promote_validated_recovery_database "$ENV_FILE" "$RECOVERY_DATABASE" \
@@ -922,7 +1231,11 @@ restore_pre_rollback_release() {
     return 1
   fi
 
-  cp -p "$CURRENT_ENV" "$ENV_FILE" || return 1
+  durable_copy "$CURRENT_ENV" "$ENV_FILE" || return 1
+  if ! compose_env "$ENV_FILE" up -d --no-deps --force-recreate osrm \
+     || ! verify_running_osrm_identity "$ENV_FILE"; then
+    return 1
+  fi
   if ! compose_env "$ENV_FILE" up -d --no-deps route-api; then
     return 1
   fi
@@ -940,28 +1253,39 @@ restore_pre_rollback_release() {
      || ! verify_service_running "$ENV_FILE" frontend \
      || ! run_internal_http_healthcheck "Restored frontend" "$ENV_FILE" frontend \
           http://127.0.0.1:3000/ "$HEALTHCHECK_TIMEOUT_SECONDS" \
-     || ! run_internal_http_healthcheck "Restored WebSocket handshake" "$ENV_FILE" notification-service \
-          http://127.0.0.1:8084/ws/info "$HEALTHCHECK_TIMEOUT_SECONDS"; then
-    compose_env "$ENV_FILE" stop caddy route-api route-worker notification-service frontend >/dev/null 2>&1 || true
+     || ! run_internal_sockjs_healthcheck "Restored WebSocket handshake" "$ENV_FILE" \
+          notification-service http://127.0.0.1:8084/ws "$HEALTHCHECK_TIMEOUT_SECONDS"; then
+    compose_env "$ENV_FILE" stop caddy route-api route-worker notification-service frontend osrm \
+      >/dev/null 2>&1 || true
     return 1
+  fi
+  if [ "${TARGET_POINTER_SWITCHED:-0}" -eq 1 ]; then
+    switch_control_bundle_pointer "$CURRENT_CONTROL_BUNDLE" || return 1
+    TARGET_POINTER_SWITCHED=0
+  fi
+  if [ "${PRE_ROLLBACK_LAST_ROLLBACK_PRESENT:-0}" -eq 1 ]; then
+    durable_copy "$PRE_ROLLBACK_LAST_ROLLBACK" "$MOODRIDE_DIR/.deploy/last-rollback" \
+      || return 1
+  else
+    rm -f "$MOODRIDE_DIR/.deploy/last-rollback" || return 1
+    sync -f "$MOODRIDE_DIR/.deploy" || return 1
   fi
   if ! compose_env "$ENV_FILE" up -d --no-deps --force-recreate caddy \
      || ! verify_service_running "$ENV_FILE" caddy \
      || ! verify_running_caddy_image "$ENV_FILE" \
      || ! run_http_healthcheck "Restored API" "$API_HEALTHCHECK_URL" "$HEALTHCHECK_TIMEOUT_SECONDS" \
      || ! run_http_healthcheck "Restored frontend" "$FRONTEND_HEALTHCHECK_URL" "$HEALTHCHECK_TIMEOUT_SECONDS" \
-     || ! run_http_healthcheck "Restored WebSocket handshake" "$WS_HEALTHCHECK_URL" "$HEALTHCHECK_TIMEOUT_SECONDS"; then
-    compose_env "$ENV_FILE" stop caddy route-api route-worker notification-service frontend >/dev/null 2>&1 || true
+     || ! run_sockjs_healthcheck "Restored WebSocket handshake" "$WS_HEALTHCHECK_URL" \
+          "$HEALTHCHECK_TIMEOUT_SECONDS"; then
+    compose_env "$ENV_FILE" stop caddy route-api route-worker notification-service frontend osrm \
+      >/dev/null 2>&1 || true
     return 1
   fi
   return 0
 }
 
 cleanup() {
-  if [ -n "${LOCK_DIR:-}" ] && [ -d "$LOCK_DIR" ]; then
-    rm -f "$LOCK_DIR/pid"
-    rmdir "$LOCK_DIR" 2>/dev/null || true
-  fi
+  release_cutover_lock
 }
 
 rollback_error() {
@@ -979,7 +1303,8 @@ rollback_error() {
     fi
   elif [ "${FAIL_CLOSED_ON_ERROR:-0}" -eq 1 ]; then
     compose_env "$ENV_FILE" stop caddy >/dev/null 2>&1 || true
-    compose_env "$ENV_FILE" stop route-api route-worker notification-service frontend >/dev/null 2>&1 || true
+    compose_env "$ENV_FILE" stop route-api route-worker notification-service frontend osrm \
+      >/dev/null 2>&1 || true
     echo "Post-switch rollback verification failed. Ingress and application consumers are stopped; the coordinated V38 baseline is retained because public writes may have begun." >&2
   else
     echo "Rollback failed before the schema switch completed. Ingress remains stopped if the drain had begun." >&2
@@ -1031,11 +1356,13 @@ SYNTHETIC_JOB_TIMEOUT_SECONDS=${SYNTHETIC_JOB_TIMEOUT_SECONDS:-600}
 SYNTHETIC_USER_ID=00000000-0000-0000-0000-000000000035
 API_HEALTHCHECK_URL=${API_HEALTHCHECK_URL:-https://usewayward.app/api/scenic-regions?lat=45.94\&lng=-66.63\&radius=1}
 FRONTEND_HEALTHCHECK_URL=${FRONTEND_HEALTHCHECK_URL:-https://usewayward.app/}
-WS_HEALTHCHECK_URL=${WS_HEALTHCHECK_URL:-https://usewayward.app/ws/info}
+WS_HEALTHCHECK_URL=${WS_HEALTHCHECK_URL:-https://usewayward.app/ws}
 EXPECTED_GITHUB_SOURCE_URL=${EXPECTED_GITHUB_SOURCE_URL:-}
-printf '%s' "$EXPECTED_GITHUB_SOURCE_URL" \
-  | grep -Eq '^https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$' \
-  || fail "EXPECTED_GITHUB_SOURCE_URL must be the exact release repository URL."
+if [ -n "$EXPECTED_GITHUB_SOURCE_URL" ]; then
+  printf '%s' "$EXPECTED_GITHUB_SOURCE_URL" \
+    | grep -Eq '^https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$' \
+    || fail "EXPECTED_GITHUB_SOURCE_URL must be an exact GitHub repository URL when provided."
+fi
 
 require_positive_integer DRAIN_TIMEOUT_SECONDS "$DRAIN_TIMEOUT_SECONDS"
 require_positive_integer DRAIN_POLL_SECONDS "$DRAIN_POLL_SECONDS"
@@ -1048,20 +1375,12 @@ require_command cmp
 require_command openssl
 require_command sha256sum
 require_command jq
+require_command flock
+require_command sync
+require_command readlink
 
 docker compose version >/dev/null
 cd "$MOODRIDE_DIR"
-[ -d "$MOODRIDE_DIR/.deploy/bundles" ] \
-  || fail "Immutable production control bundle root is missing."
-[ -L "$MOODRIDE_DIR/.deploy/current" ] \
-  || fail "Current production control bundle pointer is missing."
-CURRENT_CONTROL_BUNDLE="$(readlink -f "$MOODRIDE_DIR/.deploy/current")"
-verify_control_bundle "$CURRENT_CONTROL_BUNDLE" 1
-CURRENT_CONTROL_BUNDLE="$VERIFIED_CONTROL_BUNDLE"
-select_current_control_bundle
-require_file "$CURRENT_CONTROL_BUNDLE/quality-acceptance.json"
-require_file "$ENV_FILE"
-require_file "$CURRENT_CONTROL_BUNDLE/scripts/deploy/database_recovery.sh"
 case "$BACKUP_DIR" in
   /*) ;;
   *) fail "BACKUP_DIR must be an absolute host path outside Docker volumes." ;;
@@ -1073,16 +1392,27 @@ case "$BACKUP_DIR" in
 esac
 
 mkdir -p .deploy/releases .deploy/image-locks "$BACKUP_DIR"
-LOCK_DIR="$MOODRIDE_DIR/.deploy/prod-cutover.lock"
-if ! mkdir "$LOCK_DIR" 2>/dev/null; then
-  fail "Another production cutover lock exists at $LOCK_DIR."
-fi
-printf '%s\n' "$$" > "$LOCK_DIR/pid"
 MAIN_PID="${BASHPID:-$$}"
+CUTOVER_LOCK_HELD=0
+RECOVERY_ENABLED=0
+FAIL_CLOSED_ON_ERROR=0
+TARGET_POINTER_SWITCHED=0
+acquire_cutover_lock
 trap cleanup EXIT
 trap 'rollback_error $?' ERR
 trap 'rollback_error 130' INT
 trap 'rollback_error 143' TERM
+[ -d "$MOODRIDE_DIR/.deploy/bundles" ] \
+  || fail "Immutable production control-bundle root is missing."
+[ -L "$MOODRIDE_DIR/.deploy/current" ] \
+  || fail "Current production control-bundle pointer is missing."
+CURRENT_CONTROL_BUNDLE="$(readlink -f "$MOODRIDE_DIR/.deploy/current")"
+verify_control_bundle "$CURRENT_CONTROL_BUNDLE" 1
+CURRENT_CONTROL_BUNDLE="$VERIFIED_CONTROL_BUNDLE"
+select_current_control_bundle
+require_file "$CURRENT_CONTROL_BUNDLE/quality-acceptance.json"
+require_file "$ENV_FILE"
+require_file "$CURRENT_CONTROL_BUNDLE/scripts/deploy/database_recovery.sh"
 ensure_analytics_hash_secret "$ENV_FILE"
 
 CURRENT_TAG="$(get_env_var IMAGE_TAG "$ENV_FILE")"
@@ -1106,12 +1436,19 @@ current_bundle_manifest_sha="${current_bundle_manifest_sha%% *}"
 [ "$current_bundle_manifest_sha" = \
   "$(get_env_var CURRENT_BUNDLE_MANIFEST_SHA256 "$ROLLBACK_SNAPSHOT")" ] \
   || fail "Rollback snapshot current bundle manifest checksum diverged."
+load_expected_github_source_url "$EXPECTED_CURRENT_TAG" \
+  "$EXPECTED_CURRENT_RELEASE_LOCK_SHA256"
 ROLLBACK_TAG="$(get_env_var PREVIOUS_TAG "$ROLLBACK_SNAPSHOT")"
 TARGET_IMAGE_LOCK="$(get_env_var PREVIOUS_IMAGE_LOCK "$ROLLBACK_SNAPSHOT")"
 TARGET_CONTROL_BUNDLE="$(get_env_var PREVIOUS_CONTROL_BUNDLE "$ROLLBACK_SNAPSHOT")"
+TARGET_CONTROL_EVIDENCE="$(get_env_var PREVIOUS_CONTROL_EVIDENCE "$ROLLBACK_SNAPSHOT")"
 case "$TARGET_IMAGE_LOCK" in
   "$MOODRIDE_DIR/.deploy/"*) ;;
   *) fail "Rollback snapshot image lock path is outside release state." ;;
+esac
+case "$TARGET_CONTROL_EVIDENCE" in
+  "$MOODRIDE_DIR/.deploy/releases/"*) ;;
+  *) fail "Rollback snapshot control evidence path is outside immutable release state." ;;
 esac
 verify_control_bundle "$TARGET_CONTROL_BUNDLE"
 TARGET_CONTROL_BUNDLE="$VERIFIED_CONTROL_BUNDLE"
@@ -1124,6 +1461,17 @@ target_bundle_manifest_sha="$VERIFIED_BUNDLE_MANIFEST_SHA256"
 [ "$target_bundle_manifest_sha" = \
   "$(get_env_var PREVIOUS_BUNDLE_MANIFEST_SHA256 "$ROLLBACK_SNAPSHOT")" ] \
   || fail "Rollback snapshot previous control-bundle manifest diverged."
+require_file "$TARGET_CONTROL_EVIDENCE"
+require_file "${TARGET_CONTROL_EVIDENCE}.sha256"
+target_evidence_sha="$(sha256sum "$TARGET_CONTROL_EVIDENCE")"
+target_evidence_sha="${target_evidence_sha%% *}"
+[ "$target_evidence_sha" = \
+  "$(get_env_var PREVIOUS_CONTROL_EVIDENCE_SHA256 "$ROLLBACK_SNAPSHOT")" ] \
+  || fail "Rollback snapshot previous control evidence bytes diverged."
+(
+  cd "$(dirname "$TARGET_CONTROL_EVIDENCE")"
+  sha256sum --check "$(basename "$TARGET_CONTROL_EVIDENCE").sha256"
+) >/dev/null
 ROLLBACK_SQL="$TARGET_CONTROL_BUNDLE/scripts/deploy/rollback_v41_v40_v39_to_v38.sql"
 require_file "$ROLLBACK_SQL"
 
@@ -1144,8 +1492,14 @@ CURRENT_HISTORY="$BACKUP_DIR/${rollback_id}.pre-rollback.flyway-history"
 CURRENT_CATALOG="$BACKUP_DIR/${rollback_id}.pre-rollback.catalog"
 RECOVERY_DATABASE="wayward_recovery_$(date -u +'%Y%m%d%H%M%S')_${MAIN_PID}"
 RECOVERY_QUARANTINE_DATABASE="wayward_quarantine_$(date -u +'%Y%m%d%H%M%S')_${MAIN_PID}"
-cp -p "$ENV_FILE" "$CURRENT_ENV"
-cp -p "$ENV_FILE" "$TARGET_ENV"
+PRE_ROLLBACK_LAST_ROLLBACK="$MOODRIDE_DIR/.deploy/releases/${rollback_id}.last-rollback.backup"
+PRE_ROLLBACK_LAST_ROLLBACK_PRESENT=0
+if [ -f "$MOODRIDE_DIR/.deploy/last-rollback" ]; then
+  durable_copy "$MOODRIDE_DIR/.deploy/last-rollback" "$PRE_ROLLBACK_LAST_ROLLBACK"
+  PRE_ROLLBACK_LAST_ROLLBACK_PRESENT=1
+fi
+durable_copy "$ENV_FILE" "$CURRENT_ENV"
+durable_copy "$ENV_FILE" "$TARGET_ENV"
 chmod 600 "$CURRENT_ENV" "$TARGET_ENV"
 set_env_var CADDYFILE_PATH "$CURRENT_CONTROL_BUNDLE/Caddyfile" "$CURRENT_ENV"
 set_env_var CADDYFILE_PATH "$TARGET_CONTROL_BUNDLE/Caddyfile" "$TARGET_ENV"
@@ -1157,9 +1511,16 @@ validate_configured_running_tag "$CURRENT_TAG" "$ACTUAL_CURRENT_TAG"
 CURRENT_TAG="$ACTUAL_CURRENT_TAG"
 verify_current_release_fence "$CURRENT_ENV" "$EXPECTED_CURRENT_TAG" \
   "$EXPECTED_CURRENT_RELEASE_LOCK_SHA256"
+verify_running_osrm_identity "$CURRENT_ENV"
 load_image_lock "$TARGET_IMAGE_LOCK" "$ROLLBACK_TAG" "$TARGET_ENV"
 ensure_compose_introspection_identity "$CURRENT_ENV"
 ensure_compose_introspection_identity "$TARGET_ENV"
+EXPECTED_SCENIC_SCORING_VERSION="$(get_env_var MOODRIDE_SCENIC_SCORING_VERSION "$CURRENT_ENV")"
+EXPECTED_ROAD_DATASET_FINGERPRINT="$(get_env_var MOODRIDE_ROAD_DATASET_FINGERPRINT "$CURRENT_ENV")"
+synchronize_dataset_release_identity "$CURRENT_ENV" "$POSTGRES_DB" "$TARGET_ENV"
+verify_target_control_evidence "$TARGET_CONTROL_EVIDENCE" "$TARGET_ENV" "$ROLLBACK_TAG"
+validate_rollback_env "$CURRENT_ENV" "$CURRENT_CONTROL_BUNDLE"
+validate_rollback_env "$TARGET_ENV" "$TARGET_CONTROL_BUNDLE"
 select_current_control_bundle
 compose_env "$CURRENT_ENV" config >/dev/null
 verify_rendered_caddy_image "$CURRENT_ENV"
@@ -1171,12 +1532,14 @@ verify_rendered_caddy_image "$TARGET_ENV"
 echo "Pulling rollback target images: $ROLLBACK_TAG"
 select_target_control_bundle
 docker pull "$(get_env_var CADDY_IMAGE_REF "$TARGET_ENV")" >/dev/null
-compose_env "$TARGET_ENV" pull route-api route-worker notification-service frontend
+docker pull "$(get_env_var OSRM_IMAGE_REF "$TARGET_ENV")" >/dev/null
+compose_env "$TARGET_ENV" pull osrm route-api route-worker notification-service frontend
 verify_target_image_revisions "$TARGET_ENV" "$ROLLBACK_TAG"
 echo "Confirming current release images are recoverable: $CURRENT_TAG"
 select_current_control_bundle
 docker pull "$(get_env_var CADDY_IMAGE_REF "$CURRENT_ENV")" >/dev/null
-compose_env "$CURRENT_ENV" pull route-api route-worker notification-service frontend
+docker pull "$(get_env_var OSRM_IMAGE_REF "$CURRENT_ENV")" >/dev/null
+compose_env "$CURRENT_ENV" pull osrm route-api route-worker notification-service frontend
 verify_target_image_revisions "$CURRENT_ENV" "$ACTUAL_CURRENT_TAG"
 
 # Caddy is the public intake boundary. Keep current route-api running with the worker
@@ -1187,12 +1550,8 @@ compose_env "$CURRENT_ENV" stop caddy
 wait_for_drain "$CURRENT_ENV"
 
 echo "Stopping current application services before database rollback."
-compose_env "$CURRENT_ENV" stop route-api route-worker notification-service
+compose_env "$CURRENT_ENV" stop route-api route-worker notification-service frontend
 assert_no_active_jobs "$CURRENT_ENV"
-EXPECTED_SCENIC_SCORING_VERSION="$(get_env_var MOODRIDE_SCENIC_SCORING_VERSION "$CURRENT_ENV")"
-EXPECTED_ROAD_DATASET_FINGERPRINT="$(get_env_var MOODRIDE_ROAD_DATASET_FINGERPRINT "$CURRENT_ENV")"
-synchronize_dataset_release_identity "$CURRENT_ENV" "$POSTGRES_DB" \
-  "$TARGET_ENV" "$ENV_FILE"
 evict_scenic_anchor_cache_namespaces "$CURRENT_ENV"
 
 capture_flyway_history "$CURRENT_ENV" "$CURRENT_HISTORY"
@@ -1209,7 +1568,10 @@ echo "Applying coordinated V41/V40/V39 schema and Flyway-history rollback."
 apply_coordinated_sql
 verify_v38_baseline_schema "$CURRENT_ENV"
 select_target_control_bundle
-cp -p "$TARGET_ENV" "$ENV_FILE"
+durable_copy "$TARGET_ENV" "$ENV_FILE"
+echo "Recreating the exact rollback OSRM image and checksummed dataset before consumers."
+compose_env "$ENV_FILE" up -d --no-deps --force-recreate osrm
+verify_running_osrm_identity "$ENV_FILE"
 
 echo "Starting rollback route-api alone for internal readiness at the Flyway V38 baseline."
 compose_env "$ENV_FILE" up -d --no-deps route-api
@@ -1226,27 +1588,30 @@ verify_service_running "$ENV_FILE" notification-service
 verify_service_running "$ENV_FILE" frontend
 run_internal_http_healthcheck "Rollback frontend" "$ENV_FILE" frontend \
   http://127.0.0.1:3000/ "$HEALTHCHECK_TIMEOUT_SECONDS"
-run_internal_http_healthcheck "Rollback WebSocket handshake" "$ENV_FILE" notification-service \
-  http://127.0.0.1:8084/ws/info "$HEALTHCHECK_TIMEOUT_SECONDS"
+run_internal_sockjs_healthcheck "Rollback WebSocket handshake" "$ENV_FILE" \
+  notification-service http://127.0.0.1:8084/ws "$HEALTHCHECK_TIMEOUT_SECONDS"
 run_synthetic_route_smoke "$ENV_FILE" v38
 
-# The coordinated V38 baseline is durable now. Disable pre-ingress recovery before
-# reopening ingress so no accepted public write can be erased.
+# Persist the target control plane and rollback marker while ingress is closed.
+# Recovery remains enabled until both durable updates succeed.
+printf '%s\n' "$rollback_id" > "$MOODRIDE_DIR/.deploy/last-rollback.${MAIN_PID}.tmp"
+sync -f "$MOODRIDE_DIR/.deploy/last-rollback.${MAIN_PID}.tmp"
+TARGET_POINTER_SWITCHED=1
+switch_control_bundle_pointer "$TARGET_CONTROL_BUNDLE"
+durable_replace "$MOODRIDE_DIR/.deploy/last-rollback.${MAIN_PID}.tmp" \
+  "$MOODRIDE_DIR/.deploy/last-rollback"
+
+# The V38 database, exact images, target control pointer, and marker are now
+# durable. Disable recovery before reopening ingress so public writes survive.
 RECOVERY_ENABLED=0
 FAIL_CLOSED_ON_ERROR=1
-echo "Recreating Caddy only after internal rollback and route-job verification."
+echo "Recreating Caddy only after internal rollback and durable pointer verification."
 compose_env "$ENV_FILE" up -d --no-deps --force-recreate caddy
 verify_service_running "$ENV_FILE" caddy
 verify_running_caddy_image "$ENV_FILE"
 run_http_healthcheck "Rollback API" "$API_HEALTHCHECK_URL" "$HEALTHCHECK_TIMEOUT_SECONDS"
 run_http_healthcheck "Rollback frontend" "$FRONTEND_HEALTHCHECK_URL" "$HEALTHCHECK_TIMEOUT_SECONDS"
-run_http_healthcheck "Rollback WebSocket handshake" "$WS_HEALTHCHECK_URL" "$HEALTHCHECK_TIMEOUT_SECONDS"
-
-CURRENT_POINTER_TMP="$MOODRIDE_DIR/.deploy/current.${MAIN_PID}.tmp"
-rm -f "$CURRENT_POINTER_TMP"
-ln -s "$TARGET_CONTROL_BUNDLE" "$CURRENT_POINTER_TMP"
-mv -Tf "$CURRENT_POINTER_TMP" "$MOODRIDE_DIR/.deploy/current"
-printf '%s\n' "$rollback_id" > "$MOODRIDE_DIR/.deploy/last-rollback.tmp"
-mv "$MOODRIDE_DIR/.deploy/last-rollback.tmp" "$MOODRIDE_DIR/.deploy/last-rollback"
+run_sockjs_healthcheck "Rollback WebSocket handshake" "$WS_HEALTHCHECK_URL" \
+  "$HEALTHCHECK_TIMEOUT_SECONDS"
 FAIL_CLOSED_ON_ERROR=0
 echo "Rollback completed with immutable image tag: $ROLLBACK_TAG"

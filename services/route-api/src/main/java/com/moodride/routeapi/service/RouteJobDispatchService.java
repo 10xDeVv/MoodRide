@@ -20,6 +20,7 @@ import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import com.moodride.eventmodels.RouteJobEvent;
+import com.moodride.routeapi.config.RouteApiSchedulingConfiguration;
 import com.moodride.routeapi.dispatch.RouteJobDispatch;
 import com.moodride.routeapi.repository.RouteJobDispatchRepository;
 
@@ -113,7 +114,8 @@ public class RouteJobDispatchService {
 
     @Scheduled(
         fixedDelayString = "${moodride.route-job.dispatch.interval-ms:60000}",
-        initialDelayString = "${moodride.route-job.dispatch.initial-delay-ms:60000}"
+        initialDelayString = "${moodride.route-job.dispatch.initial-delay-ms:60000}",
+        scheduler = RouteApiSchedulingConfiguration.ROUTE_DISPATCH_TASK_SCHEDULER
     )
     public void redispatchDueRouteJobs() {
         if (!recoveryEnabled) {

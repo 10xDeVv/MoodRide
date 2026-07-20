@@ -59,15 +59,27 @@ public class PrimaryRouteService {
         }
 
         List<List<Double>> coordinates = persistedCoordinates(routeId, route.getGeometry());
-        List<PrimaryRouteOptionResponse> routeOptions = routeRepository.findOptionSummariesByJobId(jobId).stream()
+        List<RouteProfileAssignments.Profiled<RouteRepository.RouteOptionSummary>> profiledSummaries =
+            RouteProfileAssignments.assign(
+                routeRepository.findOptionSummariesByJobId(jobId),
+                RouteRepository.RouteOptionSummary::getProfile,
+                RouteRepository.RouteOptionSummary::getGeneratedAt,
+                RouteRepository.RouteOptionSummary::getRouteId
+            );
+        List<PrimaryRouteOptionResponse> routeOptions = profiledSummaries.stream()
             .map(this::toResponse)
             .toList();
+        String routeProfile = profiledSummaries.stream()
+            .filter(summary -> routeId.equals(summary.value().getRouteId()))
+            .map(RouteProfileAssignments.Profiled::profile)
+            .findFirst()
+            .orElseGet(route::getRouteProfile);
 
         return new PrimaryRouteResponse(
             route.getId(),
             job.getId(),
             routeUrl(route.getId()),
-            route.getRouteProfile(),
+            routeProfile,
             route.getScenicScore() * 100.0,
             route.getTotalDistanceKm(),
             route.getEstimatedDurationMinutes(),
@@ -92,10 +104,17 @@ public class PrimaryRouteService {
         RouteJob.JobStatus status = job.getStatus();
         boolean published = status == RouteJob.JobStatus.PRIMARY_READY
             || status == RouteJob.JobStatus.COMPLETED;
-        return published
-            && routeId.equals(route.getId())
-            && routeId.equals(job.getRouteId())
-            && route.getJobId().equals(job.getId());
+        if (!published || !routeId.equals(route.getId()) || !job.getId().equals(route.getJobId())) {
+            return false;
+        }
+
+        UUID publishedPrimaryId = job.getRouteId();
+        if (publishedPrimaryId == null) {
+            publishedPrimaryId = RouteProfileAssignments.resolvePrimary(
+                routeRepository.findByJobIdOrderByGeneratedAtAsc(job.getId())
+            ).orElse(null);
+        }
+        return routeId.equals(publishedPrimaryId);
     }
 
     private List<List<Double>> persistedCoordinates(UUID routeId, LineString geometry) {
@@ -123,9 +142,12 @@ public class PrimaryRouteService {
         );
     }
 
-    private PrimaryRouteOptionResponse toResponse(RouteRepository.RouteOptionSummary summary) {
+    private PrimaryRouteOptionResponse toResponse(
+        RouteProfileAssignments.Profiled<RouteRepository.RouteOptionSummary> profiledSummary
+    ) {
+        RouteRepository.RouteOptionSummary summary = profiledSummary.value();
         return new PrimaryRouteOptionResponse(
-            summary.getProfile(),
+            profiledSummary.profile(),
             summary.getRouteId(),
             routeUrl(summary.getRouteId()),
             summary.getScenicScore() * 100.0,

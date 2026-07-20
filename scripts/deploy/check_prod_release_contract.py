@@ -4,9 +4,11 @@
 from __future__ import annotations
 
 import base64
+import contextlib
 import copy
 import hashlib
 import importlib.util
+import io
 import json
 import os
 import pathlib
@@ -81,6 +83,7 @@ def run_behavior_fixtures(release_script: str) -> None:
         "SPRING_DATASOURCE_USERNAME": "moodride",
         "MOODRIDE_OSRM_BASE_URL": "http://osrm:5000",
         "MOODRIDE_ALGORITHM_OSRM_REQUEST_PARALLELISM": "6",
+        "SPRING_DATASOURCE_PASSWORD": "credential-fixture-must-not-be-emitted",
     }
     module.candidate_containers = lambda service: [capture_container]
     module.run = lambda *args: json.dumps([capture_image])
@@ -91,6 +94,7 @@ def run_behavior_fixtures(release_script: str) -> None:
             "GHCR_NAMESPACE": "acme",
             "ROUTE_WORKER_IMAGE_REF": capture_ref,
         },
+        "fixture-route-worker",
         capture_revision,
         capture_source,
     )
@@ -111,6 +115,129 @@ def run_behavior_fixtures(release_script: str) -> None:
         ] == "fixture-road-revision",
         "Runtime capture still labels configured container environment as effective",
     )
+    captured_service_json = json.dumps(captured_service)
+    require(
+        "credential-fixture-must-not-be-emitted" not in captured_service_json
+        and "SPRING_DATASOURCE_PASSWORD" not in captured_service_json
+        and "SPRING_DATASOURCE_URL" not in captured_service_json
+        and "SPRING_DATASOURCE_USERNAME" not in captured_service_json
+        and "jdbc:postgresql" not in captured_service_json,
+        "Runtime capture emitted a datasource credential",
+    )
+    symmetric_runtime = {
+        **module.RUNTIME_POLICY,
+        "MOODRIDE_ROAD_ANCHOR_CACHE_SCHEMA": "v1",
+        "datasource_url_matches_compose_identity": True,
+        "datasource_username_matches_compose_identity": True,
+    }
+    symmetric_cache = {
+        key: configured_environment[key]
+        for key in module.ROUTING_CACHE_IDENTITY_KEYS
+    }
+    routing_identity_services = [
+        {
+            "service": "route-api",
+            "configured_runtime": dict(symmetric_runtime),
+            "configured_cache_identity": dict(symmetric_cache),
+        },
+        {
+            "service": "route-worker",
+            "configured_runtime": {
+                **symmetric_runtime,
+                "MOODRIDE_OSRM_BASE_URL": "http://osrm:5000",
+                "MOODRIDE_ALGORITHM_OSRM_REQUEST_PARALLELISM": "6",
+            },
+            "configured_cache_identity": dict(symmetric_cache),
+        },
+        {
+            "service": "notification-service",
+            "configured_runtime": {"SPRING_PROFILES_ACTIVE": "prod"},
+        },
+    ]
+    routing_identity_env = {
+        **configured_environment,
+        "POSTGRES_DB": "moodride",
+        "POSTGRES_USER": "moodride",
+    }
+    routing_database_identity = {
+        "attributable": True,
+        "scenic_scoring_version": configured_environment[
+            "MOODRIDE_SCENIC_SCORING_VERSION"
+        ],
+        "road_dataset_fingerprint": configured_environment[
+            "MOODRIDE_ROAD_DATASET_FINGERPRINT"
+        ],
+    }
+    require(
+        module.verify_cache_identity(
+            routing_identity_env,
+            routing_identity_services,
+            routing_database_identity,
+        )
+        == [],
+        "Symmetric route-api/worker runtime and cache identity was rejected",
+    )
+    divergent_routing_services = copy.deepcopy(routing_identity_services)
+    divergent_routing_services[1]["configured_cache_identity"][
+        "MOODRIDE_ROAD_DATASET_FINGERPRINT"
+    ] = "d" * 64
+    require(
+        any(
+            "configured cache MOODRIDE_ROAD_DATASET_FINGERPRINT diverges" in reason
+            for reason in module.verify_cache_identity(
+                routing_identity_env,
+                divergent_routing_services,
+                routing_database_identity,
+            )
+        ),
+        "Route-api/worker cache identity divergence was not rejected symmetrically",
+    )
+    replacement_container = {
+        **capture_container,
+        "Id": "replacement-route-worker",
+    }
+    module.candidate_containers = lambda service: [replacement_container]
+    replaced_service = module.capture_service(
+        "route-worker",
+        {
+            "GHCR_NAMESPACE": "acme",
+            "ROUTE_WORKER_IMAGE_REF": capture_ref,
+        },
+        "fixture-route-worker",
+        capture_revision,
+        capture_source,
+    )
+    require(
+        not replaced_service["attributable"]
+        and any("generation changed" in reason for reason in replaced_service["reasons"]),
+        "Mixed-generation service observation was not rejected",
+    )
+    initial_generation = {
+        "services": [
+            {
+                "service": service,
+                "container_id": f"fixture-{service}",
+                "running": True,
+            }
+            for service in module.EXPECTED_COMPOSE_SERVICES
+        ]
+    }
+    final_generation = copy.deepcopy(initial_generation)
+    next(
+        item
+        for item in final_generation["services"]
+        if item["service"] == "route-worker"
+    )["container_id"] = "replacement-route-worker"
+    require(
+        any(
+            "route-worker: container generation changed" in reason
+            for reason in module.verify_compose_generation(
+                initial_generation, final_generation
+            )
+        ),
+        "Final Compose recapture did not reject a container replacement",
+    )
+    module.candidate_containers = lambda service: [capture_container]
 
     migration_root = ROOT / "services" / "route-api" / "src" / "main" / "resources" / "db" / "migration"
     expected_checksums = {
@@ -148,6 +275,288 @@ def run_behavior_fixtures(release_script: str) -> None:
     require(any("increasing" in reason for reason in module.verify_migration_lineage(
         {"attributable": True, "rows": reordered_rows}, good_scripts
     )), "Out-of-order Flyway installed-rank/version fixture was not rejected")
+
+    baselined_scripts = {
+        "attributable": True,
+        "scripts": [
+            {
+                "script": "V1__initial_schema.sql",
+                "flyway_checksum": 101,
+                "sha256": "fixture-v1",
+            },
+            {
+                "script": "V2__baseline_schema.sql",
+                "flyway_checksum": 202,
+                "sha256": "fixture-v2",
+            },
+            {
+                "script": "V3__post_baseline.sql",
+                "flyway_checksum": 303,
+                "sha256": "fixture-v3",
+            },
+        ],
+    }
+    baselined_rows = [
+        {
+            "installed_rank": 1,
+            "version": "2",
+            "description": "<< Flyway Baseline >>",
+            "type": "BASELINE",
+            "script": "<< Flyway Baseline >>",
+            "checksum": None,
+            "success": True,
+        },
+        {
+            "installed_rank": 2,
+            "version": "3",
+            "description": "post baseline",
+            "type": "SQL",
+            "script": "V3__post_baseline.sql",
+            "checksum": 303,
+            "success": True,
+        },
+    ]
+    require(
+        module.verify_migration_lineage(
+            {"attributable": True, "rows": baselined_rows},
+            baselined_scripts,
+        )
+        == [],
+        "Flyway baseline-v2 lineage fixture was rejected",
+    )
+    bad_post_baseline_rows = copy.deepcopy(baselined_rows)
+    bad_post_baseline_rows[-1]["checksum"] = 304
+    require(
+        any(
+            "checksum" in reason
+            for reason in module.verify_migration_lineage(
+                {"attributable": True, "rows": bad_post_baseline_rows},
+                baselined_scripts,
+            )
+        ),
+        "Post-baseline Flyway checksum drift was not rejected",
+    )
+
+    postgres_snapshot_metadata = {
+        "flyway_history": baselined_rows,
+        "scenic_versions": ["3.7-fixture"],
+        "road_identity_marker": "road-identity-ok",
+    }
+    postgres_snapshot_sections = {
+        "database_fingerprint": b"flyway snapshot row\n",
+        "scenic_dataset_fingerprint": b"scenic snapshot row\n",
+        "road_dataset_fingerprint": b"road snapshot row\n",
+    }
+    postgres_snapshot_stream = (
+        b"metadata\t"
+        + json.dumps(
+            postgres_snapshot_metadata,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8").hex().encode("ascii")
+        + b"\n"
+        + b"".join(
+            section.encode("ascii") + b"\t" + payload
+            for section, payload in postgres_snapshot_sections.items()
+        )
+    )
+    postgres_snapshot_commands: list[tuple[str, ...]] = []
+
+    class FakePostgresSnapshotProcess:
+        def __init__(self, command: tuple[str, ...], **kwargs: object):
+            postgres_snapshot_commands.append(command)
+            self.stdout = io.BytesIO(postgres_snapshot_stream)
+            self.stderr = io.BytesIO()
+
+        def wait(self) -> int:
+            return 0
+
+    fixture_candidate_containers = module.candidate_containers
+    fixture_popen = module.subprocess.Popen
+    module.candidate_containers = lambda service: [{
+        "Id": "fixture-postgres",
+        "State": {"Running": True},
+    }]
+    module.subprocess.Popen = FakePostgresSnapshotProcess
+    captured_history, captured_database = module.capture_postgres_identity(
+        {
+            "POSTGRES_DB": "moodride",
+            "POSTGRES_USER": "moodride",
+        },
+        "fixture-postgres",
+    )
+    require(
+        len(postgres_snapshot_commands) == 1
+        and "BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"
+        in postgres_snapshot_commands[0][-1]
+        and captured_history["attributable"]
+        and captured_history["rows"] == baselined_rows
+        and captured_database["attributable"]
+        and all(
+            captured_database[name] == hashlib.sha256(payload).hexdigest()
+            for name, payload in postgres_snapshot_sections.items()
+        ),
+        "Postgres runtime identity was not captured from one coherent snapshot",
+    )
+    module.candidate_containers = fixture_candidate_containers
+    module.subprocess.Popen = fixture_popen
+
+    original_root = module.ROOT
+    original_env_file = module.ENV_FILE
+    original_candidate_containers = module.candidate_containers
+    original_run = module.run
+    original_copy_container_file = module.copy_container_file
+    with tempfile.TemporaryDirectory(dir=ROOT) as capture_temporary:
+        capture_temp = pathlib.Path(capture_temporary)
+        canonical_caddyfile = capture_temp / "canonical" / "Caddyfile"
+        canonical_caddyfile.parent.mkdir()
+        canonical_caddyfile.write_bytes(b"fixture canonical caddy\n")
+        wrong_caddyfile = capture_temp / "wrong" / "Caddyfile"
+        wrong_caddyfile.parent.mkdir()
+        wrong_caddyfile.write_bytes(b"fixture wrong caddy\n")
+        canonical_osrm = capture_temp / "data" / "osrm"
+        canonical_osrm.mkdir(parents=True)
+        (canonical_osrm / "canada-latest.osrm").write_bytes(b"osrm fixture")
+        wrong_osrm = capture_temp / "wrong-osrm"
+        wrong_osrm.mkdir()
+        module.ROOT = capture_temp
+
+        caddy_ref = "caddy@sha256:" + capture_digest
+        caddy_container = {
+            "Id": "fixture-caddy",
+            "Image": "fixture-caddy-image",
+            "State": {"Running": True},
+            "Config": {"Image": caddy_ref},
+            "Mounts": [{
+                "Destination": "/etc/caddy/Caddyfile",
+                "Source": str(wrong_caddyfile),
+                "Type": "bind",
+                "RW": False,
+            }],
+        }
+        module.candidate_containers = lambda service: [caddy_container]
+        module.run = lambda *args: json.dumps([{"RepoDigests": [caddy_ref]}])
+        module.copy_container_file = (
+            lambda container_id, path: canonical_caddyfile.read_bytes()
+        )
+        caddy_mount_drift = module.capture_caddy_identity(
+            {
+                "CADDY_IMAGE_REF": caddy_ref,
+                "CADDYFILE_PATH": str(canonical_caddyfile),
+            },
+            "fixture-caddy",
+        )
+        require(
+            not caddy_mount_drift["attributable"]
+            and any(
+                "canonical source" in reason
+                for reason in caddy_mount_drift["reasons"]
+            ),
+            "Wrong Caddyfile bind mount was not rejected",
+        )
+        caddy_container["Mounts"][0]["Source"] = str(canonical_caddyfile)
+        module.copy_container_file = lambda container_id, path: b"stale caddy"
+        caddy_content_drift = module.capture_caddy_identity(
+            {
+                "CADDY_IMAGE_REF": caddy_ref,
+                "CADDYFILE_PATH": str(canonical_caddyfile),
+            },
+            "fixture-caddy",
+        )
+        require(
+            not caddy_content_drift["attributable"]
+            and any(
+                "content differs" in reason
+                for reason in caddy_content_drift["reasons"]
+            ),
+            "Mounted Caddyfile content drift was not rejected",
+        )
+
+        osrm_ref = (
+            "ghcr.io/project-osrm/osrm-backend@sha256:" + capture_digest
+        )
+        osrm_route_path = "/data/canada-latest.osrm"
+        osrm_container = {
+            "Id": "fixture-osrm",
+            "Image": "fixture-osrm-image",
+            "State": {"Running": True},
+            "Config": {
+                "Image": osrm_ref,
+                "Cmd": [
+                    "osrm-routed",
+                    "--algorithm",
+                    "mld",
+                    osrm_route_path,
+                ],
+            },
+            "Args": ["--algorithm", "mld", osrm_route_path],
+            "Mounts": [{
+                "Destination": "/data",
+                "Source": str(wrong_osrm),
+                "Type": "bind",
+                "RW": False,
+            }],
+        }
+        module.candidate_containers = lambda service: [osrm_container]
+        module.run = lambda *args: json.dumps([{"RepoDigests": [osrm_ref]}])
+        osrm_mount_drift = module.capture_osrm_identity(
+            {
+                "OSRM_IMAGE_REF": osrm_ref,
+                "OSRM_DATASET_BASENAME": "canada-latest",
+            },
+            "fixture-osrm",
+        )
+        require(
+            not osrm_mount_drift["attributable"]
+            and any(
+                "canonical source" in reason
+                for reason in osrm_mount_drift["reasons"]
+            ),
+            "Wrong OSRM data bind mount was not rejected",
+        )
+
+        malformed_env = capture_temp / "non-utf8.env"
+        malformed_env.write_bytes(b"IMAGE_TAG=sha-\xff\n")
+        module.ENV_FILE = malformed_env
+        unicode_stdout = io.StringIO()
+        with contextlib.redirect_stdout(unicode_stdout):
+            unicode_status = module.main()
+        unicode_document = json.loads(unicode_stdout.getvalue())
+        require(
+            unicode_status == 2
+            and unicode_document["schema_version"] == 3
+            and unicode_document["attribution_status"] == "unattributable"
+            and unicode_document["attribution_reasons"]
+            == ["production environment file is not valid UTF-8"],
+            "Non-UTF-8 environment failure did not emit consumable JSON",
+        )
+
+        original_build_capture_document = module.build_capture_document
+
+        def fail_unexpected_capture() -> dict:
+            raise RuntimeError("credential-fixture-must-not-be-emitted")
+
+        module.build_capture_document = fail_unexpected_capture
+        unexpected_stdout = io.StringIO()
+        with contextlib.redirect_stdout(unexpected_stdout):
+            unexpected_status = module.main()
+        unexpected_payload = unexpected_stdout.getvalue()
+        unexpected_document = json.loads(unexpected_payload)
+        require(
+            unexpected_status == 2
+            and unexpected_document["attribution_status"] == "unattributable"
+            and unexpected_document["attribution_reasons"]
+            == ["unexpected production runtime capture failure (RuntimeError)"]
+            and "credential-fixture-must-not-be-emitted" not in unexpected_payload,
+            "Unexpected capture failure was not emitted as secret-safe JSON",
+        )
+        module.build_capture_document = original_build_capture_document
+
+    module.ROOT = original_root
+    module.ENV_FILE = original_env_file
+    module.candidate_containers = original_candidate_containers
+    module.run = original_run
+    module.copy_container_file = original_copy_container_file
 
     revision = "0123456789abcdef0123456789abcdef01234567"
     digest = "a" * 64
@@ -449,8 +858,53 @@ load_quality_acceptance "$QUALITY_FILE" "$QUALITY_SHA256"
                     deploy_quality_completed.returncode != 0,
                     f"Deploy loader accepted non-canonical quality fixture: {case_name}",
                 )
-        legacy_env = temp / "legacy.env"
-        legacy_env.write_text(
+        adoption_runtime_identity = {
+            "database_identity": {
+                "database_fingerprint": road_sha,
+                "scenic_scoring_version": "3.7-fixture",
+                "scenic_dataset_fingerprint": road_sha,
+                "road_dataset_fingerprint": road_sha,
+            },
+            "osrm": {
+                "image_ref": "ghcr.io/project-osrm/osrm-backend@sha256:" + digest,
+                "dataset_basename": "canada-latest",
+                "file_manifest_sha256": digest,
+            },
+            "runtime_algorithm_mode": {
+                "algorithm": "hybrid_osrm_v2",
+                "mode": "drive",
+            },
+            "cache_policy": cache_policy,
+        }
+        adopted_control_lock = copy.deepcopy(release_lock)
+        adopted_control_lock["control_adoption"] = {
+            "approval_gate": "production-control-adoption",
+            "flyway_schema_version": 38,
+            "flyway_history_sha256": road_sha,
+            "source_sha": revision,
+            "images": copy.deepcopy(adopted_control_lock["images"]),
+            "runtime_identity": copy.deepcopy(adoption_runtime_identity),
+        }
+        adopted_control_lock_bytes = json.dumps(
+            adopted_control_lock, separators=(",", ":"), sort_keys=True
+        ).encode("utf-8")
+        adopted_control_lock_sha = hashlib.sha256(adopted_control_lock_bytes).hexdigest()
+        adopted_control_lock_file = temp / "adopted-control-lock.json"
+        adopted_control_lock_file.write_bytes(adopted_control_lock_bytes)
+        adoption_quality = copy.deepcopy(canonical_quality)
+        adoption_quality["artifacts"]["control"].update({
+            "source_sha": revision,
+            "release_lock_sha256": adopted_control_lock_sha,
+            "images": copy.deepcopy(candidate_images),
+            "runtime_identity": copy.deepcopy(adoption_runtime_identity),
+        })
+        adoption_quality_bytes = json.dumps(
+            adoption_quality, separators=(",", ":"), sort_keys=True
+        ).encode("utf-8")
+        adoption_quality_file = temp / "adopted-control.quality.json"
+        adoption_quality_file.write_bytes(adoption_quality_bytes)
+        adopted_env = temp / "adopted-control.env"
+        adopted_env.write_text(
             "\n".join((
                 "GHCR_NAMESPACE=acme",
                 f"IMAGE_TAG=sha-{revision}",
@@ -474,13 +928,17 @@ load_quality_acceptance "$QUALITY_FILE" "$QUALITY_SHA256"
             encoding="utf-8",
             newline="\n",
         )
-        relative_legacy_env = legacy_env.relative_to(ROOT).as_posix()
+        relative_adopted_env = adopted_env.relative_to(ROOT).as_posix()
         fixture_script = (
             f"FIXTURE_REVISION='{revision}'\n"
             f"FIXTURE_DIGEST='{digest}'\n"
             f"FIXTURE_QUALITY_SHA='{quality_sha}'\n"
             f"FIXTURE_ROAD_SHA='{road_sha}'\n"
-            f"LEGACY_ENV='{relative_legacy_env}'\n"
+            f"QUALITY_FILE='{adoption_quality_file.relative_to(ROOT).as_posix()}'\n"
+            f"ADOPTION_QUALITY_SHA='{hashlib.sha256(adoption_quality_bytes).hexdigest()}'\n"
+            f"ADOPTED_CONTROL_LOCK='{adopted_control_lock_file.relative_to(ROOT).as_posix()}'\n"
+            f"ADOPTED_CONTROL_LOCK_SHA256='{adopted_control_lock_sha}'\n"
+            f"CONTROL_ENV='{relative_adopted_env}'\n"
             f"FIXTURE_TEMP='{temp.relative_to(ROOT).as_posix()}'\n"
             + r"""#!/usr/bin/env bash
 set -Eeuo pipefail
@@ -527,10 +985,6 @@ export DEPLOY_LIBRARY_ONLY=1
 source scripts/deploy/deploy_prod.sh
 EXPECTED_GITHUB_SOURCE_URL=https://github.com/acme/wayward
 validate_configured_running_tag "sha-${FIXTURE_REVISION}" "sha-${FIXTURE_REVISION}"
-if validate_configured_running_tag sha-ffffffffffff "sha-${FIXTURE_REVISION}"; then
-  echo "Divergent legacy 12-character image tag was accepted." >&2
-  exit 12
-fi
 CONTROL_BUNDLE=/fixture/candidate
 PREVIOUS_CONTROL_BUNDLE=/fixture/previous
 select_previous_control_bundle
@@ -545,8 +999,7 @@ printf 'fixture caddy\n' > "$MOODRIDE_DIR/.deploy/bundles/.stage/Caddyfile"
 (cd "$MOODRIDE_DIR/.deploy/bundles/.stage" && sha256sum Caddyfile payload > bundle.sha256)
 fixture_manifest="$(sha256sum "$MOODRIDE_DIR/.deploy/bundles/.stage/bundle.sha256")"
 fixture_manifest="${fixture_manifest%% *}"
-fixture_bundle_id="sha-${FIXTURE_REVISION}-${FIXTURE_QUALITY_SHA}-${fixture_manifest}"
-[ "${#fixture_bundle_id}" -le 255 ]
+fixture_bundle_id="adopted-${fixture_manifest}"
 fixture_bundle="$MOODRIDE_DIR/.deploy/bundles/${fixture_bundle_id}"
 mv "$MOODRIDE_DIR/.deploy/bundles/.stage" "$fixture_bundle"
 verify_control_bundle "$fixture_bundle"
@@ -557,9 +1010,9 @@ if (verify_control_bundle "$fixture_bundle" >/dev/null 2>&1); then
 fi
 printf 'trusted\n' > "$fixture_bundle/payload"
 verify_control_bundle "$fixture_bundle"
-set_env_var CADDYFILE_PATH "$fixture_bundle/Caddyfile" "$LEGACY_ENV"
-capture_running_image_refs "$LEGACY_ENV" "$LEGACY_ENV"
-ensure_compose_introspection_identity "$LEGACY_ENV"
+set_env_var CADDYFILE_PATH "$fixture_bundle/Caddyfile" "$CONTROL_ENV"
+capture_running_image_refs "$CONTROL_ENV" "$CONTROL_ENV"
+ensure_compose_introspection_identity "$CONTROL_ENV"
 EXPECTED_CANDIDATE_DATABASE_FINGERPRINT="${FIXTURE_ROAD_SHA}"
 EXPECTED_CANDIDATE_SCENIC_SCORING_VERSION=3.7-fixture
 EXPECTED_CANDIDATE_SCENIC_DATASET_FINGERPRINT="${FIXTURE_ROAD_SHA}"
@@ -573,13 +1026,13 @@ EXPECTED_CANDIDATE_ALGORITHM_MODE=drive
 EXPECTED_CANDIDATE_GRAPH_WARMUP_ENABLED=false
 EXPECTED_CANDIDATE_ROAD_ANCHOR_CACHE_SCHEMA=v1
 EXPECTED_CANDIDATE_RUNTIME_ALGORITHM=hybrid_osrm_v2
-validate_pre_drain_env "$LEGACY_ENV" "$fixture_bundle" candidate
+validate_pre_drain_env "$CONTROL_ENV" "$fixture_bundle" candidate
 candidate_mismatch_env="$MOODRIDE_DIR/candidate-mismatch.env"
-cp -p "$LEGACY_ENV" "$candidate_mismatch_env"
+cp -p "$CONTROL_ENV" "$candidate_mismatch_env"
 set_env_var MOODRIDE_ROAD_DATASET_FINGERPRINT \
   "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" \
   "$candidate_mismatch_env"
-if validate_pre_drain_env "$candidate_mismatch_env" "$fixture_bundle" candidate; then
+if validate_pre_drain_env "$candidate_mismatch_env" "$fixture_bundle" candidate >/dev/null 2>&1; then
   echo "Candidate environment runtime-identity mismatch was accepted." >&2
   exit 15
 fi
@@ -603,14 +1056,53 @@ EXPECTED_CONTROL_ALGORITHM_MODE=drive
 EXPECTED_CONTROL_GRAPH_WARMUP_ENABLED=false
 EXPECTED_CONTROL_ROAD_ANCHOR_CACHE_SCHEMA=v1
 EXPECTED_CONTROL_RUNTIME_ALGORITHM=hybrid_osrm_v2
-if verify_running_control_artifact_identity "$LEGACY_ENV"; then
+if verify_running_control_artifact_identity "$CONTROL_ENV" >/dev/null 2>&1; then
   echo "Running control image mismatch was accepted." >&2
   exit 16
 fi
-[ "$(get_env_var IMAGE_TAG "$LEGACY_ENV")" = "sha-${FIXTURE_REVISION}" ]
-[ "$(get_env_var ROUTE_API_IMAGE_REF "$LEGACY_ENV")" = "ghcr.io/acme/moodride-route-api@sha256:${FIXTURE_DIGEST}" ]
-[ "$(get_env_var MOODRIDE_ROAD_DATASET_FINGERPRINT "$LEGACY_ENV")" = "${FIXTURE_ROAD_SHA}" ]
-[ "$(get_env_var OSRM_IMAGE_REF "$LEGACY_ENV")" = "ghcr.io/project-osrm/osrm-backend@sha256:${FIXTURE_DIGEST}" ]
+EXPECTED_CONTROL_ROUTE_API_IMAGE_REF="ghcr.io/acme/moodride-route-api@sha256:${FIXTURE_DIGEST}"
+EXPECTED_CONTROL_ARTIFACT_SHA256="${FIXTURE_ROAD_SHA}"
+EXPECTED_GITHUB_SOURCE_URL=https://github.com/acme/wayward
+QUALITY_ACCEPTANCE_SHA256="${ADOPTION_QUALITY_SHA}"
+QUALITY_ACCEPTANCE="$QUALITY_FILE"
+mkdir -p "$MOODRIDE_DIR/.deploy/releases"
+cp -p "$QUALITY_FILE" "$fixture_bundle/quality-acceptance.json"
+control_env_before="$(sha256sum "$CONTROL_ENV")"
+control_env_before="${control_env_before%% *}"
+if require_adopted_control_prerequisite >/dev/null 2>&1; then
+  echo "Pristine V35 host without adopted control evidence was accepted." >&2
+  exit 19
+fi
+[ ! -e "$MOODRIDE_DIR/.deploy/current" ]
+[ "$(sha256sum "$CONTROL_ENV" | cut -d' ' -f1)" = "$control_env_before" ]
+if compgen -G "$MOODRIDE_DIR/.deploy/releases/accepted-*.json" >/dev/null; then
+  echo "Rejected pristine V35 fixture synthesized accepted control evidence." >&2
+  exit 20
+fi
+EXPECTED_CONTROL_RELEASE_LOCK_SHA256="$ADOPTED_CONTROL_LOCK_SHA256"
+adopted_lock="$MOODRIDE_DIR/.deploy/releases/accepted-sha-${FIXTURE_REVISION}-${EXPECTED_CONTROL_RELEASE_LOCK_SHA256}.json"
+cp -p "$ADOPTED_CONTROL_LOCK" "$adopted_lock"
+(cd "$MOODRIDE_DIR/.deploy" && ln -s "bundles/${fixture_bundle_id}" current)
+if [ ! -L "$MOODRIDE_DIR/.deploy/current" ]; then
+  # Git Bash copies directory symlink targets when native symlinks are disabled.
+  # Keep the fixture behavioral by emulating only the exact pointer predicates;
+  # every other test/readlink invocation still uses the real builtins.
+  function [ {
+    case "${1:-}|${2:-}|${3:-}" in
+      "-L|$MOODRIDE_DIR/.deploy/current|]") return 0 ;;
+    esac
+    builtin [ "$@"
+  }
+  readlink() {
+    case "${1:-}|${2:-}" in
+      "-f|$MOODRIDE_DIR/.deploy/current") printf '%s\n' "$fixture_bundle" ;;
+      *) command readlink "$@" ;;
+    esac
+  }
+fi
+require_adopted_control_prerequisite
+[ "$PREVIOUS_CONTROL_BUNDLE" = "$fixture_bundle" ]
+[ "$CONTROL_ACCEPTED_LOCK" = "$adopted_lock" ]
 SYNTHETIC_USER_ID=00000000-0000-0000-0000-000000000037
 SYNTHETIC_JOB_TIMEOUT_SECONDS=2
 fixture_job_id=11111111-1111-4111-8111-111111111111
@@ -675,7 +1167,7 @@ psql_query() {
   esac
 }
 : > "$fixture_sql_log"
-run_control_route_identity_probe "$LEGACY_ENV"
+run_control_route_identity_probe "$CONTROL_ENV"
 [ "$CONTROL_EXECUTED_ROUTE_ALGORITHM_VERSION" = "hybrid_osrm_v2" ]
 [ "$CONTROL_EXECUTED_ROUTE_MODE" = "drive" ]
 [ "$CONTROL_EXECUTED_JOB_ROUTE_MODE" = "drive" ]
@@ -683,7 +1175,7 @@ run_control_route_identity_probe "$LEGACY_ENV"
 [ "$(grep -c '^delete-exact-reserved-job$' "$fixture_sql_log")" -eq 1 ]
 [ ! -e "$fixture_drain_marker" ]
 : > "$fixture_sql_log"
-run_synthetic_route_smoke "$LEGACY_ENV" v41 candidate
+run_synthetic_route_smoke "$CONTROL_ENV" v41 candidate
 [ "$CANDIDATE_EXECUTED_ROUTE_ALGORITHM_VERSION" = "hybrid_osrm_v2" ]
 [ "$CANDIDATE_EXECUTED_ROUTE_MODE" = "drive" ]
 [ "$CANDIDATE_EXECUTED_JOB_ALGORITHM_VERSION" = "hybrid_osrm_v2" ]
@@ -693,7 +1185,7 @@ run_synthetic_route_smoke "$LEGACY_ENV" v41 candidate
 [ ! -e "$fixture_drain_marker" ]
 : > "$fixture_sql_log"
 fixture_job_algorithm_version=hybrid_osrm_v3
-if run_control_route_identity_probe "$LEGACY_ENV"; then
+if run_control_route_identity_probe "$CONTROL_ENV"; then
   echo "Mismatched persisted job algorithm identity was accepted." >&2
   exit 17
 fi
@@ -702,7 +1194,7 @@ fi
 : > "$fixture_sql_log"
 fixture_job_algorithm_version=hybrid_osrm_v2
 fixture_primary_route_mode=bike
-if run_control_route_identity_probe "$LEGACY_ENV"; then
+if run_control_route_identity_probe "$CONTROL_ENV"; then
   echo "Mismatched job/committed-primary route mode was accepted." >&2
   exit 18
 fi
@@ -722,7 +1214,7 @@ rm -rf "$MOODRIDE_DIR"
             check=False,
         )
         require(completed.returncode == 0,
-                "Legacy env digest/identity bootstrap fixture failed: "
+                "Adopted-control identity and V35 rejection fixture failed: "
                 + completed.stderr.decode("utf-8", errors="replace").strip())
 
         osrm_dir = temp / "osrm"
@@ -768,6 +1260,45 @@ write_osrm_file_manifest "$OSRM_FIXTURE_DIR" canada-latest "$OSRM_FIXTURE_OUTPUT
             shell_bytes.decode("utf-8").splitlines() == python_lines
             and hashlib.sha256(shell_bytes).hexdigest() == python_hash,
             "Capture and deploy OSRM manifest canonicalization diverged",
+        )
+
+        lock_runtime = temp / "cutover-lock-runtime"
+        lock_script = (
+            f"LOCK_RUNTIME={shlex.quote(lock_runtime.relative_to(ROOT).as_posix())}\n"
+            + r"""#!/usr/bin/env bash
+set -Eeuo pipefail
+export DEPLOY_LIBRARY_ONLY=1
+source scripts/deploy/deploy_prod.sh
+MOODRIDE_DIR="$PWD/$LOCK_RUNTIME"
+mkdir -p "$MOODRIDE_DIR/.deploy"
+CUTOVER_LOCK_HELD=0
+acquire_cutover_lock
+[ -f "$MOODRIDE_DIR/.deploy/prod-cutover.lock" ]
+release_cutover_lock
+[ -f "$MOODRIDE_DIR/.deploy/prod-cutover.lock" ]
+unset DEPLOY_LIBRARY_ONLY
+export ROLLBACK_LIBRARY_ONLY=1
+source scripts/deploy/rollback_prod.sh
+CUTOVER_LOCK_HELD=0
+acquire_cutover_lock
+[ -f "$MOODRIDE_DIR/.deploy/prod-cutover.lock" ]
+release_cutover_lock
+[ -f "$MOODRIDE_DIR/.deploy/prod-cutover.lock" ]
+"""
+        )
+        lock_completed = subprocess.run(
+            [quality_bash],
+            cwd=ROOT,
+            env=os.environ.copy(),
+            input=lock_script.encode("utf-8"),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        require(
+            lock_completed.returncode == 0,
+            "Deploy lock release to rollback lock acquire fixture failed: "
+            + lock_completed.stderr.decode("utf-8", errors="replace").strip(),
         )
 
 
@@ -1030,10 +1561,17 @@ def main() -> None:
     verify_job = jobs["verify"]
     require(verify_job.get("needs") == "release-values",
             "Release verification is not source-locked to resolved release values")
-    verify_condition = verify_job.get("if", "")
-    for output in ("should_publish", "should_deploy"):
-        require(f"needs.release-values.outputs.{output} == 'true'" in verify_condition,
-                f"Release verification does not gate {output}")
+    verify_condition = " ".join(verify_job.get("if", "").split())
+    expected_verify_condition = (
+        "needs.release-values.outputs.should_publish == 'true' || "
+        "needs.release-values.outputs.should_deploy == 'true' || "
+        "needs.release-values.outputs.should_capture == 'true' || "
+        "needs.release-values.outputs.should_rollback == 'true'"
+    )
+    require(
+        verify_condition == expected_verify_condition,
+        "Release verification job condition is not the exact four-operation gate",
+    )
     verify_steps = verify_job["steps"]
     expected_verify_steps = (
         "Checkout exact release source for verification",
@@ -1049,6 +1587,24 @@ def main() -> None:
     require(
         tuple(step.get("name") for step in verify_steps) == expected_verify_steps,
         "Exact-source verification steps changed, disappeared, or run out of order",
+    )
+    for step in verify_steps:
+        require(
+            "continue-on-error" not in step,
+            f"Verification step can ignore failure: {step.get('name')}",
+        )
+        require(
+            "if" not in step,
+            f"Verification step can be conditionally bypassed: {step.get('name')}",
+        )
+    contract_fixture_step = step_by_name(
+        verify_job, "Run production release contract and behavior fixtures"
+    )
+    require(
+        contract_fixture_step.get("shell") == "bash"
+        and contract_fixture_step.get("run")
+        == "python3 scripts/deploy/check_prod_release_contract.py",
+        "Production release contract verify step command is not exact",
     )
     verify_checkout = step_by_name(verify_job, expected_verify_steps[0])
     require(verify_checkout["with"]["ref"] == "${{ needs.release-values.outputs.source_sha }}",
@@ -1161,11 +1717,34 @@ def main() -> None:
         "EXPECTED_GITHUB_SOURCE_URL='https://github.com/${{ github.repository }}'",
     ):
         require(token in capture_script, f"Runtime capture invocation omits {token}")
-    capture_upload = step_by_name(capture_job, "Upload production runtime capture")
-    require(capture_upload.get("uses") == "actions/upload-artifact@v4",
-            "Runtime capture is not uploaded as an artifact")
-    require(capture_upload.get("if") == "always()",
-            "Failed or unattributable runtime capture is not uploaded for diagnosis")
+    capture_evidence_upload = step_by_name(
+        capture_job, "Upload production runtime evidence"
+    )
+    require(capture_evidence_upload.get("uses") == "actions/upload-artifact@v4",
+            "Runtime evidence is not uploaded as an artifact")
+    require(capture_evidence_upload.get("if") == "always()",
+            "Failed or unattributable runtime evidence is not uploaded")
+    require(
+        capture_evidence_upload.get("with", {}).get("path")
+        == "production-runtime.json"
+        and capture_evidence_upload.get("with", {}).get("if-no-files-found")
+        == "error",
+        "Runtime evidence upload does not fail closed on a missing document",
+    )
+    capture_diagnostics_upload = step_by_name(
+        capture_job, "Upload production runtime capture diagnostics"
+    )
+    require(capture_diagnostics_upload.get("uses") == "actions/upload-artifact@v4",
+            "Runtime capture diagnostics are not uploaded as an artifact")
+    require(capture_diagnostics_upload.get("if") == "always()",
+            "Failed runtime capture diagnostics are not uploaded")
+    require(
+        capture_diagnostics_upload.get("with", {}).get("path")
+        == "production-runtime-diagnostics/"
+        and capture_diagnostics_upload.get("with", {}).get("if-no-files-found")
+        == "error",
+        "Runtime diagnostics upload does not fail closed on missing evidence",
+    )
     probe = (ROOT / "scripts/deploy/capture_prod_runtime.py").read_text(encoding="utf-8")
     for required in (
         "RepoDigests",
@@ -1182,7 +1761,7 @@ def main() -> None:
         "attribution_status",
         "flyway_schema_history",
         "running_route_api_migrations",
-        "raise SystemExit(2)",
+        "raise SystemExit(main())",
     ):
         require(required in probe, f"Runtime capture omits {required}")
     require(
@@ -1469,6 +2048,211 @@ def main() -> None:
     ):
         require(token in scripts, f"Pre-drain live identity gate omits {token}")
     deploy_script = (ROOT / "scripts/deploy/deploy_prod.sh").read_text(encoding="utf-8")
+    rollback_script = (ROOT / "scripts/deploy/rollback_prod.sh").read_text(
+        encoding="utf-8"
+    )
+
+    def require_ordered_operations(body: str, operations: tuple[str, ...], label: str) -> None:
+        executable_body = "\n".join(
+            line
+            for line in body.splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        )
+        cursor = 0
+        for operation in operations:
+            position = executable_body.find(operation, cursor)
+            require(
+                position >= 0,
+                f"{label} mandatory executable operation is missing or reordered: {operation}",
+            )
+            cursor = position + len(operation)
+
+    deploy_main = deploy_script.split(
+        'if [ "${DEPLOY_LIBRARY_ONLY:-0}" = "1" ]; then', 1
+    )[1]
+    rollback_main = rollback_script.split(
+        'if [ "${DEPLOY_LIBRARY_ONLY:-0}" = "1" ] '
+        '|| [ "${ROLLBACK_LIBRARY_ONLY:-0}" = "1" ]; then',
+        1,
+    )[1]
+    deploy_lock = re.search(
+        r"^acquire_cutover_lock\(\) \{\n(?P<body>.*?)^\}",
+        deploy_script,
+        re.MULTILINE | re.DOTALL,
+    )
+    rollback_lock = re.search(
+        r"^acquire_cutover_lock\(\) \{\n(?P<body>.*?)^\}",
+        rollback_script,
+        re.MULTILINE | re.DOTALL,
+    )
+    deploy_unlock = re.search(
+        r"^release_cutover_lock\(\) \{\n(?P<body>.*?)^\}",
+        deploy_script,
+        re.MULTILINE | re.DOTALL,
+    )
+    rollback_unlock = re.search(
+        r"^release_cutover_lock\(\) \{\n(?P<body>.*?)^\}",
+        rollback_script,
+        re.MULTILINE | re.DOTALL,
+    )
+    require(
+        all((deploy_lock, rollback_lock, deploy_unlock, rollback_unlock))
+        and deploy_lock.group("body") == rollback_lock.group("body")
+        and deploy_unlock.group("body") == rollback_unlock.group("body"),
+        "Deploy and rollback do not use the same persistent-file flock protocol",
+    )
+    for script_name, script_text in (
+        ("deploy", deploy_script),
+        ("rollback", rollback_script),
+    ):
+        for lock_token in (
+            "require_command flock",
+            'exec 9>>"$lock_file"',
+            "flock -n 9",
+            "flock -u 9",
+            "exec 9>&-",
+        ):
+            require(
+                lock_token in script_text,
+                f"{script_name} persistent cutover lock omits {lock_token}",
+            )
+        require(
+            not re.search(r"mkdir[^\n]*prod-cutover\.lock", script_text)
+            and not re.search(r"rm[^\n]*prod-cutover\.lock", script_text)
+            and not re.search(r"unlink[^\n]*prod-cutover\.lock", script_text),
+            f"{script_name} creates or unlinks the persistent cutover lock path",
+        )
+
+    require_ordered_operations(
+        deploy_main,
+        (
+            'load_release_lock "$RELEASE_LOCK" "$RELEASE_LOCK_SHA256"',
+            'load_quality_acceptance "$QUALITY_ACCEPTANCE" "$QUALITY_ACCEPTANCE_SHA256"',
+            'verify_control_bundle "$CONTROL_BUNDLE"',
+            "require_adopted_control_prerequisite",
+            "acquire_cutover_lock",
+            'capture_running_image_refs "$PREDEPLOY_ENV" "$PREDEPLOY_ENV"',
+            'verify_running_control_artifact_identity "$PREDEPLOY_ENV"',
+            'verify_control_accepted_lock "$PREDEPLOY_ENV"',
+            'validate_pre_drain_env "$PREDEPLOY_ENV" "$PREVIOUS_CONTROL_BUNDLE" control',
+            'validate_pre_drain_env "$CANDIDATE_ENV" "$CONTROL_BUNDLE" candidate',
+            'validate_candidate_control_bundle "$CANDIDATE_ENV"',
+            'verify_candidate_image_revisions "$CANDIDATE_ENV" "$IMAGE_TAG"',
+            'verify_candidate_image_revisions "$PREDEPLOY_ENV" "$PREDEPLOY_TAG"',
+            'validate_pre_drain_env "$PREDEPLOY_ENV" "$PREVIOUS_CONTROL_BUNDLE" control',
+            'validate_pre_drain_env "$CANDIDATE_ENV" "$CONTROL_BUNDLE" candidate',
+            'run_control_route_identity_probe "$PREDEPLOY_ENV"',
+            'verify_live_quality_identity "$PREDEPLOY_ENV" "$POSTGRES_DB" control',
+            'compose_env "$PREDEPLOY_ENV" stop caddy',
+            'wait_for_drain "$PREDEPLOY_ENV"',
+            'compose_env "$PREDEPLOY_ENV" stop route-api route-worker notification-service frontend',
+            'assert_no_active_jobs "$PREDEPLOY_ENV"',
+            'durable_copy "$CANDIDATE_ENV" "$ENV_FILE"',
+            'compose_env "$ENV_FILE" up -d --no-deps route-api',
+            'run_internal_http_healthcheck "Candidate route-api"',
+            "verify_forward_schema",
+            'compose_env "$ENV_FILE" up -d --no-deps route-worker notification-service frontend',
+            'run_internal_http_healthcheck "Candidate frontend"',
+            'run_internal_sockjs_healthcheck "Candidate WebSocket handshake"',
+            'run_synthetic_route_smoke "$ENV_FILE" v41 candidate',
+            'verify_live_quality_identity "$ENV_FILE" "$POSTGRES_DB" candidate',
+            'durable_replace "${ROLLBACK_SNAPSHOT}.tmp" "$ROLLBACK_SNAPSHOT"',
+            'switch_control_bundle_pointer "$CONTROL_BUNDLE"',
+            'compose_env "$ENV_FILE" up -d --no-deps --force-recreate caddy',
+        ),
+        "Deploy cutover",
+    )
+    require_ordered_operations(
+        rollback_main,
+        (
+            "acquire_cutover_lock",
+            'verify_control_bundle "$CURRENT_CONTROL_BUNDLE" 1',
+            'sha256sum --check "$(basename "$ROLLBACK_SNAPSHOT").sha256"',
+            'load_expected_github_source_url "$EXPECTED_CURRENT_TAG"',
+            'verify_control_bundle "$TARGET_CONTROL_BUNDLE"',
+            'require_file "$TARGET_CONTROL_EVIDENCE"',
+            'capture_running_image_refs "$CURRENT_ENV" "$CURRENT_ENV"',
+            'verify_current_release_fence "$CURRENT_ENV" "$EXPECTED_CURRENT_TAG"',
+            'verify_running_osrm_identity "$CURRENT_ENV"',
+            'load_image_lock "$TARGET_IMAGE_LOCK" "$ROLLBACK_TAG" "$TARGET_ENV"',
+            'verify_target_control_evidence "$TARGET_CONTROL_EVIDENCE" "$TARGET_ENV" "$ROLLBACK_TAG"',
+            'validate_rollback_env "$CURRENT_ENV" "$CURRENT_CONTROL_BUNDLE"',
+            'validate_rollback_env "$TARGET_ENV" "$TARGET_CONTROL_BUNDLE"',
+            'docker pull "$(get_env_var OSRM_IMAGE_REF "$TARGET_ENV")"',
+            'compose_env "$TARGET_ENV" pull osrm route-api route-worker notification-service frontend',
+            'verify_target_image_revisions "$TARGET_ENV" "$ROLLBACK_TAG"',
+            'docker pull "$(get_env_var OSRM_IMAGE_REF "$CURRENT_ENV")"',
+            'verify_target_image_revisions "$CURRENT_ENV" "$ACTUAL_CURRENT_TAG"',
+            'verify_running_caddy_image "$CURRENT_ENV"',
+            'compose_env "$CURRENT_ENV" stop caddy',
+            'wait_for_drain "$CURRENT_ENV"',
+            'compose_env "$CURRENT_ENV" stop route-api route-worker notification-service frontend',
+            'assert_no_active_jobs "$CURRENT_ENV"',
+            'create_validated_recovery_database "$CURRENT_ENV" "$CURRENT_BACKUP"',
+            "RECOVERY_ENABLED=1",
+            "apply_coordinated_sql",
+            'verify_v38_baseline_schema "$CURRENT_ENV"',
+            'durable_copy "$TARGET_ENV" "$ENV_FILE"',
+            'compose_env "$ENV_FILE" up -d --no-deps --force-recreate osrm',
+            'verify_running_osrm_identity "$ENV_FILE"',
+            'compose_env "$ENV_FILE" up -d --no-deps route-api',
+            'run_internal_http_healthcheck "Rollback route-api"',
+            'verify_v38_baseline_schema "$ENV_FILE"',
+            'compose_env "$ENV_FILE" up -d --no-deps route-worker notification-service frontend',
+            'run_internal_sockjs_healthcheck "Rollback WebSocket handshake"',
+            'run_synthetic_route_smoke "$ENV_FILE" v38',
+            'switch_control_bundle_pointer "$TARGET_CONTROL_BUNDLE"',
+            'durable_replace "$MOODRIDE_DIR/.deploy/last-rollback.${MAIN_PID}.tmp"',
+            "RECOVERY_ENABLED=0",
+            'compose_env "$ENV_FILE" up -d --no-deps --force-recreate caddy',
+            'verify_running_caddy_image "$ENV_FILE"',
+            'run_sockjs_healthcheck "Rollback WebSocket handshake"',
+        ),
+        "Rollback cutover",
+    )
+    adoption_helper_match = re.search(
+        r"^require_adopted_control_prerequisite\(\) \{\n(?P<body>.*?)^\}",
+        deploy_script,
+        re.MULTILINE | re.DOTALL,
+    )
+    require(
+        adoption_helper_match is not None,
+        "Deploy omits the fail-before-mutation adopted-control prerequisite",
+    )
+    adoption_helper = adoption_helper_match.group("body")
+    for adoption_token in (
+        '[ ! -L "$MOODRIDE_DIR/.deploy/current" ]',
+        "current V35 is not adopted",
+        'accepted-${control_tag}-${EXPECTED_CONTROL_RELEASE_LOCK_SHA256}.json',
+        'actual_sha256" != "$EXPECTED_CONTROL_RELEASE_LOCK_SHA256',
+        'approval_gate == "production-control-adoption"',
+        "flyway_schema_version | tonumber) >= 38",
+        "flyway_history_sha256",
+        ".control_adoption.source_sha == .source_sha",
+        ".control_adoption.images == .images",
+        ".control_adoption.runtime_identity == $runtime_identity",
+    ):
+        require(
+            adoption_token in adoption_helper,
+            f"Adopted-control prerequisite omits {adoption_token}",
+        )
+    require(
+        not re.search(
+            r"^(bootstrap_legacy_control_runtime_identity|materialize_legacy_control_lock)\(\)",
+            deploy_script,
+            re.MULTILINE,
+        )
+        and "accepted-legacy-" not in deploy_script,
+        "Deploy still synthesizes trusted metadata for a legacy V35 control",
+    )
+    adoption_call = deploy_main.find("\nrequire_adopted_control_prerequisite")
+    first_mutation = deploy_main.find("\nmkdir -p .deploy/releases")
+    lock_call = deploy_main.find("\nacquire_cutover_lock")
+    evidence_clear = deploy_main.find("\nclear_stale_runtime_evidence")
+    require(
+        0 <= adoption_call < first_mutation < lock_call < evidence_clear,
+        "V35 adoption prerequisite does not fail before deploy mutation",
+    )
     control_helper_match = re.search(
         r"^run_control_route_identity_probe\(\) \{\n(?P<body>.*?)^\}",
         deploy_script,
@@ -1568,7 +2352,7 @@ def main() -> None:
             f"Attempt-bound deploy evidence omits {attempt_evidence_token}",
         )
     require(
-        "CUTOVER_LOCK_HELD=1\nclear_stale_runtime_evidence\ntrap cleanup EXIT"
+        "acquire_cutover_lock\nclear_stale_runtime_evidence\ntrap cleanup EXIT"
         in deploy_script,
         "Stale runtime evidence is not cleared immediately after taking the cutover lock",
     )

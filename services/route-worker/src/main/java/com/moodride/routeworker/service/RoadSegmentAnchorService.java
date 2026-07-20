@@ -11,22 +11,27 @@ import org.locationtech.jts.geom.Coordinate;
 import org.locationtech.jts.geom.LineString;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.cache.Cache;
 import org.springframework.cache.CacheManager;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.io.Serializable;
+import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.function.LongSupplier;
 
 @Service
 public class RoadSegmentAnchorService {
 
     private static final Logger logger = LoggerFactory.getLogger(RoadSegmentAnchorService.class);
     private static final int MAX_LOCAL_ANCHORS = 25_000;
+    private static final int MAX_LOCAL_FALLBACKS = 25_000;
+    private static final long FALLBACK_CACHE_TTL_NANOS = Duration.ofSeconds(30).toNanos();
     private static final int ANCHOR_SEARCH_LIMIT = 24;
     private static final double ANCHOR_SEARCH_RADIUS_METERS = 900.0;
 
@@ -37,12 +42,31 @@ public class RoadSegmentAnchorService {
     private final String roadDatasetRevision;
     private final String anchorCacheSchema;
     private final Map<String, RoadAnchor> localAnchors = new LinkedHashMap<>(1024, 0.75f, true);
+    private final Map<String, FallbackCacheEntry> localFallbacks = new LinkedHashMap<>(1024, 0.75f, true);
+    private final LongSupplier nanoTime;
 
+    @Autowired
     public RoadSegmentAnchorService(
         RoadSegmentRepository roadSegmentRepository,
         CacheManager cacheManager,
         RouteGenerationMetricsService routeGenerationMetricsService,
         ScenicCacheConfiguration cacheConfiguration
+    ) {
+        this(
+            roadSegmentRepository,
+            cacheManager,
+            routeGenerationMetricsService,
+            cacheConfiguration,
+            System::nanoTime
+        );
+    }
+
+    RoadSegmentAnchorService(
+        RoadSegmentRepository roadSegmentRepository,
+        CacheManager cacheManager,
+        RouteGenerationMetricsService routeGenerationMetricsService,
+        ScenicCacheConfiguration cacheConfiguration,
+        LongSupplier nanoTime
     ) {
         this.roadSegmentRepository = roadSegmentRepository;
         this.cacheManager = cacheManager;
@@ -50,6 +74,7 @@ public class RoadSegmentAnchorService {
         this.scenicScoringVersion = cacheConfiguration.getScenicScoringVersion();
         this.roadDatasetRevision = cacheConfiguration.getRoadDatasetRevision();
         this.anchorCacheSchema = cacheConfiguration.getRoadAnchorCacheSchema();
+        this.nanoTime = nanoTime;
     }
 
     @Transactional(readOnly = true)
@@ -79,10 +104,18 @@ public class RoadSegmentAnchorService {
             return cachedAnchor.toRoadNode();
         }
 
+        FallbackCacheEntry cachedFallback = getFallback(cacheKey);
+        if (cachedFallback != null) {
+            recordLookup(cachedFallback.source(), startedNanos);
+            return fallbackCenter;
+        }
+
         RoadAnchorResolution resolution = findBestAnchor(tile, fallbackCenter);
         if ("postgres".equals(resolution.source())) {
             putLocal(cacheKey, resolution.anchor());
             putRedis(redisCache, cacheKey, resolution.anchor());
+        } else {
+            putFallback(cacheKey, resolution.source());
         }
         recordLookup(resolution.source(), startedNanos);
         return resolution.anchor().toRoadNode();
@@ -100,6 +133,7 @@ public class RoadSegmentAnchorService {
             String cacheKey = cacheKey(h3Index);
             synchronized (localAnchors) {
                 localAnchors.remove(cacheKey);
+                localFallbacks.remove(cacheKey);
             }
             if (redisCache != null) {
                 try {
@@ -114,6 +148,7 @@ public class RoadSegmentAnchorService {
     public void clearLocal() {
         synchronized (localAnchors) {
             localAnchors.clear();
+            localFallbacks.clear();
         }
     }
 
@@ -245,10 +280,42 @@ public class RoadSegmentAnchorService {
 
     private void putLocal(String cacheKey, RoadAnchor anchor) {
         synchronized (localAnchors) {
+            localFallbacks.remove(cacheKey);
             localAnchors.put(cacheKey, anchor);
             while (localAnchors.size() > MAX_LOCAL_ANCHORS) {
                 String eldest = localAnchors.keySet().iterator().next();
                 localAnchors.remove(eldest);
+            }
+        }
+    }
+
+    private FallbackCacheEntry getFallback(String cacheKey) {
+        synchronized (localAnchors) {
+            FallbackCacheEntry fallback = localFallbacks.get(cacheKey);
+            if (fallback == null) {
+                return null;
+            }
+            if (fallback.isExpired(nanoTime.getAsLong())) {
+                localFallbacks.remove(cacheKey);
+                return null;
+            }
+            return fallback;
+        }
+    }
+
+    private void putFallback(String cacheKey, String source) {
+        synchronized (localAnchors) {
+            if (localAnchors.containsKey(cacheKey)) {
+                localFallbacks.remove(cacheKey);
+                return;
+            }
+            localFallbacks.put(
+                cacheKey,
+                new FallbackCacheEntry(source, nanoTime.getAsLong() + FALLBACK_CACHE_TTL_NANOS)
+            );
+            while (localFallbacks.size() > MAX_LOCAL_FALLBACKS) {
+                String eldest = localFallbacks.keySet().iterator().next();
+                localFallbacks.remove(eldest);
             }
         }
     }
@@ -266,6 +333,12 @@ public class RoadSegmentAnchorService {
             return 0.0;
         }
         return Math.max(0.0, Math.min(1.0, value));
+    }
+
+    private record FallbackCacheEntry(String source, long expiresAtNanos) {
+        private boolean isExpired(long nowNanos) {
+            return nowNanos - expiresAtNanos >= 0;
+        }
     }
 
     private record RoadAnchorResolution(RoadAnchor anchor, String source) {

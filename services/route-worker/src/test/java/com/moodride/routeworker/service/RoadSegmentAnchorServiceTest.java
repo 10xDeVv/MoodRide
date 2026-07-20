@@ -17,13 +17,14 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.cache.Cache;
 import org.springframework.cache.CacheManager;
 
+import java.time.Duration;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicLong;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyDouble;
 import static org.mockito.ArgumentMatchers.anyInt;
-import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -47,6 +48,7 @@ class RoadSegmentAnchorServiceTest {
     private Cache roadSegmentCache;
     @Mock
     private RouteGenerationMetricsService metricsService;
+    private final AtomicLong nowNanos = new AtomicLong();
 
     private RoadSegmentAnchorService service;
 
@@ -57,11 +59,13 @@ class RoadSegmentAnchorServiceTest {
         configuration.setScenicScoringVersion(SCENIC_VERSION);
         configuration.setRoadDatasetRevision(ROAD_REVISION);
         configuration.setRoadAnchorCacheSchema(ANCHOR_SCHEMA);
+        nowNanos.set(0L);
         service = new RoadSegmentAnchorService(
             roadSegmentRepository,
             cacheManager,
             metricsService,
-            configuration
+            configuration,
+            nowNanos::get
         );
     }
 
@@ -80,18 +84,24 @@ class RoadSegmentAnchorServiceTest {
     }
 
     @Test
-    void repositoryFailureIsNotCachedAndNextLookupRecoversFromPostgres() {
+    void repositoryFailureIsCachedBrieflyAndNextLookupAfterExpiryRecoversFromPostgres() {
         RoadNode fallback = new RoadNode(45.0, -66.0);
-        RoadSegment recoveredSegment = roadSegment();
         when(roadSegmentRepository.findAnchorCandidatesNear(anyDouble(), anyDouble(), anyDouble(), anyInt()))
             .thenThrow(new IllegalStateException("temporary database error"))
-            .thenReturn(List.of(recoveredSegment));
+            .thenReturn(List.of(roadSegment()));
 
         assertEquals(fallback, service.anchorFor(activeTile(), fallback));
-        verify(roadSegmentCache, never()).put(any(), any());
-        clearInvocations(roadSegmentCache);
+        assertEquals(fallback, service.anchorFor(activeTile(), fallback));
 
-        assertEquals(new RoadNode(45.5, -65.5), service.anchorFor(activeTile(), fallback));
+        verify(roadSegmentRepository)
+            .findAnchorCandidatesNear(anyDouble(), anyDouble(), anyDouble(), anyInt());
+        verify(roadSegmentCache, never()).put(any(), any());
+
+        nowNanos.addAndGet(Duration.ofMinutes(1).toNanos());
+
+        RoadNode recovered = new RoadNode(45.5, -65.5);
+        assertEquals(recovered, service.anchorFor(activeTile(), fallback));
+        assertEquals(recovered, service.anchorFor(activeTile(), fallback));
         verify(roadSegmentRepository, times(2))
             .findAnchorCandidatesNear(anyDouble(), anyDouble(), anyDouble(), anyInt());
         verify(roadSegmentCache).put(
@@ -101,17 +111,90 @@ class RoadSegmentAnchorServiceTest {
     }
 
     @Test
-    void emptyCandidateFallbackIsNotStoredForSevenDays() {
+    void emptyCandidateFallbackIsCachedBrieflyWithoutEnteringRedis() {
+        RoadNode fallback = new RoadNode(45.0, -66.0);
+        when(roadSegmentRepository.findAnchorCandidatesNear(anyDouble(), anyDouble(), anyDouble(), anyInt()))
+            .thenReturn(List.of());
+        RoadNode laterFallback = new RoadNode(45.1, -66.1);
+        assertEquals(fallback, service.anchorFor(activeTile(), fallback));
+        assertEquals(laterFallback, service.anchorFor(activeTile(), laterFallback));
+
+        verify(roadSegmentRepository)
+            .findAnchorCandidatesNear(anyDouble(), anyDouble(), anyDouble(), anyInt());
+        verify(roadSegmentCache, never()).put(any(), any());
+    }
+
+    @Test
+    void evictClearsFallbackAndAllowsImmediateRecovery() {
+        RoadNode fallback = new RoadNode(45.0, -66.0);
+        when(roadSegmentRepository.findAnchorCandidatesNear(anyDouble(), anyDouble(), anyDouble(), anyInt()))
+            .thenReturn(List.of())
+            .thenReturn(List.of(roadSegment()));
+
+        assertEquals(fallback, service.anchorFor(activeTile(), fallback));
+        assertEquals(fallback, service.anchorFor(activeTile(), fallback));
+
+        service.evict(List.of(H3_INDEX));
+
+        assertEquals(new RoadNode(45.5, -65.5), service.anchorFor(activeTile(), fallback));
+        verify(roadSegmentRepository, times(2))
+            .findAnchorCandidatesNear(anyDouble(), anyDouble(), anyDouble(), anyInt());
+        verify(roadSegmentCache).evict(activeKey());
+    }
+
+    @Test
+    void clearLocalClearsFallbackAndAllowsImmediateRecovery() {
+        RoadNode fallback = new RoadNode(45.0, -66.0);
+        when(roadSegmentRepository.findAnchorCandidatesNear(anyDouble(), anyDouble(), anyDouble(), anyInt()))
+            .thenReturn(List.of())
+            .thenReturn(List.of(roadSegment()));
+
+        assertEquals(fallback, service.anchorFor(activeTile(), fallback));
+        assertEquals(fallback, service.anchorFor(activeTile(), fallback));
+
+        service.clearLocal();
+
+        assertEquals(new RoadNode(45.5, -65.5), service.anchorFor(activeTile(), fallback));
+        verify(roadSegmentRepository, times(2))
+            .findAnchorCandidatesNear(anyDouble(), anyDouble(), anyDouble(), anyInt());
+    }
+
+    @Test
+    void laterRedisAnchorOverridesCachedFallback() {
         RoadNode fallback = new RoadNode(45.0, -66.0);
         when(roadSegmentRepository.findAnchorCandidatesNear(anyDouble(), anyDouble(), anyDouble(), anyInt()))
             .thenReturn(List.of());
 
         assertEquals(fallback, service.anchorFor(activeTile(), fallback));
-        assertEquals(fallback, service.anchorFor(activeTile(), fallback));
 
-        verify(roadSegmentRepository, times(2))
+        RoadSegmentAnchorService.RoadAnchor recovered =
+            new RoadSegmentAnchorService.RoadAnchor(45.25, -66.50);
+        RoadNode recoveredNode = new RoadNode(45.25, -66.50);
+        when(roadSegmentCache.get(activeKey(), RoadSegmentAnchorService.RoadAnchor.class))
+            .thenReturn(recovered);
+
+        assertEquals(recoveredNode, service.anchorFor(activeTile(), fallback));
+        assertEquals(recoveredNode, service.anchorFor(activeTile(), fallback));
+        verify(roadSegmentRepository)
             .findAnchorCandidatesNear(anyDouble(), anyDouble(), anyDouble(), anyInt());
-        verify(roadSegmentCache, never()).put(any(), any());
+    }
+
+    @Test
+    void postgresAnchorRetainsLocalAndRedisCacheSemantics() {
+        RoadNode fallback = new RoadNode(45.0, -66.0);
+        when(roadSegmentRepository.findAnchorCandidatesNear(anyDouble(), anyDouble(), anyDouble(), anyInt()))
+            .thenReturn(List.of(roadSegment()));
+
+        RoadNode expected = new RoadNode(45.5, -65.5);
+        assertEquals(expected, service.anchorFor(activeTile(), fallback));
+        assertEquals(expected, service.anchorFor(activeTile(), fallback));
+
+        verify(roadSegmentRepository)
+            .findAnchorCandidatesNear(anyDouble(), anyDouble(), anyDouble(), anyInt());
+        verify(roadSegmentCache).put(
+            activeKey(),
+            new RoadSegmentAnchorService.RoadAnchor(45.5, -65.5)
+        );
     }
 
     @Test

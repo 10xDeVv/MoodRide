@@ -83,13 +83,23 @@ type ScenicRegionsApiResponse = Omit<ScenicRegionsResponse, "regions"> & {
   regions: ScenicRegionApiResponse[];
 };
 
-type RouteDetailApiResponse = Omit<RouteDetailResponse, "optionRevision"> & {
+type RouteDetailApiResponse = Omit<
+  RouteDetailResponse,
+  "optionRevision" | "optionCount" | "optionsComplete"
+> & {
   optionRevision?: number;
+  optionCount?: number;
+  optionsComplete?: boolean;
 };
 
 export function normalizeRouteDetailResponse(payload: RouteDetailApiResponse): RouteDetailResponse {
-  if (payload.optionRevision !== undefined) return payload as RouteDetailResponse;
-  return { ...payload, optionRevision: 0 };
+  const optionCount = payload.optionCount ?? payload.routeOptions.length;
+  return {
+    ...payload,
+    optionRevision: payload.optionRevision ?? 0,
+    optionCount,
+    optionsComplete: payload.optionsComplete ?? (payload.routeOptions.length === optionCount)
+  };
 }
 
 async function handleJson<T>(response: Response): Promise<T> {

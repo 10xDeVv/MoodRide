@@ -23,6 +23,7 @@ public interface RouteJobTerminalEventRepository
         WHERE e.job_id = :jobId
           AND e.state_revision = :stateRevision
           AND e.delivered_at IS NULL
+          AND e.next_attempt_at <= :now
           AND (e.lease_expires_at IS NULL OR e.lease_expires_at <= :now)
         ORDER BY e.event_type ASC
         FOR UPDATE OF e SKIP LOCKED

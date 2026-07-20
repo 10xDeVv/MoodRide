@@ -120,9 +120,72 @@ valid_catalog="$temp_dir/valid.catalog"
 capture_flyway_history ignored.env "$valid_history"
 capture_database_catalog ignored.env "$POSTGRES_DB" "$valid_catalog"
 validate_release_invariants ignored.env "$POSTGRES_DB"
+backup_sync_log="$temp_dir/backup-sync.log"
+eval "$(declare -f sync_recovery_path | sed '1s/sync_recovery_path/original_sync_recovery_path/')"
+sync_recovery_path() {
+  printf '%s\n' "$1" >> "$backup_sync_log"
+  original_sync_recovery_path "$@"
+}
+
 create_recovery_backup ignored.env "$valid_backup"
+sync_recovery_path() {
+  original_sync_recovery_path "$@"
+}
+[ -s "$valid_backup" ] && [ -s "${valid_backup}.cksum" ] \
+  || fail "Recovery backup publication did not create a dump and checksum pair."
+verify_recovery_backup "$valid_backup" \
+  || fail "Published recovery backup dump and checksum do not match."
+[ "$(wc -l < "$backup_sync_log" | tr -d '[:space:]')" = "3" ] \
+  || fail "Recovery backup did not sync both staged artifacts and their parent directory."
+grep -E '/\.valid\.dump\.dump\.tmp\.[^/]+$' "$backup_sync_log" >/dev/null \
+  || fail "Recovery backup dump was not synced from a unique temporary path."
+grep -E '/\.valid\.dump\.cksum\.tmp\.[^/]+$' "$backup_sync_log" >/dev/null \
+  || fail "Recovery backup checksum was not synced from a unique temporary path."
+grep -Fx "$temp_dir" "$backup_sync_log" >/dev/null \
+  || fail "Recovery backup parent directory was not synced after pair publication."
+for staged_backup_artifact in \
+    "$temp_dir"/.valid.dump.dump.tmp.* \
+    "$temp_dir"/.valid.dump.cksum.tmp.*; do
+  [ ! -e "$staged_backup_artifact" ] \
+    || fail "Recovery backup left a staged artifact after durable pair publication."
+done
 create_validated_recovery_database ignored.env "$valid_backup" moodride_valid_recovery \
   "$valid_history" "$valid_catalog"
+precondition_prior_oid="$(database_oid ignored.env "$POSTGRES_DB")"
+precondition_recovery_oid="$(database_oid ignored.env moodride_valid_recovery)"
+valid_checksum="$(cat "${valid_backup}.cksum")"
+printf '%s\n' 'invalid-checksum-fixture' > "${valid_backup}.cksum"
+if promote_validated_recovery_database ignored.env moodride_valid_recovery \
+    moodride_precondition_quarantine "$valid_backup" "$valid_history" "$valid_catalog"; then
+  fail "Recovery promotion accepted a mismatched backup checksum."
+fi
+printf '%s\n' "$valid_checksum" > "${valid_backup}.cksum"
+precondition_failure_state="$(docker exec "$container" psql --username postgres --dbname postgres \
+  --no-psqlrc --quiet --tuples-only --no-align --set ON_ERROR_STOP=1 \
+  --command "
+    SELECT CASE WHEN
+      EXISTS (
+        SELECT 1 FROM pg_catalog.pg_database
+        WHERE datname = '$POSTGRES_DB'
+          AND oid::text = '$precondition_prior_oid'
+          AND datallowconn
+      )
+      AND EXISTS (
+        SELECT 1 FROM pg_catalog.pg_database
+        WHERE datname = 'moodride_valid_recovery'
+          AND oid::text = '$precondition_recovery_oid'
+          AND datallowconn
+      )
+      AND NOT EXISTS (
+        SELECT 1 FROM pg_catalog.pg_database
+        WHERE datname = 'moodride_precondition_quarantine'
+      )
+      THEN 'precondition-failure-ok'
+      ELSE 'precondition-failure-divergent'
+    END;
+  ")"
+[ "$(printf '%s' "$precondition_failure_state" | tr -d '[:space:]')" = "precondition-failure-ok" ] \
+  || fail "Failed recovery precondition changed database identities or connectivity."
 
 docker exec "$container" psql --username postgres --dbname "$POSTGRES_DB" \
   --set ON_ERROR_STOP=1 --command "CREATE TABLE public.candidate_only (value integer);" >/dev/null
@@ -146,6 +209,139 @@ quarantined_candidate_table="$(docker exec "$container" psql --username postgres
 [ "$(printf '%s' "$quarantined_candidate_table" | tr -d '[:space:]')" = "t" ] \
   || fail "Previous candidate database was not preserved in quarantine."
 
+eval "$(declare -f run_database_rename | sed '1s/run_database_rename/original_run_database_rename/')"
+
+promotion_backup="$temp_dir/promotion-failure.dump"
+promotion_history="$temp_dir/promotion-failure.history"
+promotion_catalog="$temp_dir/promotion-failure.catalog"
+capture_flyway_history ignored.env "$promotion_history"
+capture_database_catalog ignored.env "$POSTGRES_DB" "$promotion_catalog"
+create_recovery_backup ignored.env "$promotion_backup"
+create_validated_recovery_database ignored.env "$promotion_backup" moodride_promotion_failure_recovery \
+  "$promotion_history" "$promotion_catalog"
+promotion_prior_oid="$(database_oid ignored.env "$POSTGRES_DB")"
+promotion_recovery_oid="$(database_oid ignored.env moodride_promotion_failure_recovery)"
+docker exec "$container" psql --username postgres --dbname "$POSTGRES_DB" \
+  --set ON_ERROR_STOP=1 \
+  --command "CREATE TABLE public.promotion_restore_guard (value text PRIMARY KEY); INSERT INTO public.promotion_restore_guard VALUES ('exact-original-restored');" >/dev/null
+
+promotion_rename_failure_attempts=0
+promotion_restore_failure_attempts=0
+inject_ambiguous_initial_quarantine_once=1
+run_database_rename() {
+  if [ "$2" = "$POSTGRES_DB" ] \
+     && [ "$3" = "moodride_promotion_failure_quarantine" ] \
+     && [ "$inject_ambiguous_initial_quarantine_once" -eq 1 ]; then
+    inject_ambiguous_initial_quarantine_once=0
+    original_run_database_rename "$@" || return 1
+    return 1
+  fi
+  if [ "$2" = "moodride_promotion_failure_recovery" ] \
+     && [ "$3" = "$POSTGRES_DB" ]; then
+    promotion_rename_failure_attempts=$((promotion_rename_failure_attempts + 1))
+    return 1
+  fi
+  if [ "$2" = "moodride_promotion_failure_quarantine" ] \
+     && [ "$3" = "$POSTGRES_DB" ]; then
+    promotion_restore_failure_attempts=$((promotion_restore_failure_attempts + 1))
+    return 1
+  fi
+  original_run_database_rename "$@"
+}
+if promote_validated_recovery_database ignored.env moodride_promotion_failure_recovery \
+    moodride_promotion_failure_quarantine "$promotion_backup" \
+    "$promotion_history" "$promotion_catalog"; then
+  fail "Promotion rename failure fixture unexpectedly succeeded."
+fi
+[ "$promotion_rename_failure_attempts" -eq 3 ] \
+  || fail "Promotion rename failure did not exhaust its ordinary retry path."
+[ "$promotion_restore_failure_attempts" -eq 3 ] \
+  || fail "Original database restoration did not exhaust its ordinary retry path."
+[ "$inject_ambiguous_initial_quarantine_once" -eq 0 ] \
+  || fail "Ambiguous initial quarantine result was not injected."
+promotion_failure_state="$(docker exec "$container" psql --username postgres --dbname postgres \
+  --no-psqlrc --quiet --tuples-only --no-align --set ON_ERROR_STOP=1 \
+  --command "
+    SELECT CASE WHEN
+      EXISTS (
+        SELECT 1 FROM pg_catalog.pg_database
+        WHERE datname = '$POSTGRES_DB'
+          AND oid::text = '$promotion_prior_oid'
+          AND datallowconn
+      )
+      AND EXISTS (
+        SELECT 1 FROM pg_catalog.pg_database
+        WHERE datname = 'moodride_promotion_failure_recovery'
+          AND oid::text = '$promotion_recovery_oid'
+          AND datallowconn
+      )
+      AND NOT EXISTS (
+        SELECT 1 FROM pg_catalog.pg_database
+        WHERE datname = 'moodride_promotion_failure_quarantine'
+      )
+      AND NOT EXISTS (
+        SELECT 1 FROM pg_catalog.pg_database
+        WHERE datname = '$POSTGRES_DB'
+          AND oid::text = '$promotion_recovery_oid'
+      )
+      THEN 'promotion-rename-rollback-ok'
+      ELSE 'promotion-rename-rollback-divergent'
+    END;
+  ")"
+[ "$(printf '%s' "$promotion_failure_state" | tr -d '[:space:]')" = "promotion-rename-rollback-ok" ] \
+  || fail "Promotion rename failure did not restore the exact database identities and connectivity."
+promotion_restore_probe="$(docker exec "$container" psql --username postgres --dbname "$POSTGRES_DB" \
+  --no-psqlrc --quiet --tuples-only --no-align --set ON_ERROR_STOP=1 \
+  --command "SELECT value FROM public.promotion_restore_guard;")"
+[ "$(printf '%s' "$promotion_restore_probe" | tr -d '[:space:]')" = "exact-original-restored" ] \
+  || fail "Promotion rename failure did not return the exact original database to service."
+
+initial_quarantine_failure_attempts=0
+run_database_rename() {
+  if [ "$2" = "$POSTGRES_DB" ] \
+     && [ "$3" = "moodride_initial_quarantine_failure" ]; then
+    initial_quarantine_failure_attempts=$((initial_quarantine_failure_attempts + 1))
+    return 1
+  fi
+  original_run_database_rename "$@"
+}
+if promote_validated_recovery_database ignored.env moodride_promotion_failure_recovery \
+    moodride_initial_quarantine_failure "$promotion_backup" \
+    "$promotion_history" "$promotion_catalog"; then
+  fail "Initial quarantine rename failure fixture unexpectedly succeeded."
+fi
+[ "$initial_quarantine_failure_attempts" -eq 3 ] \
+  || fail "Initial quarantine rename failure did not exhaust its ordinary retry path."
+initial_quarantine_failure_state="$(docker exec "$container" psql --username postgres --dbname postgres \
+  --no-psqlrc --quiet --tuples-only --no-align --set ON_ERROR_STOP=1 \
+  --command "
+    SELECT CASE WHEN
+      EXISTS (
+        SELECT 1 FROM pg_catalog.pg_database
+        WHERE datname = '$POSTGRES_DB'
+          AND oid::text = '$promotion_prior_oid'
+          AND datallowconn
+      )
+      AND EXISTS (
+        SELECT 1 FROM pg_catalog.pg_database
+        WHERE datname = 'moodride_promotion_failure_recovery'
+          AND oid::text = '$promotion_recovery_oid'
+          AND datallowconn
+      )
+      AND NOT EXISTS (
+        SELECT 1 FROM pg_catalog.pg_database
+        WHERE datname = 'moodride_initial_quarantine_failure'
+      )
+      THEN 'initial-quarantine-rollback-ok'
+      ELSE 'initial-quarantine-rollback-divergent'
+    END;
+  ")"
+[ "$(printf '%s' "$initial_quarantine_failure_state" | tr -d '[:space:]')" = "initial-quarantine-rollback-ok" ] \
+  || fail "Initial quarantine failure changed the original database identity, name, or connectivity."
+run_database_rename() {
+  original_run_database_rename "$@"
+}
+
 rename_backup="$temp_dir/rename-failure.dump"
 rename_history="$temp_dir/rename-failure.history"
 rename_catalog="$temp_dir/rename-failure.catalog"
@@ -154,15 +350,17 @@ capture_database_catalog ignored.env "$POSTGRES_DB" "$rename_catalog"
 create_recovery_backup ignored.env "$rename_backup"
 create_validated_recovery_database ignored.env "$rename_backup" moodride_rename_recovery \
   "$rename_history" "$rename_catalog"
+rename_prior_oid="$(database_oid ignored.env "$POSTGRES_DB")"
+rename_recovery_oid="$(database_oid ignored.env moodride_rename_recovery)"
 docker exec "$container" psql --username postgres --dbname "$POSTGRES_DB" \
   --set ON_ERROR_STOP=1 \
   --command "CREATE TABLE public.rename_restore_guard (value text PRIMARY KEY); INSERT INTO public.rename_restore_guard VALUES ('old-db-restored');" >/dev/null
 docker exec "$container" createdb --username postgres --owner postgres moodride_rename_quarantine_failed
 
 eval "$(declare -f validate_recovery_database | sed '1s/validate_recovery_database/original_validate_recovery_database/')"
-eval "$(declare -f run_database_rename | sed '1s/run_database_rename/original_run_database_rename/')"
 inject_post_promotion_validation_failure=1
 inject_failed_candidate_rename_once=1
+inject_ambiguous_promotion_once=1
 validate_recovery_database() {
   if [ "$2" = "$POSTGRES_DB" ] && [ "$inject_post_promotion_validation_failure" -eq 1 ]; then
     inject_post_promotion_validation_failure=0
@@ -171,6 +369,13 @@ validate_recovery_database() {
   original_validate_recovery_database "$@"
 }
 run_database_rename() {
+  if [ "$2" = "moodride_rename_recovery" ] \
+     && [ "$3" = "$POSTGRES_DB" ] \
+     && [ "$inject_ambiguous_promotion_once" -eq 1 ]; then
+    inject_ambiguous_promotion_once=0
+    original_run_database_rename "$@" || return 1
+    return 1
+  fi
   case "$2|$3|$inject_failed_candidate_rename_once" in
     "$POSTGRES_DB|moodride_rename_quarantine_failed_1|1")
       inject_failed_candidate_rename_once=0
@@ -183,16 +388,44 @@ if promote_validated_recovery_database ignored.env moodride_rename_recovery \
     moodride_rename_quarantine "$rename_backup" "$rename_history" "$rename_catalog"; then
   fail "Post-promotion validation failure fixture unexpectedly succeeded."
 fi
+[ "$inject_ambiguous_promotion_once" -eq 0 ] \
+  || fail "Ambiguous recovery promotion result was not reconciled by database OID."
 rename_restore_probe="$(docker exec "$container" psql --username postgres --dbname "$POSTGRES_DB" \
   --no-psqlrc --quiet --tuples-only --no-align --set ON_ERROR_STOP=1 \
   --command "SELECT value FROM public.rename_restore_guard;")"
 [ "$(printf '%s' "$rename_restore_probe" | tr -d '[:space:]')" = "old-db-restored" ] \
   || fail "Prior quarantined database was not restored after injected candidate rename failure."
-failed_candidate_exists="$(docker exec "$container" psql --username postgres --dbname postgres \
+rename_failure_state="$(docker exec "$container" psql --username postgres --dbname postgres \
   --no-psqlrc --quiet --tuples-only --no-align --set ON_ERROR_STOP=1 \
-  --command "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_database WHERE datname = 'moodride_rename_quarantine_failed_1');")"
-[ "$(printf '%s' "$failed_candidate_exists" | tr -d '[:space:]')" = "t" ] \
-  || fail "Failed promoted candidate was not preserved after rename retry."
+  --command "
+    SELECT CASE WHEN
+      EXISTS (
+        SELECT 1 FROM pg_catalog.pg_database
+        WHERE datname = '$POSTGRES_DB'
+          AND oid::text = '$rename_prior_oid'
+          AND datallowconn
+      )
+      AND EXISTS (
+        SELECT 1 FROM pg_catalog.pg_database
+        WHERE datname = 'moodride_rename_quarantine_failed_1'
+          AND oid::text = '$rename_recovery_oid'
+          AND datallowconn
+      )
+      AND NOT EXISTS (
+        SELECT 1 FROM pg_catalog.pg_database
+        WHERE datname = 'moodride_rename_quarantine'
+      )
+      AND NOT EXISTS (
+        SELECT 1 FROM pg_catalog.pg_database
+        WHERE datname = '$POSTGRES_DB'
+          AND oid::text = '$rename_recovery_oid'
+      )
+      THEN 'rename-rollback-ok'
+      ELSE 'rename-rollback-divergent'
+    END;
+  ")"
+[ "$(printf '%s' "$rename_failure_state" | tr -d '[:space:]')" = "rename-rollback-ok" ] \
+  || fail "Injected candidate rename failure did not restore exact identities and connectivity."
 
 persistent_backup="$temp_dir/persistent-rename-failure.dump"
 persistent_history="$temp_dir/persistent-rename-failure.history"
@@ -202,6 +435,8 @@ capture_database_catalog ignored.env "$POSTGRES_DB" "$persistent_catalog"
 create_recovery_backup ignored.env "$persistent_backup"
 create_validated_recovery_database ignored.env "$persistent_backup" moodride_persist_recovery \
   "$persistent_history" "$persistent_catalog"
+persistent_prior_oid="$(database_oid ignored.env "$POSTGRES_DB")"
+persistent_recovery_oid="$(database_oid ignored.env moodride_persist_recovery)"
 docker exec "$container" psql --username postgres --dbname "$POSTGRES_DB" \
   --set ON_ERROR_STOP=1 \
   --command "CREATE TABLE public.persistent_rename_restore_guard (value text PRIMARY KEY); INSERT INTO public.persistent_rename_restore_guard VALUES ('prior-db-restored');" >/dev/null
@@ -241,15 +476,24 @@ persistent_database_state="$(docker exec "$container" psql --username postgres -
     SELECT CASE WHEN
       EXISTS (
         SELECT 1 FROM pg_catalog.pg_database
-        WHERE datname = '$POSTGRES_DB' AND datallowconn
+        WHERE datname = '$POSTGRES_DB'
+          AND oid::text = '$persistent_prior_oid'
+          AND datallowconn
       )
       AND EXISTS (
         SELECT 1 FROM pg_catalog.pg_database
-        WHERE datname = 'moodride_persist_quarantine_failed' AND datallowconn
+        WHERE datname = 'moodride_persist_quarantine_failed'
+          AND oid::text = '$persistent_recovery_oid'
+          AND datallowconn
       )
       AND NOT EXISTS (
         SELECT 1 FROM pg_catalog.pg_database
         WHERE datname = 'moodride_persist_quarantine'
+      )
+      AND NOT EXISTS (
+        SELECT 1 FROM pg_catalog.pg_database
+        WHERE datname = '$POSTGRES_DB'
+          AND oid::text = '$persistent_recovery_oid'
       )
       THEN 'persistent-rename-rollback-ok'
       ELSE 'persistent-rename-rollback-divergent'
@@ -263,6 +507,147 @@ failed_persistent_candidate_guard="$(docker exec "$container" psql --username po
   --command "SELECT to_regclass('public.persistent_rename_restore_guard') IS NULL;")"
 [ "$(printf '%s' "$failed_persistent_candidate_guard" | tr -d '[:space:]')" = "t" ] \
   || fail "Failed recovery quarantine does not contain the promoted candidate."
+
+failclosed_backup="$temp_dir/failclosed-quarantine.dump"
+failclosed_history="$temp_dir/failclosed-quarantine.history"
+failclosed_catalog="$temp_dir/failclosed-quarantine.catalog"
+capture_flyway_history ignored.env "$failclosed_history"
+capture_database_catalog ignored.env "$POSTGRES_DB" "$failclosed_catalog"
+create_recovery_backup ignored.env "$failclosed_backup"
+create_validated_recovery_database ignored.env "$failclosed_backup" moodride_failclosed_recovery \
+  "$failclosed_history" "$failclosed_catalog"
+failclosed_prior_oid="$(database_oid ignored.env "$POSTGRES_DB")"
+failclosed_recovery_oid="$(database_oid ignored.env moodride_failclosed_recovery)"
+docker exec "$container" psql --username postgres --dbname "$POSTGRES_DB" \
+  --set ON_ERROR_STOP=1 \
+  --command "CREATE TABLE public.failclosed_restore_guard (value text PRIMARY KEY); INSERT INTO public.failclosed_restore_guard VALUES ('failclosed-original-restored');" >/dev/null
+
+eval "$(declare -f reclaim_database_name | sed '1s/reclaim_database_name/original_reclaim_database_name/')"
+inject_post_promotion_validation_failure=1
+failclosed_rename_attempts=0
+failclosed_reclaim_attempts=0
+validate_recovery_database() {
+  if [ "$2" = "$POSTGRES_DB" ] && [ "$inject_post_promotion_validation_failure" -eq 1 ]; then
+    inject_post_promotion_validation_failure=0
+    return 1
+  fi
+  original_validate_recovery_database "$@"
+}
+run_database_rename() {
+  if [ "$2" = "$POSTGRES_DB" ] \
+     && [ "$3" = "moodride_failclosed_quarantine_failed" ]; then
+    failclosed_rename_attempts=$((failclosed_rename_attempts + 1))
+    return 1
+  fi
+  original_run_database_rename "$@"
+}
+reclaim_database_name() {
+  if [ "$2" = "$POSTGRES_DB" ] \
+     && [ "$3" = "moodride_failclosed_quarantine_failed" ]; then
+    failclosed_reclaim_attempts=$((failclosed_reclaim_attempts + 1))
+    return 1
+  fi
+  original_reclaim_database_name "$@"
+}
+failclosed_log="$temp_dir/failclosed-quarantine.log"
+if promote_validated_recovery_database ignored.env moodride_failclosed_recovery \
+    moodride_failclosed_quarantine "$failclosed_backup" \
+    "$failclosed_history" "$failclosed_catalog" >"$failclosed_log" 2>&1; then
+  fail "Unrecoverable failed-candidate quarantine fixture unexpectedly succeeded."
+fi
+[ "$failclosed_rename_attempts" -eq 3 ] \
+  || fail "Fail-closed candidate quarantine did not exhaust ordinary rename retries."
+[ "$failclosed_reclaim_attempts" -eq 1 ] \
+  || fail "Fail-closed candidate quarantine did not attempt the reclaim fallback."
+grep -F "CRITICAL FAIL-CLOSED: the unvalidated recovery database could not be quarantined and remains at the canonical name with connections disabled" \
+  "$failclosed_log" >/dev/null \
+  || fail "Failed-candidate quarantine did not report its explicit fail-closed state."
+failclosed_database_state="$(docker exec "$container" psql --username postgres --dbname postgres \
+  --no-psqlrc --quiet --tuples-only --no-align --set ON_ERROR_STOP=1 \
+  --command "
+    SELECT CASE WHEN
+      EXISTS (
+        SELECT 1 FROM pg_catalog.pg_database
+        WHERE datname = '$POSTGRES_DB'
+          AND oid::text = '$failclosed_recovery_oid'
+          AND NOT datallowconn
+      )
+      AND EXISTS (
+        SELECT 1 FROM pg_catalog.pg_database
+        WHERE datname = 'moodride_failclosed_quarantine'
+          AND oid::text = '$failclosed_prior_oid'
+          AND datallowconn
+      )
+      AND NOT EXISTS (
+        SELECT 1 FROM pg_catalog.pg_database
+        WHERE datname = 'moodride_failclosed_quarantine_failed'
+      )
+      THEN 'failclosed-quarantine-ok'
+      ELSE 'failclosed-quarantine-divergent'
+    END;
+  ")"
+[ "$(printf '%s' "$failclosed_database_state" | tr -d '[:space:]')" = "failclosed-quarantine-ok" ] \
+  || fail "Failed-candidate quarantine did not disable canonical candidate connectivity."
+if docker exec "$container" psql --username postgres --dbname "$POSTGRES_DB" \
+    --no-psqlrc --quiet --tuples-only --no-align --set ON_ERROR_STOP=1 \
+    --command "SELECT 1;" >/dev/null 2>&1; then
+  fail "Unvalidated canonical recovery database still accepted connections."
+fi
+
+original_reclaim_database_name ignored.env "$POSTGRES_DB" \
+  moodride_failclosed_quarantine_failed "$failclosed_recovery_oid"
+restore_prior_database_to_canonical ignored.env \
+  moodride_failclosed_quarantine "$failclosed_prior_oid"
+verify_failed_promotion_rollback_invariant ignored.env \
+  "$failclosed_prior_oid" "$failclosed_recovery_oid" \
+  moodride_failclosed_quarantine moodride_failclosed_quarantine_failed \
+  || fail "Fail-closed fixture cleanup did not restore exact database identities."
+failclosed_restore_probe="$(docker exec "$container" psql --username postgres --dbname "$POSTGRES_DB" \
+  --no-psqlrc --quiet --tuples-only --no-align --set ON_ERROR_STOP=1 \
+  --command "SELECT value FROM public.failclosed_restore_guard;")"
+[ "$(printf '%s' "$failclosed_restore_probe" | tr -d '[:space:]')" = "failclosed-original-restored" ] \
+  || fail "Fail-closed fixture cleanup did not restore original database connectivity."
+reclaim_database_name() {
+  original_reclaim_database_name "$@"
+}
+eval "$(declare -f compose_env | sed '1s/compose_env/original_compose_env/')"
+failclosed_stop_attempts=0
+failclosed_kill_attempts=0
+failclosed_stop_verification_file="$temp_dir/failclosed-stop-verifications"
+printf '%s\n' 0 > "$failclosed_stop_verification_file"
+compose_env() {
+  local delegated_env="$1"
+  local verification_count
+  shift
+  case "$*" in
+    "stop postgres")
+      failclosed_stop_attempts=$((failclosed_stop_attempts + 1))
+      return 1
+      ;;
+    "kill postgres")
+      failclosed_kill_attempts=$((failclosed_kill_attempts + 1))
+      return 1
+      ;;
+    "ps --status running --quiet postgres")
+      verification_count="$(cat "$failclosed_stop_verification_file")"
+      verification_count=$((verification_count + 1))
+      printf '%s\n' "$verification_count" > "$failclosed_stop_verification_file"
+      if [ "$verification_count" -eq 1 ]; then
+        printf '%s\n' 'still-running-postgres-container'
+      fi
+      return 0
+      ;;
+  esac
+  original_compose_env "$delegated_env" "$@"
+}
+stop_database_service_fail_closed ignored.env
+[ "$failclosed_stop_attempts" -eq 2 ] \
+  && [ "$failclosed_kill_attempts" -eq 2 ] \
+  && [ "$(cat "$failclosed_stop_verification_file")" -eq 2 ] \
+  || fail "Fail-closed PostgreSQL shutdown returned before a stopped service was verified."
+compose_env() {
+  original_compose_env "$@"
+}
 
 validate_recovery_database() {
   original_validate_recovery_database "$@"
@@ -341,7 +726,14 @@ docker exec "$container" psql --username postgres --dbname "$POSTGRES_DB" \
       natural_land_use double precision,
       elevation_variance double precision,
       last_scored timestamp,
-      scoring_version varchar(80)
+      scoring_version varchar(80),
+      water_visibility_score double precision,
+      water_crossing_score double precision,
+      coastal_road_score double precision,
+      tree_canopy_score double precision,
+      scenic_poi_score double precision,
+      viewpoint_score double precision,
+      bridge_coastal_score double precision
     );
     INSERT INTO public.scenic_score_tiles (h3_index, scenic_score, scoring_version)
     VALUES ('8928308280fffff', 0.1, '3.6-control');
@@ -359,12 +751,42 @@ relative_bin="$relative_asset_fixture/bin"
 relative_payload="$relative_asset_fixture/payload"
 relative_docker_log="$relative_asset_fixture/docker.log"
 mkdir -p "$relative_project" "$relative_caller/assets" "$relative_bin" "$relative_payload"
-cp "$scenic_csv" "$relative_payload/scenic_score_tiles_updates.csv"
+printf '{"scoringVersion":"3.7-relative-fixture"}\n' > "$relative_payload/metadata.json"
+preflight_valid_csv="$relative_payload/valid.csv"
+sed 's/3\.7-sql-fixture/3.7-relative-fixture/' "$scenic_csv" > "$preflight_valid_csv"
+preflight_header="$(sed -n '1p' "$preflight_valid_csv")"
+preflight_row="$(sed -n '2p' "$preflight_valid_csv")"
+
+make_scenic_asset() {
+  local asset_name="$1"
+  local csv_source="$2"
+  local asset_work="$relative_payload/${asset_name%.tar.gz}"
+  mkdir -p "$asset_work"
+  cp "$csv_source" "$asset_work/scenic_score_tiles_updates.csv"
+  cp "$relative_payload/metadata.json" "$asset_work/metadata.json"
+  tar -czf "$relative_caller/assets/$asset_name" \
+    -C "$asset_work" scenic_score_tiles_updates.csv metadata.json
+}
+
+make_scenic_asset valid-scenic.tar.gz "$preflight_valid_csv"
+printf '%s\n%s\n' \
+  "${preflight_header/#h3_index,scenic_score/scenic_score,h3_index}" \
+  "$preflight_row" > "$relative_payload/reordered.csv"
+make_scenic_asset reordered-header.tar.gz "$relative_payload/reordered.csv"
+printf '%s\n%s\n' \
+  "${preflight_header/#h3_index,scenic_score/h3_index,h3_index}" \
+  "$preflight_row" > "$relative_payload/duplicate.csv"
+make_scenic_asset duplicate-header.tar.gz "$relative_payload/duplicate.csv"
+sed '2s/,0\.9,/,NaN,/' "$preflight_valid_csv" > "$relative_payload/nan.csv"
+make_scenic_asset nan-score.tar.gz "$relative_payload/nan.csv"
+sed '2s/,0\.9,/,Infinity,/' "$preflight_valid_csv" > "$relative_payload/infinity.csv"
+make_scenic_asset infinity-score.tar.gz "$relative_payload/infinity.csv"
+sed '2s/,0\.9,/,1.0001,/' "$preflight_valid_csv" > "$relative_payload/out-of-range.csv"
+make_scenic_asset out-of-range-score.tar.gz "$relative_payload/out-of-range.csv"
 printf 'not a scenic release\n' > "$relative_payload/unrelated.txt"
-tar -czf "$relative_caller/assets/valid-scenic.tar.gz" \
-  -C "$relative_payload" scenic_score_tiles_updates.csv
 tar -czf "$relative_caller/assets/incomplete-scenic.tar.gz" \
   -C "$relative_payload" unrelated.txt
+
 cat > "$relative_project/.env.prod" <<'ENV'
 POSTGRES_DB=scenic_fixture
 POSTGRES_USER=postgres
@@ -379,15 +801,16 @@ cat > "$relative_bin/docker" <<'SH'
 printf '%s\n' "$*" >> "$SCENIC_DOCKER_LOG"
 exit 73
 SH
-cat > "$relative_bin/date" <<'SH'
-#!/usr/bin/env sh
-printf '%s\n' '20260101T000000Z'
-SH
-chmod +x "$relative_bin/docker" "$relative_bin/date"
+chmod +x "$relative_bin/docker"
 : > "$relative_docker_log"
 
 run_scenic_asset_preflight() {
   local asset_name="$1"
+  local expected_sha256="${2:-}"
+  if [ -z "$expected_sha256" ]; then
+    expected_sha256="$(sha256sum "$relative_caller/assets/$asset_name")"
+    expected_sha256="${expected_sha256%% *}"
+  fi
   (
     cd "$relative_caller"
     PATH="$relative_bin:$PATH" \
@@ -395,6 +818,7 @@ run_scenic_asset_preflight() {
       MOODRIDE_DIR="$relative_project" \
       bash "$SCRIPT_DIR/deploy_scenic_release.sh" \
         --asset "assets/$asset_name" \
+        --asset-sha256 "$expected_sha256" \
         --scoring-version 3.7-relative-fixture
   )
 }
@@ -404,24 +828,207 @@ if run_scenic_asset_preflight valid-scenic.tar.gz \
   fail "Scenic relative-asset preflight unexpectedly passed the injected Docker failure."
 fi
 [ "$(wc -l < "$relative_docker_log" | tr -d '[:space:]')" = "1" ] \
-  || fail "Scenic deploy did not resolve a relative asset before changing directories."
+  || fail "Valid scenic preflight did not reach the isolated container copy."
 grep -F " cp $relative_project/.deploy/scenic-releases/scenic-release." \
   "$relative_docker_log" >/dev/null \
-  || fail "Scenic deploy did not copy from its unique extraction directory."
+  || fail "Scenic deploy did not copy the resolved relative asset from its unique extraction directory."
 
-if run_scenic_asset_preflight incomplete-scenic.tar.gz \
-    >"$relative_asset_fixture/incomplete.log" 2>&1; then
-  fail "Incomplete scenic asset unexpectedly passed preflight."
+docker_calls_before="$(wc -l < "$relative_docker_log" | tr -d '[:space:]')"
+if run_scenic_asset_preflight valid-scenic.tar.gz \
+    0000000000000000000000000000000000000000000000000000000000000000 \
+    >"$relative_asset_fixture/tampered.log" 2>&1; then
+  fail "Checksum-tampered scenic asset unexpectedly passed preflight."
 fi
-grep -F "Missing required file in scenic asset: scenic_score_tiles_updates.csv" \
-  "$relative_asset_fixture/incomplete.log" >/dev/null \
-  || fail "A stale scenic extraction contaminated the next preflight."
-[ "$(wc -l < "$relative_docker_log" | tr -d '[:space:]')" = "1" ] \
-  || fail "A stale scenic CSV reached Docker during the next preflight."
+grep -F "checksum does not match the published SHA-256 sidecar" \
+  "$relative_asset_fixture/tampered.log" >/dev/null \
+  || fail "Tampered scenic asset did not fail on its immutable checksum."
+
+for malformed_case in \
+  "reordered-header.tar.gz|header must match the exact ordered" \
+  "duplicate-header.tar.gz|header must match the exact ordered" \
+  "nan-score.tar.gz|non-finite or malformed scenic_score" \
+  "infinity-score.tar.gz|non-finite or malformed scenic_score" \
+  "out-of-range-score.tar.gz|out-of-range scenic_score" \
+  "incomplete-scenic.tar.gz|unexpected or unsafe member"; do
+  IFS='|' read -r malformed_asset expected_error <<EOF
+$malformed_case
+EOF
+  malformed_log="$relative_asset_fixture/${malformed_asset}.log"
+  if run_scenic_asset_preflight "$malformed_asset" >"$malformed_log" 2>&1; then
+    fail "Malformed scenic asset unexpectedly passed preflight: $malformed_asset"
+  fi
+  grep -F "$expected_error" "$malformed_log" >/dev/null \
+    || fail "Malformed scenic asset did not report its contract failure: $malformed_asset"
+done
+[ "$(wc -l < "$relative_docker_log" | tr -d '[:space:]')" = "$docker_calls_before" ] \
+  || fail "Tampered or malformed scenic bytes reached Docker before rejection."
 for extracted_dir in "$relative_project/.deploy/scenic-releases"/scenic-release.*; do
   [ ! -e "$extracted_dir" ] \
     || fail "Scenic deploy left a disposable extraction directory behind."
 done
+
+readiness_fixture="$temp_dir/scenic-readiness-rollback"
+readiness_project="$readiness_fixture/project"
+readiness_bin="$readiness_fixture/bin"
+readiness_state="$readiness_fixture/state"
+readiness_payload="$readiness_fixture/payload"
+readiness_log="$readiness_fixture/docker.log"
+mkdir -p "$readiness_project" "$readiness_bin" "$readiness_state" "$readiness_payload"
+cat > "$readiness_project/.env.prod" <<'ENV'
+POSTGRES_DB=scenic_fixture
+POSTGRES_USER=postgres
+REDIS_PASSWORD=scenic-fixture-password
+MOODRIDE_SCENIC_SCORING_VERSION=3.6-healthy
+MOODRIDE_ROAD_DATASET_REVISION=scenic-fixture-road
+MOODRIDE_ROAD_DATASET_FINGERPRINT=0000000000000000000000000000000000000000000000000000000000000000
+MOODRIDE_ROAD_ANCHOR_CACHE_SCHEMA=scenic-fixture-anchor
+ENV
+: > "$readiness_project/docker-compose.prod.yml"
+sed 's/3\.7-sql-fixture/3.7-readiness-fixture/' "$scenic_csv" \
+  > "$readiness_payload/scenic_score_tiles_updates.csv"
+printf '{"scoringVersion":"3.7-readiness-fixture"}\n' \
+  > "$readiness_payload/metadata.json"
+readiness_asset="$readiness_fixture/scenic-readiness.tar.gz"
+tar -czf "$readiness_asset" -C "$readiness_payload" \
+  scenic_score_tiles_updates.csv metadata.json
+readiness_asset_sha256="$(sha256sum "$readiness_asset")"
+readiness_asset_sha256="${readiness_asset_sha256%% *}"
+printf 'running\n' > "$readiness_state/caddy"
+printf '0\n' > "$readiness_state/psql-heredocs"
+: > "$readiness_log"
+
+cat > "$readiness_bin/docker" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+{
+  printf '%s' "$*"
+  printf '\n'
+} | tr '\n' ' ' >> "$SCENIC_DOCKER_LOG"
+printf '\n' >> "$SCENIC_DOCKER_LOG"
+args="$*"
+if [ "${1:-}" = "inspect" ]; then
+  container_id="${!#}"
+  if printf '%s' "$args" | grep -F "Config.Env" >/dev/null; then
+    scenic_version="$(grep '^MOODRIDE_SCENIC_SCORING_VERSION=' \
+      "$SCENIC_PROJECT/.env.prod" | cut -d= -f2-)"
+    printf 'MOODRIDE_SCENIC_SCORING_VERSION=%s\n' "$scenic_version"
+    exit 0
+  fi
+  if [ "$container_id" = "fixture-caddy" ]; then
+    [ "$(cat "$SCENIC_STATE/caddy")" = "running" ] && printf 'true\n' || printf 'false\n'
+  else
+    printf 'true\n'
+  fi
+  exit 0
+fi
+
+if [ "${1:-}" != "compose" ]; then
+  exit 99
+fi
+case "$args" in
+  *" ps -q "*)
+    service="${args##* ps -q }"
+    printf 'fixture-%s\n' "$service"
+    ;;
+  *" stop "*)
+    if printf '%s' "$args" | grep -F "caddy" >/dev/null; then
+      printf 'stopped\n' > "$SCENIC_STATE/caddy"
+    fi
+    ;;
+  *" up "*" caddy")
+    printf 'running\n' > "$SCENIC_STATE/caddy"
+    ;;
+  *" up "*)
+    ;;
+  *" cp "*)
+    ;;
+  *" exec -T postgres psql "*)
+    case "$args" in
+      *"COPY ("*"TO STDOUT"*)
+        printf '%s\n' '8928308280fffff,0.2,0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.1,0.2,0.0,0.1,0.8,0.2,,3.6-healthy,0.3,0.4,0.5,0.6,0.7,0.8,0.9'
+        ;;
+      *"SELECT COUNT(*) FROM route_jobs WHERE status IN"*)
+        printf '0\n'
+        ;;
+      *"SELECT id FROM route_jobs"*)
+        printf '11111111-1111-4111-8111-111111111111\n'
+        ;;
+      *"SELECT status FROM route_jobs"*)
+        printf 'COMPLETED\n'
+        ;;
+      *"primary_ready_at IS NOT NULL"*)
+        printf '1\n'
+        ;;
+      *"SELECT COUNT(*) FROM routes"*)
+        printf '1\n'
+        ;;
+      *"--command"*)
+        ;;
+      *)
+        cat >/dev/null
+        heredoc_count="$(cat "$SCENIC_STATE/psql-heredocs")"
+        printf '%s\n' "$((heredoc_count + 1))" > "$SCENIC_STATE/psql-heredocs"
+        ;;
+    esac
+    ;;
+  *" exec -T route-api wget "*)
+    if printf '%s' "$args" | grep -F -- "--post-data=" >/dev/null; then
+      printf '{"jobId":"11111111-1111-4111-8111-111111111111"}\n'
+    elif grep -Fx 'MOODRIDE_SCENIC_SCORING_VERSION=3.7-readiness-fixture' \
+        "$SCENIC_PROJECT/.env.prod" >/dev/null; then
+      exit 28
+    fi
+    ;;
+  *" exec -T route-worker wget "*)
+    ;;
+  *" exec -T "*" redis "*)
+    ;;
+  *" exec -T postgres sh "*)
+    ;;
+  *)
+    exit 98
+    ;;
+esac
+SH
+chmod +x "$readiness_bin/docker"
+
+if PATH="$readiness_bin:$PATH" \
+    SCENIC_DOCKER_LOG="$readiness_log" \
+    SCENIC_PROJECT="$readiness_project" \
+    SCENIC_STATE="$readiness_state" \
+    MOODRIDE_DIR="$readiness_project" \
+    DRAIN_TIMEOUT_SECONDS=2 \
+    DRAIN_POLL_SECONDS=1 \
+    HEALTHCHECK_TIMEOUT_SECONDS=1 \
+    HEALTHCHECK_POLL_SECONDS=1 \
+    ROUTE_SMOKE_TIMEOUT_SECONDS=2 \
+    bash "$SCRIPT_DIR/deploy_scenic_release.sh" \
+      --asset "$readiness_asset" \
+      --asset-sha256 "$readiness_asset_sha256" \
+      --scoring-version 3.7-readiness-fixture \
+      >"$readiness_fixture/deploy.log" 2>&1; then
+  fail "Readiness-injected scenic promotion unexpectedly succeeded."
+fi
+grep -F "Previous scenic database and healthy runtime were restored; ingress reopened." \
+  "$readiness_fixture/deploy.log" >/dev/null \
+  || fail "Readiness failure did not report successful rollback and reopen."
+grep -E ' cp .*/scenic-rollback\.[A-Za-z0-9]+\.csv postgres:/tmp/scenic_score_tiles_rollback\.csv' \
+  "$readiness_log" >/dev/null \
+  || fail "Readiness failure did not restore the pre-cutover scenic database snapshot."
+grep -Fx 'MOODRIDE_SCENIC_SCORING_VERSION=3.6-healthy' \
+  "$readiness_project/.env.prod" >/dev/null \
+  || fail "Readiness failure did not restore the exact prior runtime environment."
+[ "$(cat "$readiness_state/caddy")" = "running" ] \
+  || fail "Readiness failure stranded ingress closed after healthy rollback."
+[ "$(cat "$readiness_state/psql-heredocs")" = "2" ] \
+  || fail "Readiness fixture did not execute candidate mutation and snapshot restoration."
+smoke_log_line="$(grep -n -- '--post-data=' "$readiness_log" | tail -n 1 | cut -d: -f1)"
+reopen_log_line="$(grep -n ' up -d --no-deps caddy' "$readiness_log" | tail -n 1 | cut -d: -f1)"
+case "$smoke_log_line:$reopen_log_line" in
+  *[!0-9:]*|:*|*:) fail "Could not establish readiness-smoke/reopen ordering." ;;
+esac
+[ "$smoke_log_line" -lt "$reopen_log_line" ] \
+  || fail "Ingress reopened before the restored route smoke completed."
 docker exec -i "$container" sh -c 'cat > /tmp/scenic_score_tiles_updates.csv' < "$scenic_csv"
 docker exec -i "$container" psql --username postgres --dbname "$POSTGRES_DB" \
   --set ON_ERROR_STOP=1 --set expected_scoring_version=3.7-sql-fixture \

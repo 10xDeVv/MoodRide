@@ -8,6 +8,7 @@ import com.moodride.routeapi.dto.BoundingBoxResponse;
 import com.moodride.routeapi.dto.ScenicRegionResponse;
 import com.moodride.routeapi.dto.ScenicRegionsResponse;
 import com.moodride.routeapi.repository.ScenicScoreTileRepository;
+import com.moodride.routeapi.config.ScenicCacheConfiguration;
 import java.util.Comparator;
 import java.util.List;
 import org.locationtech.jts.geom.Point;
@@ -19,10 +20,15 @@ import org.springframework.transaction.annotation.Transactional;
 public class ScenicRegionService {
 
     private final ScenicScoreTileRepository scenicScoreTileRepository;
+    private final String scenicScoringVersion;
     private final ScenicScoreCalculator scenicScoreCalculator = new ScenicScoreCalculator();
 
-    public ScenicRegionService(ScenicScoreTileRepository scenicScoreTileRepository) {
+    public ScenicRegionService(
+        ScenicScoreTileRepository scenicScoreTileRepository,
+        ScenicCacheConfiguration scenicCacheConfiguration
+    ) {
         this.scenicScoreTileRepository = scenicScoreTileRepository;
+        this.scenicScoringVersion = scenicCacheConfiguration.getScenicScoringVersion();
     }
 
     public ScenicRegionsResponse getScenicRegions(
@@ -39,12 +45,14 @@ public class ScenicRegionService {
 
         List<ScenicRegionResponse> regions = scenicScoreTileRepository
             .findTopScenicRegionsNearPoint(
+                scenicScoringVersion,
                 latitude,
                 longitude,
                 sanitizedRadiusKm * 1000.0,
                 candidateLimit
             )
             .stream()
+            .filter(tile -> tile != null && scenicScoringVersion.equals(tile.getScoringVersion()))
             .sorted(Comparator.comparingDouble((ScenicScoreTile tile) -> scoreTile(tile, parsedVibe)).reversed())
             .limit(sanitizedLimit)
             .map(tile -> toResponse(tile, scoreTile(tile, parsedVibe)))

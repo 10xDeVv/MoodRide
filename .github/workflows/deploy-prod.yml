@@ -53,6 +53,7 @@ jobs:
   release-values:
     name: Resolve Release Values
     runs-on: ubuntu-latest
+    environment: production
     outputs:
       ghcr_namespace: ${{ steps.release.outputs.ghcr_namespace }}
       image_tag: ${{ steps.release.outputs.image_tag }}
@@ -389,7 +390,9 @@ jobs:
     needs: release-values
     if: >-
       needs.release-values.outputs.should_publish == 'true' ||
-      needs.release-values.outputs.should_deploy == 'true'
+      needs.release-values.outputs.should_deploy == 'true' ||
+      needs.release-values.outputs.should_capture == 'true' ||
+      needs.release-values.outputs.should_rollback == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout exact release source for verification
@@ -525,8 +528,13 @@ jobs:
 
   capture-runtime:
     name: Capture Production Runtime Attribution
-    needs: release-values
-    if: needs.release-values.outputs.should_capture == 'true'
+    needs:
+      - release-values
+      - verify
+    if: >-
+      always() &&
+      needs.release-values.outputs.should_capture == 'true' &&
+      needs.verify.result == 'success'
     runs-on: ubuntu-latest
     environment: production
     steps:
@@ -548,20 +556,125 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          status=0
+          diagnostics_dir="production-runtime-diagnostics"
+          remote_document="${diagnostics_dir}/remote-stdout.json"
+          ssh_stderr="${diagnostics_dir}/ssh.stderr.log"
+          validation_stderr="${diagnostics_dir}/validation.stderr.log"
+          rm -f production-runtime.json
+          rm -rf "$diagnostics_dir"
+          mkdir -p "$diagnostics_dir"
+
+          validate_capture_document() {
+            jq -e \
+              --arg expected_source_url "https://github.com/${{ github.repository }}" '
+                type == "object"
+                and .schema_version == 3
+                and .source == "production-runtime-observation"
+                and (.captured_at | type == "string" and length > 0)
+                and (
+                  .attribution_status == "attributable"
+                  or .attribution_status == "unattributable"
+                )
+                and (.attribution_reasons | type == "array")
+                and (.attribution_reasons | all(.[]; type == "string"))
+                and (
+                  .expected_source_revision == null
+                  or (.expected_source_revision | test("^[0-9a-f]{40}$"))
+                )
+                and (
+                  .expected_github_source_url == null
+                  or (.expected_github_source_url | type == "string")
+                )
+                and (.compose_env_identity | type == "object")
+                and (.compose_runtime | type == "object")
+                and (.database_cache_identity | type == "object")
+                and (.osrm_identity | type == "object")
+                and (.caddy_identity | type == "object")
+                and (.flyway_schema_history | type == "object")
+                and (.running_route_api_migrations | type == "object")
+                and (.services | type == "array")
+                and (
+                  if .attribution_status == "attributable" then
+                    .attribution_reasons == []
+                    and .expected_github_source_url == $expected_source_url
+                    and (.expected_source_revision | test("^[0-9a-f]{40}$"))
+                  else
+                    (.attribution_reasons | length) > 0
+                  end
+                )
+              ' "$1" >/dev/null
+          }
+
+          ssh_status=0
           ssh "${{ secrets.PROD_SSH_USER }}@${{ secrets.PROD_SSH_HOST }}" \
             "EXPECTED_GITHUB_SOURCE_URL='https://github.com/${{ github.repository }}' python3 -" \
-            < scripts/deploy/capture_prod_runtime.py > production-runtime.json || status=$?
-          python3 -m json.tool production-runtime.json >/dev/null
-          [ "$(jq -er '.attribution_status' production-runtime.json)" = "attributable" ] || status=2
-          exit "$status"
+            < scripts/deploy/capture_prod_runtime.py \
+            > "$remote_document" 2> "$ssh_stderr" || ssh_status=$?
+          printf '%s\n' "$ssh_status" > "${diagnostics_dir}/ssh-exit-status"
 
-      - name: Upload production runtime capture
+          remote_document_valid="false"
+          published_document="local-unattributable-fallback"
+          if validate_capture_document "$remote_document" 2> "$validation_stderr"; then
+            cp "$remote_document" production-runtime.json
+            remote_document_valid="true"
+            published_document="remote"
+          else
+            if [ "$ssh_status" -ne 0 ]; then
+              fallback_reason="Production runtime SSH capture failed with status ${ssh_status} before valid schema-versioned evidence was received."
+            else
+              fallback_reason="Production runtime SSH capture returned non-JSON or invalid schema-versioned evidence."
+            fi
+            fallback_document="${RUNNER_TEMP}/production-runtime-fallback.json"
+            CAPTURE_FALLBACK_REASON="$fallback_reason" python3 - <<'PY' > "$fallback_document"
+          import json
+          import os
+          import sys
+
+          sys.path.insert(0, "scripts/deploy")
+          from capture_prod_runtime import unattributable_document
+
+          print(json.dumps(
+              unattributable_document(os.environ["CAPTURE_FALLBACK_REASON"]),
+              indent=2,
+              sort_keys=True,
+          ))
+          PY
+            validate_capture_document "$fallback_document" 2>> "$validation_stderr"
+            mv "$fallback_document" production-runtime.json
+          fi
+
+          final_status="$ssh_status"
+          attribution_status="$(jq -er '.attribution_status' production-runtime.json)"
+          if [ "$remote_document_valid" != "true" ] || \
+              [ "$attribution_status" != "attributable" ]; then
+            if [ "$final_status" -eq 0 ]; then
+              final_status=2
+            fi
+          fi
+          {
+            echo "ssh_exit_status=$ssh_status"
+            echo "remote_document_valid=$remote_document_valid"
+            echo "published_document=$published_document"
+            echo "attribution_status=$attribution_status"
+            echo "final_exit_status=$final_status"
+          } > "${diagnostics_dir}/capture.status"
+          exit "$final_status"
+
+      - name: Upload production runtime evidence
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: production-runtime-${{ github.run_id }}
+          name: production-runtime-${{ github.run_id }}-${{ github.run_attempt }}
           path: production-runtime.json
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload production runtime capture diagnostics
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: production-runtime-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          path: production-runtime-diagnostics/
           if-no-files-found: error
           retention-days: 30
 
@@ -572,6 +685,7 @@ jobs:
       - verify
     if: needs.release-values.outputs.should_publish == 'true'
     runs-on: ubuntu-latest
+    environment: production
     concurrency:
       group: publish-production-${{ needs.release-values.outputs.source_sha }}-${{ needs.release-values.outputs.image_tag }}
       cancel-in-progress: false
@@ -980,9 +1094,18 @@ jobs:
           BUNDLE_MANIFEST_SHA256: ${{ steps.bundle.outputs.bundle_manifest_sha256 }}
         run: |
           set -euo pipefail
-          remote_stage="/opt/moodride/.deploy/bundles/.incoming-${{ github.run_id }}"
-          scp -r "release-bundle/${BUNDLE_ID}" \
-            "${{ secrets.PROD_SSH_USER }}@${{ secrets.PROD_SSH_HOST }}:${remote_stage}"
+          remote_stage="/opt/moodride/.deploy/bundles/.incoming-${{ github.run_id }}-${{ github.run_attempt }}"
+          ssh "${{ secrets.PROD_SSH_USER }}@${{ secrets.PROD_SSH_HOST }}" "\
+            set -euo pipefail; \
+            stage='${remote_stage}'; \
+            if [ -e \"\$stage\" ] || [ -L \"\$stage\" ]; then \
+              echo 'Refusing non-fresh remote control-bundle staging path.' >&2; \
+              exit 1; \
+            fi; \
+            umask 077; \
+            mkdir \"\$stage\""
+          scp -r "release-bundle/${BUNDLE_ID}/." \
+            "${{ secrets.PROD_SSH_USER }}@${{ secrets.PROD_SSH_HOST }}:${remote_stage}/"
           ssh "${{ secrets.PROD_SSH_USER }}@${{ secrets.PROD_SSH_HOST }}" "\
             set -euo pipefail; \
             stage='${remote_stage}'; \
@@ -1203,8 +1326,13 @@ jobs:
 
   rollback-current:
     name: Roll Back Current Production Release
-    needs: release-values
-    if: needs.release-values.outputs.should_rollback == 'true'
+    needs:
+      - release-values
+      - verify
+    if: >-
+      always() &&
+      needs.release-values.outputs.should_rollback == 'true' &&
+      needs.verify.result == 'success'
     runs-on: ubuntu-latest
     environment: production
     concurrency:
@@ -1237,6 +1365,7 @@ jobs:
             manifest_sha=\"\$(sha256sum bundle.sha256 | cut -d' ' -f1)\"; \
             expected_manifest=\"\${bundle##*-}\"; \
             [ \"\$manifest_sha\" = \"\$expected_manifest\" ]; \
+            EXPECTED_GITHUB_SOURCE_URL='https://github.com/${{ github.repository }}' \
             \"\$bundle/scripts/deploy/rollback_prod.sh\" \
               --expected-current-tag '${{ needs.release-values.outputs.image_tag }}' \
               --expected-current-release-lock-sha256 '${{ inputs.release_lock_sha256 }}'"

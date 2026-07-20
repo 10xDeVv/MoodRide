@@ -640,8 +640,7 @@ export function RouteMap({
     }
 
     function handleMapError(event: MapboxRuntimeError) {
-      const initialLoadComplete = initialLoadCompleteMapRef.current === map;
-      if (!initialLoadComplete || isFatalMapboxRuntimeError(event)) {
+      if (isFatalMapboxRuntimeError(event)) {
         failCurrentMap();
       }
     }

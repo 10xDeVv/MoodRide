@@ -9,6 +9,7 @@ public record RouteJobStatusResponse(
         String status,
         UUID routeId,
         String routeUrl,
+        List<RouteOptionResponse> routeOptions,
         Instant primaryReadyAt,
         long stateRevision,
         long optionRevision,
