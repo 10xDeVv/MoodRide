@@ -35,7 +35,7 @@ import type {
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const VIBE_CONFIG: Array<{ vibe: Vibe; label: string; Icon: LucideIcon }> = [
-  { vibe: "coastal",       label: "Coastal",    Icon: Waves },
+  { vibe: "coastal",       label: "Waterside",  Icon: Waves },
   { vibe: "mountain",      label: "Mountain",   Icon: Mountain },
   { vibe: "countryside",   label: "Country",    Icon: Trees },
   { vibe: "riverside",     label: "Riverside",  Icon: Waves },

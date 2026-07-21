@@ -22,7 +22,7 @@ const ROUTE_SIGNAL_LABELS: Record<string, string> = {
 };
 
 const VIBE_LABELS: Record<string, string> = {
-  coastal: "Coastal",
+  coastal: "Waterside",
   mountain: "Mountain",
   countryside: "Country",
   riverside: "Riverside",
