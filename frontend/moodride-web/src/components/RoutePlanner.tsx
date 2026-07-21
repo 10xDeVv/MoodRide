@@ -68,10 +68,10 @@ const ROUTE_MODES: Array<{ value: RouteMode; label: string; status: string; enab
 ];
 
 const LOADING_STEPS: Array<{ id: string; label: string; Icon: LucideIcon }> = [
-  { id: "roads",     label: "Reading nearby roads",       Icon: MapIcon },
-  { id: "corridors", label: "Tracing scenic corridors",   Icon: Route },
-  { id: "time",      label: "Balancing drive time",       Icon: Clock },
-  { id: "options",   label: "Ranking route options",      Icon: Compass }
+  { id: "roads",     label: "Checking nearby roads", Icon: MapIcon },
+  { id: "corridors", label: "Matching your vibes",   Icon: Route },
+  { id: "time",      label: "Checking drive time",   Icon: Clock },
+  { id: "options",   label: "Comparing routes",      Icon: Compass }
 ];
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -386,9 +386,9 @@ function LoadingOverlay({ phase, progressStep }: { phase: Phase; progressStep: n
         </div>
 
         <div className="loading-copy">
-          <h2 className="loading-title">Mapping your scenic loop</h2>
+          <h2 className="loading-title">Finding your route</h2>
           <p className="loading-subtitle">
-            Comparing road shape, water, terrain, and your time budget.
+            Looking for roads that match your vibes and time.
           </p>
         </div>
 
