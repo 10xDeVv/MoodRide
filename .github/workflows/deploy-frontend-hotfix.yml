@@ -1,0 +1,437 @@
+name: Deploy Frontend Hotfix
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_source_sha:
+        description: "Exact candidate commit (40 lowercase hexadecimal characters)"
+        required: true
+        type: string
+      expected_current_source_sha:
+        description: "Exact OCI revision of the currently deployed frontend"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  deploy-frontend-hotfix:
+    name: Build and Deploy Frontend Hotfix
+    runs-on: ubuntu-latest
+    environment: production
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: false
+
+    steps:
+      - name: Checkout trusted control source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: control
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Checkout candidate source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.candidate_source_sha }}
+          path: candidate
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate source relationship and frontend-only diff
+        id: source
+        env:
+          CANDIDATE_SOURCE_SHA: ${{ inputs.candidate_source_sha }}
+          EXPECTED_CURRENT_SOURCE_SHA: ${{ inputs.expected_current_source_sha }}
+          CONTROL_WORKFLOW_SHA: ${{ github.sha }}
+          CONTROL_WORKFLOW_REF: ${{ github.ref }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          export LC_ALL=C
+
+          sha_pattern='^[0-9a-f]{40}$'
+          if [[ ! "$CANDIDATE_SOURCE_SHA" =~ $sha_pattern ]]; then
+            echo "candidate_source_sha must be exactly 40 lowercase hexadecimal characters." >&2
+            exit 1
+          fi
+          if [[ ! "$EXPECTED_CURRENT_SOURCE_SHA" =~ $sha_pattern ]]; then
+            echo "expected_current_source_sha must be exactly 40 lowercase hexadecimal characters." >&2
+            exit 1
+          fi
+          if [[ ! "$CONTROL_WORKFLOW_SHA" =~ $sha_pattern ]]; then
+            echo "The trusted workflow SHA is not an exact commit." >&2
+            exit 1
+          fi
+          if [ "$CONTROL_WORKFLOW_REF" != "refs/heads/main" ]; then
+            echo "Frontend hotfix deployments must be dispatched from main." >&2
+            exit 1
+          fi
+          if [ "$(git -C control rev-parse HEAD)" != "$CONTROL_WORKFLOW_SHA" ]; then
+            echo "Trusted control checkout does not match the workflow SHA." >&2
+            exit 1
+          fi
+          if [ "$(git -C candidate rev-parse HEAD)" != "$CANDIDATE_SOURCE_SHA" ]; then
+            echo "Candidate checkout does not match candidate_source_sha." >&2
+            exit 1
+          fi
+          git -C candidate cat-file -e "${EXPECTED_CURRENT_SOURCE_SHA}^{commit}"
+          git -C candidate cat-file -e "${CANDIDATE_SOURCE_SHA}^{commit}"
+          if ! git -C candidate merge-base --is-ancestor "$EXPECTED_CURRENT_SOURCE_SHA" "$CANDIDATE_SOURCE_SHA"; then
+            echo "expected_current_source_sha is not an ancestor of candidate_source_sha." >&2
+            exit 1
+          fi
+          if [ -n "$(git -C candidate rev-list --min-parents=2 "${EXPECTED_CURRENT_SOURCE_SHA}..${CANDIDATE_SOURCE_SHA}")" ]; then
+            echo "Merge commits are not allowed in a frontend hotfix candidate range." >&2
+            exit 1
+          fi
+
+          mkdir -p release
+          git -C candidate diff --name-only --no-renames -z \
+            "$EXPECTED_CURRENT_SOURCE_SHA" "$CANDIDATE_SOURCE_SHA" > release/changed-paths.zlist
+          if [ ! -s release/changed-paths.zlist ]; then
+            echo "The frontend hotfix candidate contains no changes." >&2
+            exit 1
+          fi
+
+          path_count=0
+          while IFS= read -r -d '' changed_path; do
+            path_count=$((path_count + 1))
+            case "$changed_path" in
+              frontend/moodride-web/Dockerfile|frontend/moodride-web/Dockerfile.*|\
+              frontend/moodride-web/package.json|frontend/moodride-web/package-lock.json|\
+              frontend/moodride-web/npm-shrinkwrap.json|frontend/moodride-web/next.config.*|\
+              frontend/moodride-web/scripts|frontend/moodride-web/scripts/?*|\
+              frontend/moodride-web/.github|frontend/moodride-web/.github/?*)
+                printf 'Frontend build, package, script, and workflow controls are forbidden in a hotfix: %s\n' "$changed_path" >&2
+                exit 1
+                ;;
+              frontend/moodride-web/src/?*|frontend/moodride-web/public/?*) ;;
+              *)
+                printf 'Disallowed frontend hotfix path (only src/** and public/** are permitted): %s\n' "$changed_path" >&2
+                exit 1
+                ;;
+            esac
+          done < release/changed-paths.zlist
+          if [ "$path_count" -lt 1 ]; then
+            echo "The frontend hotfix candidate contains no changed paths." >&2
+            exit 1
+          fi
+
+          git -C candidate diff-tree -r --no-commit-id --no-renames --raw -z \
+            "$EXPECTED_CURRENT_SOURCE_SHA" "$CANDIDATE_SOURCE_SHA" > release/diff-tree.zraw
+          python3 - <<'PY'
+          from hashlib import sha256
+          from pathlib import Path
+
+          paths = Path("release/changed-paths.zlist").read_bytes()
+          tree = Path("release/diff-tree.zraw").read_bytes()
+          payload = b"moodride-frontend-hotfix-diff-v1\0" + paths + b"\0diff-tree\0" + tree
+          Path("release/diff-digest.txt").write_text("sha256:" + sha256(payload).hexdigest() + "\n", encoding="ascii")
+          path_items = [p.decode("utf-8") for p in paths.split(b"\0") if p]
+          import json
+          Path("release/changed-paths.json").write_text(
+              json.dumps(path_items, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+          )
+          PY
+
+          diff_digest="$(cat release/diff-digest.txt)"
+          echo "candidate_source_sha=$CANDIDATE_SOURCE_SHA" >> "$GITHUB_OUTPUT"
+          echo "expected_current_source_sha=$EXPECTED_CURRENT_SOURCE_SHA" >> "$GITHUB_OUTPUT"
+          echo "diff_digest=$diff_digest" >> "$GITHUB_OUTPUT"
+          echo "changed_path_count=$path_count" >> "$GITHUB_OUTPUT"
+
+      - name: Run focused frontend hotfix contract checker
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 control/scripts/deploy/check_frontend_hotfix_contract.py \
+            --workflow control/.github/workflows/deploy-frontend-hotfix.yml \
+            --script control/scripts/deploy/deploy_frontend_hotfix.sh
+
+      - name: Resolve production image values
+        id: image
+        env:
+          CONFIGURED_GHCR_NAMESPACE: ${{ vars.GHCR_NAMESPACE }}
+          REPOSITORY_OWNER: ${{ github.repository_owner }}
+          REPOSITORY_NAME: ${{ github.repository }}
+          CANDIDATE_SOURCE_SHA: ${{ steps.source.outputs.candidate_source_sha }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          namespace="$CONFIGURED_GHCR_NAMESPACE"
+          if [ -z "$namespace" ]; then
+            namespace="$REPOSITORY_OWNER"
+          fi
+          namespace="$(printf '%s' "$namespace" | tr '[:upper:]' '[:lower:]')"
+          if [[ ! "$namespace" =~ ^[a-z0-9]+([._-][a-z0-9]+)*$ ]]; then
+            echo "GHCR namespace is invalid." >&2
+            exit 1
+          fi
+          if [[ ! "$RUN_ID" =~ ^[0-9]+$ ]] || [[ ! "$RUN_ATTEMPT" =~ ^[0-9]+$ ]]; then
+            echo "GitHub run identity is invalid." >&2
+            exit 1
+          fi
+          image_repository="ghcr.io/${namespace}/moodride-frontend"
+          image_tag="${image_repository}:frontend-hotfix-${CANDIDATE_SOURCE_SHA}-${RUN_ID}-${RUN_ATTEMPT}"
+          repository_source="https://github.com/${REPOSITORY_NAME}"
+          echo "repository=$image_repository" >> "$GITHUB_OUTPUT"
+          echo "tag=$image_tag" >> "$GITHUB_OUTPUT"
+          echo "repository_source=$repository_source" >> "$GITHUB_OUTPUT"
+
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ secrets.GHCR_USERNAME != '' && secrets.GHCR_USERNAME || github.repository_owner }}
+          password: ${{ secrets.GHCR_PAT != '' && secrets.GHCR_PAT || secrets.GITHUB_TOKEN }}
+
+      - name: Build and push the single frontend image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: candidate/frontend/moodride-web
+          file: candidate/frontend/moodride-web/Dockerfile
+          push: true
+          platforms: linux/amd64
+          labels: |
+            org.opencontainers.image.source=${{ steps.image.outputs.repository_source }}
+            org.opencontainers.image.revision=${{ steps.source.outputs.candidate_source_sha }}
+          build-args: |
+            NEXT_PUBLIC_API_BASE_URL=${{ vars.NEXT_PUBLIC_API_BASE_URL != '' && vars.NEXT_PUBLIC_API_BASE_URL || 'https://usewayward.app' }}
+            NEXT_PUBLIC_WS_BASE_URL=${{ vars.NEXT_PUBLIC_WS_BASE_URL != '' && vars.NEXT_PUBLIC_WS_BASE_URL || 'https://usewayward.app/ws' }}
+            NEXT_PUBLIC_MAPBOX_ACCESS_TOKEN=${{ secrets.NEXT_PUBLIC_MAPBOX_ACCESS_TOKEN }}
+          tags: ${{ steps.image.outputs.tag }}
+
+      - name: Create checksummed frontend hotfix manifest
+        id: manifest
+        env:
+          CONTROL_WORKFLOW_SHA: ${{ github.sha }}
+          REPOSITORY_NAME: ${{ github.repository }}
+          EXPECTED_CURRENT_SOURCE_SHA: ${{ steps.source.outputs.expected_current_source_sha }}
+          CANDIDATE_SOURCE_SHA: ${{ steps.source.outputs.candidate_source_sha }}
+          DIFF_DIGEST: ${{ steps.source.outputs.diff_digest }}
+          CHANGED_PATH_COUNT: ${{ steps.source.outputs.changed_path_count }}
+          IMAGE_TAG: ${{ steps.image.outputs.tag }}
+          IMAGE_REPOSITORY: ${{ steps.image.outputs.repository }}
+          IMAGE_INDEX_DIGEST: ${{ steps.build.outputs.digest }}
+          REPOSITORY_SOURCE: ${{ steps.image.outputs.repository_source }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          script_sha256="$(sha256sum control/scripts/deploy/deploy_frontend_hotfix.sh | cut -d' ' -f1)"
+          if [[ ! "$script_sha256" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "Trusted deployment script checksum is invalid." >&2
+            exit 1
+          fi
+          if [[ ! "$IMAGE_INDEX_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "Build did not return an immutable image digest." >&2
+            exit 1
+          fi
+          image_ref="${IMAGE_REPOSITORY}@${IMAGE_INDEX_DIGEST}"
+          control_source_url="https://github.com/${REPOSITORY_NAME}/blob/${CONTROL_WORKFLOW_SHA}/.github/workflows/deploy-frontend-hotfix.yml"
+          export SCRIPT_SHA256="$script_sha256" IMAGE_REF="$image_ref" CONTROL_SOURCE_URL="$control_source_url"
+          python3 - <<'PY'
+          import json
+          import os
+          from datetime import datetime, timezone
+          from pathlib import Path
+
+          manifest = {
+              "schema_version": "moodride.frontend-hotfix-manifest/v1",
+              "control": {
+                  "workflow_sha": os.environ["CONTROL_WORKFLOW_SHA"],
+                  "workflow_source_url": os.environ["CONTROL_SOURCE_URL"],
+                  "deployment_script_sha256": os.environ["SCRIPT_SHA256"],
+              },
+              "source": {
+                  "expected_current_sha": os.environ["EXPECTED_CURRENT_SOURCE_SHA"],
+                  "candidate_sha": os.environ["CANDIDATE_SOURCE_SHA"],
+                  "repository_source": os.environ["REPOSITORY_SOURCE"],
+                  "diff_digest": os.environ["DIFF_DIGEST"],
+                  "changed_path_count": int(os.environ["CHANGED_PATH_COUNT"]),
+              },
+              "image": {
+                  "repository": os.environ["IMAGE_REPOSITORY"],
+                  "tag": os.environ["IMAGE_TAG"],
+                  "ref": os.environ["IMAGE_REF"],
+                  "index_digest": os.environ["IMAGE_INDEX_DIGEST"],
+              },
+              "run": {
+                  "id": os.environ["RUN_ID"],
+                  "attempt": os.environ["RUN_ATTEMPT"],
+              },
+              "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+          }
+          path = Path("release/frontend-hotfix-manifest.json")
+          path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+          PY
+          manifest_sha256="$(sha256sum release/frontend-hotfix-manifest.json | cut -d' ' -f1)"
+          printf '%s  %s\n' "$manifest_sha256" frontend-hotfix-manifest.json > release/frontend-hotfix-manifest.sha256
+          script_name="deploy_frontend_hotfix.${script_sha256}.sh"
+          install -m 700 control/scripts/deploy/deploy_frontend_hotfix.sh "release/${script_name}"
+          echo "sha256=$manifest_sha256" >> "$GITHUB_OUTPUT"
+          echo "script_sha256=$script_sha256" >> "$GITHUB_OUTPUT"
+          echo "script_name=$script_name" >> "$GITHUB_OUTPUT"
+          echo "image_ref=$image_ref" >> "$GITHUB_OUTPUT"
+
+      - name: Upload frontend hotfix manifest artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-hotfix-manifest-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            release/frontend-hotfix-manifest.json
+            release/frontend-hotfix-manifest.sha256
+            release/changed-paths.json
+            release/diff-digest.txt
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Configure production SSH
+        env:
+          PROD_SSH_PRIVATE_KEY: ${{ secrets.PROD_SSH_PRIVATE_KEY }}
+          PROD_SSH_HOST: ${{ secrets.PROD_SSH_HOST }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$PROD_SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H "$PROD_SSH_HOST" >> ~/.ssh/known_hosts
+
+      - name: Log in to GHCR on production
+        env:
+          GHCR_USER: ${{ secrets.GHCR_USERNAME != '' && secrets.GHCR_USERNAME || github.repository_owner }}
+          GHCR_TOKEN: ${{ secrets.GHCR_PAT != '' && secrets.GHCR_PAT || secrets.GITHUB_TOKEN }}
+          PROD_SSH_USER: ${{ secrets.PROD_SSH_USER }}
+          PROD_SSH_HOST: ${{ secrets.PROD_SSH_HOST }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '%s' "$GHCR_TOKEN" | ssh "${PROD_SSH_USER}@${PROD_SSH_HOST}" \
+            docker login ghcr.io --username "$GHCR_USER" --password-stdin
+
+      - name: Create unique immutable production stage
+        id: stage
+        env:
+          PROD_SSH_USER: ${{ secrets.PROD_SSH_USER }}
+          PROD_SSH_HOST: ${{ secrets.PROD_SSH_HOST }}
+          MANIFEST_SHA256: ${{ steps.manifest.outputs.sha256 }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          remote_stage="/opt/moodride/.deploy/frontend-hotfix-staging/${RUN_ID}-${RUN_ATTEMPT}-${MANIFEST_SHA256}"
+          ssh "${PROD_SSH_USER}@${PROD_SSH_HOST}" \
+            "set -euo pipefail; umask 077; if [ -e '$remote_stage' ] || [ -L '$remote_stage' ]; then echo 'Refusing non-fresh frontend hotfix stage.' >&2; exit 1; fi; install -d -m 700 '$remote_stage'"
+          echo "path=$remote_stage" >> "$GITHUB_OUTPUT"
+
+      - name: Upload checksummed trusted deployment bytes
+        env:
+          PROD_SSH_USER: ${{ secrets.PROD_SSH_USER }}
+          PROD_SSH_HOST: ${{ secrets.PROD_SSH_HOST }}
+          REMOTE_STAGE: ${{ steps.stage.outputs.path }}
+          SCRIPT_NAME: ${{ steps.manifest.outputs.script_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          target="${PROD_SSH_USER}@${PROD_SSH_HOST}"
+          scp release/frontend-hotfix-manifest.json "$target:${REMOTE_STAGE}/frontend-hotfix-manifest.json"
+          scp release/frontend-hotfix-manifest.sha256 "$target:${REMOTE_STAGE}/frontend-hotfix-manifest.sha256"
+          scp "release/${SCRIPT_NAME}" "$target:${REMOTE_STAGE}/${SCRIPT_NAME}"
+
+      - name: Verify and execute immutable frontend-only deployment
+        id: deploy
+        env:
+          PROD_SSH_USER: ${{ secrets.PROD_SSH_USER }}
+          PROD_SSH_HOST: ${{ secrets.PROD_SSH_HOST }}
+          REMOTE_STAGE: ${{ steps.stage.outputs.path }}
+          MANIFEST_SHA256: ${{ steps.manifest.outputs.sha256 }}
+          SCRIPT_SHA256: ${{ steps.manifest.outputs.script_sha256 }}
+          SCRIPT_NAME: ${{ steps.manifest.outputs.script_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          target="${PROD_SSH_USER}@${PROD_SSH_HOST}"
+          set +e
+          ssh "$target" "set -euo pipefail; umask 077; \
+            exec 3<'$REMOTE_STAGE/frontend-hotfix-manifest.json'; \
+            exec 4<'$REMOTE_STAGE/frontend-hotfix-manifest.sha256'; \
+            exec 5<'$REMOTE_STAGE/$SCRIPT_NAME'; \
+            actual_manifest_sha=\$(sha256sum /proc/self/fd/3); actual_manifest_sha=\${actual_manifest_sha%% *}; \
+            actual_script_sha=\$(sha256sum /proc/self/fd/5); actual_script_sha=\${actual_script_sha%% *}; \
+            [ \"\$actual_manifest_sha\" = '$MANIFEST_SHA256' ]; \
+            [ \"\$actual_script_sha\" = '$SCRIPT_SHA256' ]; \
+            exec bash /proc/self/fd/5 \
+              --manifest /proc/self/fd/3 \
+              --manifest-checksum /proc/self/fd/4 \
+              --script-sha256 '$SCRIPT_SHA256' \
+              --evidence '$REMOTE_STAGE/deployment-evidence.json' \
+              --diagnostics '$REMOTE_STAGE/deployment-diagnostics.log'"
+          deploy_exit_code=$?
+          set -e
+          echo "exit_code=$deploy_exit_code" >> "$GITHUB_OUTPUT"
+
+      - name: Collect frontend hotfix deployment evidence
+        if: always()
+        env:
+          PROD_SSH_USER: ${{ secrets.PROD_SSH_USER }}
+          PROD_SSH_HOST: ${{ secrets.PROD_SSH_HOST }}
+          REMOTE_STAGE: ${{ steps.stage.outputs.path }}
+          DEPLOY_EXIT_CODE: ${{ steps.deploy.outputs.exit_code }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p deployment-result
+          target="${PROD_SSH_USER}@${PROD_SSH_HOST}"
+          if [[ "$REMOTE_STAGE" =~ ^/opt/moodride/\\.deploy/frontend-hotfix-staging/[0-9]+-[0-9]+-[0-9a-f]{64}$ ]]; then
+            if ! scp "$target:${REMOTE_STAGE}/deployment-evidence.json" deployment-result/deployment-evidence.json; then
+              rm -f deployment-result/deployment-evidence.json
+            fi
+            if ! scp "$target:${REMOTE_STAGE}/deployment-diagnostics.log" deployment-result/deployment-diagnostics.log; then
+              rm -f deployment-result/deployment-diagnostics.log
+            fi
+          fi
+          if [ ! -f deployment-result/deployment-evidence.json ]; then
+            printf '{"schema_version":"moodride.frontend-hotfix-workflow-diagnostic/v1","error":"remote evidence unavailable","deploy_exit_code":"%s"}\n' \
+              "${DEPLOY_EXIT_CODE:-unavailable}" > deployment-result/deployment-evidence.json
+          fi
+          if [ ! -f deployment-result/deployment-diagnostics.log ]; then
+            printf 'Remote deployment diagnostics were unavailable. deploy_exit_code=%s\n' \
+              "${DEPLOY_EXIT_CODE:-unavailable}" > deployment-result/deployment-diagnostics.log
+          fi
+
+      - name: Upload frontend hotfix deployment evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-hotfix-deployment-${{ github.run_id }}-${{ github.run_attempt }}
+          path: deployment-result/
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Enforce frontend hotfix deployment result
+        if: always()
+        env:
+          DEPLOY_EXIT_CODE: ${{ steps.deploy.outputs.exit_code }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "$DEPLOY_EXIT_CODE" =~ ^[0-9]+$ ]]; then
+            echo "The deployment did not produce a valid exit status." >&2
+            exit 1
+          fi
+          exit "$DEPLOY_EXIT_CODE"
