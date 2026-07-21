@@ -334,21 +334,18 @@ def check_workflow(path: pathlib.Path) -> None:
 
 def check_shell(path: pathlib.Path) -> None:
     shell = path.read_text(encoding="utf-8")
-    resolved = path.resolve()
-    try:
-        shell_argument = resolved.relative_to(ROOT).as_posix()
-        shell_cwd = ROOT
-    except ValueError:
-        shell_argument = resolved.as_posix()
-        shell_cwd = None
-    syntax = subprocess.run(
-        ["bash", "-n", shell_argument],
-        cwd=shell_cwd,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    require(syntax.returncode == 0, f"Deployment script failed bash syntax parsing:\n{syntax.stderr}")
+    if os.name != "nt":
+        with tempfile.TemporaryDirectory(prefix="frontend-hotfix-shell-parse-") as temporary:
+            normalized_script = pathlib.Path(temporary) / "deploy_frontend_hotfix.sh"
+            normalized_script.write_text(shell.replace("\r\n", "\n"), encoding="utf-8", newline="\n")
+            syntax = subprocess.run(
+                ["bash", "-n", "deploy_frontend_hotfix.sh"],
+                cwd=temporary,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+        require(syntax.returncode == 0, f"Deployment script failed bash syntax parsing:\n{syntax.stderr}")
     for marker in (
         "set -Eeuo pipefail",
         "umask 077",
@@ -663,7 +660,9 @@ def run_fixture(script: pathlib.Path, mode: str) -> tuple[subprocess.CompletedPr
     candidate_digest = "b" * 64
     prior_ref = f"{repository}@sha256:{prior_digest}"
     candidate_ref = f"{repository}@sha256:{candidate_digest}"
-    script_sha = hashlib.sha256(script.read_bytes()).hexdigest()
+    fixture_script = root / "deploy_frontend_hotfix.sh"
+    fixture_script.write_bytes(script.read_bytes().replace(b"\r\n", b"\n"))
+    script_sha = hashlib.sha256(fixture_script.read_bytes()).hexdigest()
     manifest_path = manifest_for_fixture(stage, script_sha, expected_sha, candidate_sha, source, repository, candidate_digest)
     state = {
         "mode": mode,
@@ -710,7 +709,7 @@ def run_fixture(script: pathlib.Path, mode: str) -> tuple[subprocess.CompletedPr
     )
     result = subprocess.run(
         [
-            "bash", str(script),
+            "bash", str(fixture_script),
             "--manifest", str(manifest_path),
             "--manifest-checksum", str(stage / "frontend-hotfix-manifest.sha256"),
             "--script-sha256", script_sha,
@@ -790,13 +789,15 @@ def main() -> int:
     parser.add_argument("--script", type=pathlib.Path, default=DEFAULT_SCRIPT)
     parser.add_argument("--skip-fixtures", action="store_true", help="Run static parsing only (workflow self-check use)")
     arguments = parser.parse_args()
-    require(arguments.workflow.is_file(), f"Workflow not found: {arguments.workflow}")
-    require(arguments.script.is_file(), f"Deployment script not found: {arguments.script}")
+    workflow_path = arguments.workflow.resolve()
+    script_path = arguments.script.resolve()
+    require(workflow_path.is_file(), f"Workflow not found: {workflow_path}")
+    require(script_path.is_file(), f"Deployment script not found: {script_path}")
     require(shutil.which("bash") is not None, "bash is required for shell parsing and fixtures")
-    check_workflow(arguments.workflow)
-    check_shell(arguments.script)
+    check_workflow(workflow_path)
+    check_shell(script_path)
     if not arguments.skip_fixtures and os.name != "nt":
-        run_behavior_fixtures(arguments.script)
+        run_behavior_fixtures(script_path)
     print("Frontend hotfix contract checks passed.")
     return 0
 
