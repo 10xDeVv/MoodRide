@@ -330,6 +330,11 @@ def check_workflow(path: pathlib.Path) -> None:
     enforce = step_by_name(job, "Enforce frontend hotfix deployment result").get("run", "")
     require('exit "$DEPLOY_EXIT_CODE"' in enforce, "Captured deployment failure must be re-emitted")
     require("frontend-hotfix-staging/${RUN_ID}-${RUN_ATTEMPT}-${MANIFEST_SHA256}" in workflow_text, "Remote stage must be unique and immutable")
+    require(
+        r"^/opt/moodride/\.deploy/frontend-hotfix-staging/" in workflow_text
+        and r"^/opt/moodride/\\.deploy/frontend-hotfix-staging/" not in workflow_text,
+        "Remote deployment evidence stage regex must match the literal .deploy directory",
+    )
 
 
 def check_shell(path: pathlib.Path) -> None:

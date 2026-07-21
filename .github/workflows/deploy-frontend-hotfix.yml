@@ -397,7 +397,7 @@ jobs:
           set -euo pipefail
           mkdir -p deployment-result
           target="${PROD_SSH_USER}@${PROD_SSH_HOST}"
-          if [[ "$REMOTE_STAGE" =~ ^/opt/moodride/\\.deploy/frontend-hotfix-staging/[0-9]+-[0-9]+-[0-9a-f]{64}$ ]]; then
+          if [[ "$REMOTE_STAGE" =~ ^/opt/moodride/\.deploy/frontend-hotfix-staging/[0-9]+-[0-9]+-[0-9a-f]{64}$ ]]; then
             if ! scp "$target:${REMOTE_STAGE}/deployment-evidence.json" deployment-result/deployment-evidence.json; then
               rm -f deployment-result/deployment-evidence.json
             fi
